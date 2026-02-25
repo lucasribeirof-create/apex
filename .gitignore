@@ -19,6 +19,7 @@ data/ai_settings.json
 frontend/node_modules/
 frontend/dist/
 frontend/.env.local
+frontend/vite.config.ts.timestamp*
 
 # Logs
 *.log
