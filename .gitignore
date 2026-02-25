@@ -1,0 +1,30 @@
+# Ambiente virtual Python
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/**/*.pyc
+backend/**/*.pyo
+
+# Banco de dados local
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Configurações sensíveis (chaves de API)
+backend/.env
+data/ai_settings.json
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+
+# Logs
+*.log
+backend.log
+
+# Sistema
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,23 @@
+# ─── Core ─────────────────────────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.9.0
+
+# ─── Banco de dados (SQLite — sem PostgreSQL nesta fase) ──────────────────────
+sqlalchemy>=2.0.0
+
+# ─── Tarefas agendadas (APScheduler — sem Celery/Redis nesta fase) ────────────
+apscheduler>=3.10.0
+
+# ─── IA ───────────────────────────────────────────────────────────────────────
+anthropic>=0.40.0
+openai>=1.30.0
+google-genai>=1.0.0
+
+# ─── Dados de mercado ─────────────────────────────────────────────────────────
+httpx>=0.27.0
+yfinance>=0.2.50
+
+# ─── Utilitários ──────────────────────────────────────────────────────────────
+numpy>=1.26.0
+python-dotenv>=1.0.0

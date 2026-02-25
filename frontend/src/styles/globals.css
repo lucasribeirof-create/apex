@@ -1,0 +1,161 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-primary: #0a0e17;
+  --bg-secondary: #0f1729;
+  --bg-card: rgba(15, 23, 42, 0.6);
+  --border: #1e293b;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --green-primary: #00E676;
+  --green-secondary: #00BFA5;
+  --green-light: #1DE9B6;
+  --yellow: #FFD740;
+  --red: #FF5252;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  min-height: 100vh;
+  background-color: #0a0e17;
+  color: #f1f5f9;
+  font-family: 'DM Sans', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar customizada */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0a0e17; }
+::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #2d3f5c; }
+
+/* Seleção de texto */
+::selection { background: rgba(0, 230, 118, 0.2); color: #f1f5f9; }
+
+/* Número com fonte mono */
+.font-data { font-family: 'Space Mono', monospace; }
+
+/* Animação de typewriter */
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.cursor-blink::after {
+  content: '▋';
+  color: #00E676;
+  animation: cursor-blink 1s ease-in-out infinite;
+  margin-left: 2px;
+}
+
+/* Card base */
+.apex-card {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  backdrop-filter: blur(10px);
+  transition: all 0.2s ease;
+}
+.apex-card:hover {
+  border-color: rgba(0, 230, 118, 0.2);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(0, 230, 118, 0.05);
+}
+
+/* Gradiente de texto verde */
+.text-green-gradient {
+  background: linear-gradient(135deg, #00E676, #00BFA5);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Botão primário */
+.btn-primary {
+  background: linear-gradient(135deg, #00E676, #00BFA5);
+  color: #0a0e17;
+  font-weight: 600;
+  padding: 12px 28px;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 15px;
+  transition: all 0.2s ease;
+  position: relative;
+  overflow: hidden;
+}
+.btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(0, 230, 118, 0.35);
+}
+.btn-primary:active { transform: translateY(0); }
+
+/* Botão secundário */
+.btn-secondary {
+  background: transparent;
+  color: #94a3b8;
+  font-weight: 500;
+  padding: 12px 28px;
+  border-radius: 8px;
+  border: 1px solid #1e293b;
+  cursor: pointer;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 15px;
+  transition: all 0.2s ease;
+}
+.btn-secondary:hover {
+  border-color: #00E676;
+  color: #00E676;
+}
+
+/* Badge de regime */
+.badge-bull { background: rgba(0, 230, 118, 0.1); color: #00E676; border: 1px solid rgba(0, 230, 118, 0.2); }
+.badge-misto { background: rgba(255, 215, 64, 0.1); color: #FFD740; border: 1px solid rgba(255, 215, 64, 0.2); }
+.badge-bear { background: rgba(255, 82, 82, 0.1); color: #FF5252; border: 1px solid rgba(255, 82, 82, 0.2); }
+
+/* Input apex */
+.apex-input {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  color: #f1f5f9;
+  padding: 12px 16px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 15px;
+  width: 100%;
+  transition: border-color 0.2s ease;
+  outline: none;
+}
+.apex-input:focus { border-color: #00E676; box-shadow: 0 0 0 2px rgba(0, 230, 118, 0.1); }
+.apex-input::placeholder { color: #64748b; }
+
+/* Progress bar / Barra de alocação */
+.allocation-bar {
+  height: 6px;
+  background: #1e293b;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.allocation-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #00E676, #00BFA5);
+  transition: width 0.8s ease;
+}
+
+/* Separador */
+.apex-divider { border: none; border-top: 1px solid #1e293b; }
+
+/* Positive / Negative */
+.text-positive { color: #00E676; }
+.text-negative { color: #FF5252; }
+.text-neutral { color: #FFD740; }
