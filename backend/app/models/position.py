@@ -15,7 +15,14 @@ class Position(Base):
     ticker = Column(String(20), nullable=False, index=True)
     nome = Column(String(100), nullable=True)
     tipo = Column(String(20), nullable=False)  # ACAO | FII | ETF | BDR | RF | OPCAO | CAIXA
-    modulo = Column(String(20), nullable=True)  # momentum | wheel | etfs | fiis | renda_fixa | alpha | caixa
+    modulo = Column(String(20), nullable=True)  # momentum | wheel | etfs | fiis | renda_fixa | alpha | teses | caixa
+
+    # Módulo Teses
+    tese = Column(Text, nullable=True)                    # tese de investimento escrita pelo usuário
+    mercado = Column(String(10), nullable=True)           # B3 | BDR | NYSE | NASDAQ | AMEX
+    moeda = Column(String(5), default="BRL")              # BRL | USD
+    preco_medio_usd = Column(Float, nullable=True)        # preço médio em USD (para posições USD)
+    valor_investido_usd = Column(Float, nullable=True)    # valor investido em USD
 
     # Posição
     quantidade = Column(Float, default=0.0)

@@ -4,6 +4,55 @@ import { Send, MessageSquare, Wand2, X, Check, AlertTriangle } from 'lucide-reac
 import { useStore } from '@/store/useStore'
 import api from '@/services/api'
 
+// ─── Markdown renderer ───────────────────────────────────────────────────────
+
+function renderMarkdown(text: string): React.ReactNode[] {
+  const lines = text.split('\n')
+  const nodes: React.ReactNode[] = []
+  let key = 0
+
+  const inlineFormat = (line: string): React.ReactNode => {
+    const parts = line.split(/(\*\*.*?\*\*)/g)
+    return <>{parts.map((part, i) =>
+      part.startsWith('**') && part.endsWith('**')
+        ? <strong key={i} style={{ color: '#f1f5f9', fontWeight: 600 }}>{part.slice(2, -2)}</strong>
+        : <span key={i}>{part}</span>
+    )}</>
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (!line.trim()) {
+      nodes.push(<div key={key++} className="h-2" />)
+    } else if (/^#{1,3} /.test(line)) {
+      const level = (line.match(/^(#+) /) || ['', '#'])[1].length
+      const content = line.replace(/^#+\s/, '')
+      const sizes = ['text-base', 'text-sm', 'text-sm']
+      nodes.push(
+        <p key={key++} className={`font-semibold mt-3 mb-1 ${sizes[Math.min(level - 1, 2)]}`}
+          style={{ color: '#00E676' }}>
+          {inlineFormat(content)}
+        </p>
+      )
+    } else if (/^[-•*] /.test(line)) {
+      nodes.push(
+        <div key={key++} className="flex gap-2 my-0.5">
+          <span style={{ color: '#00E676', flexShrink: 0 }}>•</span>
+          <span>{inlineFormat(line.replace(/^[-•*] /, ''))}</span>
+        </div>
+      )
+    } else {
+      nodes.push(<p key={key++} className="leading-relaxed">{inlineFormat(line)}</p>)
+    }
+  }
+  return nodes
+}
+
+function MessageText({ content }: { content: string }) {
+  return <div className="text-sm space-y-0.5">{renderMarkdown(content)}</div>
+}
+
+
 // â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface RegularMessage {
@@ -52,7 +101,7 @@ function ProposalCard({
   const MODULE_PT: Record<string, string> = {
     etfs: 'ETFs', fiis: 'FIIs', renda_fixa: 'Renda Fixa',
     momentum: 'Momentum', wheel: 'Wheel', alpha: 'Alpha',
-    dividendos: 'Dividendos', caixa: 'Caixa',
+    dividendos: 'Dividendos', teses: 'Teses', caixa: 'Caixa',
   }
 
   return (
@@ -62,9 +111,9 @@ function ProposalCard({
       </div>
       <div className="flex-1 space-y-3">
         {/* Analysis text */}
-        <div className="px-4 py-3 rounded-xl text-sm leading-relaxed whitespace-pre-wrap"
+        <div className="px-4 py-3 rounded-xl"
           style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b', color: '#f1f5f9' }}>
-          {msg.analise}
+          <MessageText content={msg.analise} />
         </div>
 
         {/* Proposal card */}
@@ -261,6 +310,52 @@ export default function ChatPage() {
 
   const handleSend = () => (proposalMode ? sendProposal() : sendMessage())
 
+  // ─── Dynamic suggestions ─────────────────────────────────────────────────
+  const [suggestions, setSuggestions] = useState<string[]>([
+    'Como est\u00e1 meu portf\u00f3lio hoje?',
+    'Qual a sua leitura de mercado agora?',
+    'O que voc\u00ea mudaria no meu portf\u00f3lio?',
+  ])
+
+  useEffect(() => {
+    const buildSuggestions = async () => {
+      try {
+        const [posRes, tesRes] = await Promise.allSettled([
+          api.get('/portfolio/posicoes'),
+          api.get('/teses'),
+        ])
+        const posicoes = posRes.status === 'fulfilled' ? posRes.value.data : []
+        const teses = tesRes.status === 'fulfilled' ? tesRes.value.data : []
+
+        const sugs: string[] = []
+
+        // Sugest\u00f5es baseadas nas teses cadastradas
+        if (teses.length > 0) {
+          const t = teses[0]
+          sugs.push(`Analise minha tese em ${t.ticker} \u2014 ainda faz sentido?`)
+        }
+        if (teses.length > 1) {
+          sugs.push(`Compare as teses de ${teses[0].ticker} e ${teses[1].ticker}`)
+        }
+
+        // Sugest\u00f5es baseadas nos m\u00f3dulos ativos
+        const modulos = [...new Set(posicoes.map((p: any) => p.modulo).filter(Boolean))]
+        if (modulos.includes('momentum')) sugs.push('Como est\u00e3o minhas posi\u00e7\u00f5es de momentum?')
+        if (modulos.includes('fiis')) sugs.push('Os FIIs est\u00e3o sofrendo com os juros?')
+        if (modulos.includes('alpha')) sugs.push('Alguma posi\u00e7\u00e3o Alpha em risco hoje?')
+
+        // Sempre inclui esta
+        sugs.push('Como est\u00e1 meu portf\u00f3lio hoje?')
+        sugs.push('O que voc\u00ea mudaria no meu portf\u00f3lio agora?')
+
+        setSuggestions(sugs.slice(0, 4))
+      } catch {
+        // mant\u00e9m sugest\u00f5es padr\u00e3o
+      }
+    }
+    buildSuggestions()
+  }, [])
+
   return (
     <div className="flex flex-col h-screen p-8 max-w-3xl mx-auto">
       <div className="flex items-center gap-2 mb-6 flex-shrink-0">
@@ -284,11 +379,7 @@ export default function ChatPage() {
               Pergunte qualquer coisa sobre seu portfÃ³lio, peÃ§a anÃ¡lise de ativos, discuta estratÃ©gias.
             </p>
             <div className="grid grid-cols-1 gap-2 mt-5 text-left">
-              {[
-                'Como estÃ¡ meu portfÃ³lio hoje?',
-                'Analise PETR4 para mim',
-                'Vale a pena comprar BOVA11 agora?',
-              ].map((s) => (
+              {suggestions.map((s) => (
                 <button
                   key={s}
                   onClick={() => setInput(s)}
@@ -330,14 +421,16 @@ export default function ChatPage() {
                   </div>
                 )}
                 <div
-                  className="max-w-[85%] px-4 py-3 rounded-xl text-sm leading-relaxed whitespace-pre-wrap"
+                  className="max-w-[85%] px-4 py-3 rounded-xl text-sm leading-relaxed"
                   style={{
                     background: msg.role === 'user' ? 'rgba(0,230,118,0.08)' : 'rgba(15,23,42,0.6)',
                     border: msg.role === 'user' ? '1px solid rgba(0,230,118,0.2)' : '1px solid #1e293b',
                     color: '#f1f5f9',
                   }}
                 >
-                  {msg.content}
+                  {msg.role === 'user'
+                    ? <span className="whitespace-pre-wrap">{msg.content}</span>
+                    : <MessageText content={msg.content} />}
                 </div>
               </motion.div>
             )
@@ -352,7 +445,7 @@ export default function ChatPage() {
             <div className="max-w-[85%] px-4 py-3 rounded-xl text-sm leading-relaxed"
               style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b', color: '#f1f5f9' }}>
               {streamingText ? (
-                <span className="whitespace-pre-wrap cursor-blink">{streamingText}</span>
+                <MessageText content={streamingText} />
               ) : (
                 <div className="flex gap-1">
                   {[0, 1, 2].map((j) => (

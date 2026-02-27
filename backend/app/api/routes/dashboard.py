@@ -1,5 +1,6 @@
 """Rota do Dashboard — patrimônio, alocação, performance."""
 from typing import Optional
+from datetime import datetime, date
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_user_id
@@ -20,6 +21,17 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
     portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    # Auto-save patrimônio de referência (ontem / início do mês)
+    hoje = date.today()
+    ultimo_acesso = portfolio.updated_at.date() if portfolio.updated_at else None
+    if ultimo_acesso and ultimo_acesso < hoje:
+        # Novo dia — salva ontem com o patrimônio total registrado
+        portfolio.patrimonio_ontem = portfolio.patrimonio_total or 0.0
+        # Novo mês — reseta referência mensal
+        if ultimo_acesso.month != hoje.month or ultimo_acesso.year != hoje.year:
+            portfolio.patrimonio_mes_inicio = portfolio.patrimonio_total or 0.0
+        db.commit()
 
     # Buscar posições ativas
     posicoes = db.query(Position).filter(
@@ -67,6 +79,8 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
         "momentum": portfolio.alvo_momentum,
         "wheel": portfolio.alvo_wheel,
         "alpha": portfolio.alvo_alpha,
+        "dividendos": getattr(portfolio, "alvo_dividendos", 0.0) or 0.0,
+        "teses": getattr(portfolio, "alvo_teses", 0.0) or 0.0,
         "caixa": portfolio.alvo_caixa,
     }
 
@@ -81,6 +95,9 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
             "var_dia_pct": round(
                 (patrimonio_atual / portfolio.patrimonio_ontem - 1) * 100, 2
             ) if portfolio.patrimonio_ontem else 0,
+            "var_mes_pct": round(
+                (patrimonio_atual / portfolio.patrimonio_mes_inicio - 1) * 100, 2
+            ) if portfolio.patrimonio_mes_inicio else 0,
             "inicio": portfolio.patrimonio_inicio,
             "total_pct": round(
                 (patrimonio_atual / portfolio.patrimonio_inicio - 1) * 100, 2
@@ -98,7 +115,7 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
 
 
 def _calcular_alocacao_atual(posicoes: list[dict], patrimonio: float) -> dict:
-    modulos = {"etfs": 0, "fiis": 0, "renda_fixa": 0, "momentum": 0, "wheel": 0, "alpha": 0, "caixa": 0}
+    modulos = {"etfs": 0, "fiis": 0, "renda_fixa": 0, "momentum": 0, "wheel": 0, "alpha": 0, "dividendos": 0, "teses": 0, "caixa": 0}
     for p in posicoes:
         modulo = p.get("modulo", "caixa")
         if modulo in modulos and patrimonio > 0:

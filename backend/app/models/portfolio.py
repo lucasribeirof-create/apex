@@ -26,6 +26,7 @@ class Portfolio(Base):
     alvo_wheel = Column(Float, default=0.0)
     alvo_alpha = Column(Float, default=0.0)
     alvo_dividendos = Column(Float, default=0.0)   # módulo Dividendos (ações pagadoras)
+    alvo_teses = Column(Float, default=0.0)        # módulo Teses (buy & hold por convicção)
     alvo_caixa = Column(Float, default=0.0)
 
     # Regime de mercado atual

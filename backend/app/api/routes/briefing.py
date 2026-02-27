@@ -5,13 +5,12 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_user_id
 from app.models import User, Portfolio, Briefing
 from app.tasks import gerar_briefing_portfolio
-
 router = APIRouter(prefix="/briefing", tags=["briefing"])
 
 
 @router.get("/hoje")
-async def get_briefing_hoje(user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
-    """Retorna o briefing do dia. Se não existir, gera na hora."""
+async def get_briefing_hoje(force: bool = False, user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Retorna o briefing do dia. Se não existir (ou force=True), gera na hora."""
     user = (db.query(User).filter(User.id == user_id).first() if user_id
             else db.query(User).first())
     if not user or not user.onboarding_completo:
@@ -24,17 +23,24 @@ async def get_briefing_hoje(user_id: Optional[int] = Depends(get_user_id), db: S
     from datetime import datetime, date
     hoje = date.today()
 
-    briefing = (
-        db.query(Briefing)
-        .filter(Briefing.portfolio_id == portfolio.id)
-        .filter(Briefing.data >= datetime.combine(hoje, datetime.min.time()))
-        .order_by(Briefing.created_at.desc())
-        .first()
-    )
+    briefing = None
+    if not force:
+        briefing = (
+            db.query(Briefing)
+            .filter(Briefing.portfolio_id == portfolio.id)
+            .filter(Briefing.data >= datetime.combine(hoje, datetime.min.time()))
+            .order_by(Briefing.created_at.desc())
+            .first()
+        )
 
     if not briefing:
         # Gerar agora se não existir
-        conteudo = await gerar_briefing_portfolio(portfolio.id, db)
+        try:
+            conteudo = await gerar_briefing_portfolio(portfolio.id, db)
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except Exception:
+            raise HTTPException(status_code=503, detail="Erro ao gerar o briefing. Verifique a configuração da IA em Configurações.")
         briefing = db.query(Briefing).filter(
             Briefing.portfolio_id == portfolio.id
         ).order_by(Briefing.created_at.desc()).first()

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
-import { RefreshCw, Sun, DollarSign, TrendingUp } from 'lucide-react'
+import { RefreshCw, Sun, TrendingUp, TrendingDown } from 'lucide-react'
 import api from '@/services/api'
 
 interface BriefingData {
@@ -13,6 +13,15 @@ interface BriefingData {
     ibov: number | null
     ibov_variacao: number | null
   }
+}
+
+interface MacroData {
+  sp500: number | null
+  sp500_variacao: number | null
+  ibov: number | null
+  ibov_variacao: number | null
+  dolar: number | null
+  dolar_variacao: number | null
 }
 
 function RegimeBadge({ regime }: { regime: string }) {
@@ -32,17 +41,24 @@ function RegimeBadge({ regime }: { regime: string }) {
 
 export default function BriefingPage() {
   const [briefing, setBriefing] = useState<BriefingData | null>(null)
+  const [macro, setMacro] = useState<MacroData | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [elapsed, setElapsed] = useState<number | null>(null)
 
   const loadBriefing = async (force = false) => {
     setLoading(true)
     setError(null)
-    if (force) setBriefing(null)
+    if (force) { setBriefing(null); setElapsed(null) }
+    const t0 = Date.now()
     try {
-      // GET /briefing/hoje — auto-gera se não existir hoje
-      const res = await api.get('/briefing/hoje')
-      setBriefing(res.data)
+      const [briefingRes, macroRes] = await Promise.all([
+        api.get('/briefing/hoje', { params: force ? { force: true } : {} }),
+        api.get('/market/macro').catch(() => ({ data: null })),
+      ])
+      setBriefing(briefingRes.data)
+      if (macroRes.data) setMacro(macroRes.data)
+      if (force) setElapsed((Date.now() - t0) / 1000)
     } catch (e: any) {
       const msg = e?.response?.data?.detail || 'Erro ao carregar briefing'
       setError(msg)
@@ -107,7 +123,8 @@ export default function BriefingPage() {
         <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
 
           {/* Macro bar */}
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-4 gap-3">
+            {/* Dólar */}
             <div className="apex-card p-4 flex items-center gap-3">
               <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'rgba(0,230,118,0.08)' }}>
                 <span className="text-xs font-bold" style={{ color: '#00E676' }}>BRL</span>
@@ -115,23 +132,57 @@ export default function BriefingPage() {
               <div>
                 <p className="text-xs" style={{ color: '#64748b' }}>Dólar</p>
                 <p className="text-sm font-mono font-bold" style={{ color: '#f1f5f9' }}>
-                  {briefing.macro?.dolar ? `R$ ${Number(briefing.macro.dolar).toFixed(2)}` : '--'}
+                  {(macro?.dolar || briefing.macro?.dolar) ? `R$ ${Number(macro?.dolar || briefing.macro?.dolar).toFixed(2)}` : '--'}
                 </p>
+                {macro?.dolar_variacao != null && (
+                  <p className="text-xs font-mono" style={{ color: macro.dolar_variacao >= 0 ? '#FF5252' : '#00E676' }}>
+                    {macro.dolar_variacao >= 0 ? '+' : ''}{macro.dolar_variacao.toFixed(2)}%
+                  </p>
+                )}
               </div>
             </div>
 
+            {/* IBOVESPA */}
             <div className="apex-card p-4 flex items-center gap-3">
               <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'rgba(0,230,118,0.08)' }}>
-                <TrendingUp size={14} style={{ color: '#00E676' }} />
+                {(macro?.ibov_variacao ?? 0) >= 0
+                  ? <TrendingUp size={14} style={{ color: '#00E676' }} />
+                  : <TrendingDown size={14} style={{ color: '#FF5252' }} />}
               </div>
               <div>
                 <p className="text-xs" style={{ color: '#64748b' }}>IBOVESPA</p>
                 <p className="text-sm font-mono font-bold" style={{ color: '#f1f5f9' }}>
-                  {briefing.macro?.ibov ? Number(briefing.macro.ibov).toLocaleString('pt-BR') : '--'}
+                  {(macro?.ibov || briefing.macro?.ibov) ? Number(macro?.ibov || briefing.macro?.ibov).toLocaleString('pt-BR', { maximumFractionDigits: 0 }) : '--'}
                 </p>
+                {macro?.ibov_variacao != null && (
+                  <p className="text-xs font-mono" style={{ color: macro.ibov_variacao >= 0 ? '#00E676' : '#FF5252' }}>
+                    {macro.ibov_variacao >= 0 ? '+' : ''}{macro.ibov_variacao.toFixed(2)}%
+                  </p>
+                )}
               </div>
             </div>
 
+            {/* S&P 500 */}
+            <div className="apex-card p-4 flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'rgba(0,188,212,0.08)' }}>
+                {(macro?.sp500_variacao ?? 0) >= 0
+                  ? <TrendingUp size={14} style={{ color: '#00BCD4' }} />
+                  : <TrendingDown size={14} style={{ color: '#FF5252' }} />}
+              </div>
+              <div>
+                <p className="text-xs" style={{ color: '#64748b' }}>S&P 500</p>
+                <p className="text-sm font-mono font-bold" style={{ color: '#f1f5f9' }}>
+                  {macro?.sp500 ? Number(macro.sp500).toLocaleString('en-US', { maximumFractionDigits: 0 }) : '--'}
+                </p>
+                {macro?.sp500_variacao != null && (
+                  <p className="text-xs font-mono" style={{ color: macro.sp500_variacao >= 0 ? '#00E676' : '#FF5252' }}>
+                    {macro.sp500_variacao >= 0 ? '+' : ''}{macro.sp500_variacao.toFixed(2)}%
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Regime */}
             <div className="apex-card p-4 flex items-center justify-between">
               <div>
                 <p className="text-xs" style={{ color: '#64748b' }}>Regime</p>
@@ -149,12 +200,29 @@ export default function BriefingPage() {
                 <span className="text-xs font-bold" style={{ color: '#0a0e17' }}>A</span>
               </div>
               <span className="text-sm font-medium" style={{ color: '#94a3b8' }}>Gestor APEX</span>
-              <span className="text-xs ml-auto font-mono" style={{ color: '#64748b' }}>
-                {briefing.data ? new Date(briefing.data).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}
-              </span>
+              <div className="ml-auto flex items-center gap-3">
+                {elapsed != null && (
+                  <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: 'rgba(0,230,118,0.08)', color: '#00E676', border: '1px solid rgba(0,230,118,0.2)' }}>
+                    gerado em {elapsed.toFixed(1)}s
+                  </span>
+                )}
+                <span className="text-xs font-mono" style={{ color: '#64748b' }}>
+                  {briefing.data ? new Date(briefing.data).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}
+                </span>
+              </div>
             </div>
-            <div className="text-sm leading-relaxed whitespace-pre-wrap" style={{ color: '#f1f5f9' }}>
-              {briefing.conteudo}
+            <div className="text-sm leading-relaxed" style={{ color: '#f1f5f9' }}>
+              {briefing.conteudo.split('\n').map((line, i) => {
+                // Bold: **text**
+                const parts = line.split(/\*\*(.*?)\*\*/g)
+                return (
+                  <p key={i} className={line === '' ? 'mb-3' : 'mb-1'}>
+                    {parts.map((part, j) =>
+                      j % 2 === 1 ? <strong key={j} style={{ color: '#e2e8f0' }}>{part}</strong> : part
+                    )}
+                  </p>
+                )
+              })}
             </div>
           </div>
         </motion.div>

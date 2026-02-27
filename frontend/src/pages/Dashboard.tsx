@@ -1,44 +1,133 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
-import { TrendingUp, TrendingDown, Activity, DollarSign, Calendar } from 'lucide-react'
-import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip } from 'recharts'
+import { TrendingUp, Activity, DollarSign, Calendar, BarChart2 } from 'lucide-react'
 import api from '@/services/api'
 import { useStore } from '@/store/useStore'
 
-// Mock performance data para visualizar o layout
-const mockPerformance = [
-  { date: 'Set', apex: 0, ibov: 0, cdi: 0 },
-  { date: 'Out', apex: 4.2, ibov: 2.1, cdi: 0.9 },
-  { date: 'Nov', apex: 8.7, ibov: 3.8, cdi: 1.8 },
-  { date: 'Dez', apex: 6.1, ibov: 1.2, cdi: 2.7 },
-  { date: 'Jan', apex: 11.3, ibov: 5.4, cdi: 3.6 },
-  { date: 'Fev', apex: 14.8, ibov: 4.9, cdi: 4.5 },
-]
+const MODULE_LABELS: Record<string, { label: string; color: string }> = {
+  etfs:       { label: 'ETFs',       color: '#00E676' },
+  fiis:       { label: 'FIIs',       color: '#00BFA5' },
+  renda_fixa: { label: 'Renda Fixa', color: '#1DE9B6' },
+  momentum:   { label: 'Momentum',   color: '#64FFDA' },
+  wheel:      { label: 'Wheel',      color: '#00B0FF' },
+  alpha:      { label: 'Alpha',      color: '#AA00FF' },
+  dividendos: { label: 'Dividendos', color: '#FFD740' },
+  teses:      { label: 'Teses',      color: '#FF6D00' },
+  caixa:      { label: 'Caixa',      color: '#475569' },
+}
 
-const allocationData = [
-  { module: 'ETFs', target: 35, current: 31, color: '#00E676' },
-  { module: 'FIIs', target: 20, current: 22, color: '#00BFA5' },
-  { module: 'Renda Fixa', target: 20, current: 24, color: '#1DE9B6' },
-  { module: 'Momentum', target: 15, current: 13, color: '#64FFDA' },
-  { module: 'Caixa', target: 10, current: 10, color: '#475569' },
-]
+const REGIME_COLORS: Record<string, string> = {
+  BULL: '#00E676',
+  MISTO: '#FFD740',
+  BEAR: '#FF5252',
+}
 
 function getDeviation(target: number, current: number) {
   const diff = current - target
   if (Math.abs(diff) <= 2) return { color: '#00E676', label: 'OK', bg: 'rgba(0, 230, 118, 0.08)' }
-  if (Math.abs(diff) <= 5) return { color: '#FFD740', label: `${diff > 0 ? '+' : ''}${diff}%`, bg: 'rgba(255, 215, 64, 0.08)' }
-  return { color: '#FF5252', label: `${diff > 0 ? '+' : ''}${diff}%`, bg: 'rgba(255, 82, 82, 0.08)' }
+  if (Math.abs(diff) <= 5) return { color: '#FFD740', label: `${diff > 0 ? '+' : ''}${diff.toFixed(1)}%`, bg: 'rgba(255, 215, 64, 0.08)' }
+  return { color: '#FF5252', label: `${diff > 0 ? '+' : ''}${diff.toFixed(1)}%`, bg: 'rgba(255, 82, 82, 0.08)' }
+}
+
+function fmt(v: number) {
+  return v.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
+}
+
+function fmtPct(v: number) {
+  return `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`
 }
 
 export default function DashboardPage() {
-  const { userName, strategyType } = useStore()
+  const { strategyType } = useStore()
+
+  const [dash, setDash] = useState<any>(null)
+  const [regime, setRegime] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const [dashRes, regimeRes] = await Promise.all([
+          api.get('/dashboard/'),
+          api.get('/market/regime'),
+        ])
+        setDash(dashRes.data)
+        setRegime(regimeRes.data)
+      } catch (err) {
+        console.error('Dashboard load error:', err)
+      } finally {
+        setLoading(false)
+      }
+    }
+    load()
+  }, [])
+
+  // Dados derivados
+  const patrimonio = dash?.patrimonio?.atual ?? 0
+  const varDia = dash?.patrimonio?.var_dia_pct ?? 0
+  const varMes = dash?.patrimonio?.var_mes_pct ?? null
+  const totalPct = dash?.patrimonio?.total_pct ?? 0
+  const rendaMes = dash?.macro?.renda_mes ?? null
+  const selic = dash?.macro?.selic
+  const ibov = dash?.macro?.ibov
+
+  const alocacaoAtual: Record<string, number> = dash?.alocacao?.atual ?? {}
+  const alocacaoAlvo: Record<string, number> = dash?.alocacao?.alvo ?? {}
+
+  const allocationData = Object.entries(MODULE_LABELS)
+    .filter(([key]) => alocacaoAlvo[key] != null)
+    .map(([key, { label, color }]) => ({
+      module: label,
+      color,
+      current: alocacaoAtual[key] ?? 0,
+      target: alocacaoAlvo[key] ?? 0,
+    }))
+
+  const regimeNome: string = regime?.regime ?? dash?.regime ?? 'MISTO'
+  const regimeColor = REGIME_COLORS[regimeNome] ?? '#FFD740'
+  const regimeMotivo: string = regime?.motivo ?? '–'
 
   const metrics = [
-    { label: 'Patrimônio Total', value: 'R$ 485.200', change: '+R$ 3.840', positive: true, icon: DollarSign },
-    { label: 'Retorno no Mês', value: '+4,8%', change: 'vs CDI +3,1%', positive: true, icon: TrendingUp },
-    { label: 'Retorno no Ano', value: '+14,8%', change: 'vs IBOV +4,9%', positive: true, icon: Activity },
-    { label: 'Renda do Mês', value: 'R$ 1.240', change: 'Dividendos + FIIs', positive: true, icon: Calendar },
+    {
+      label: 'Patrimônio Total',
+      value: loading ? '–' : `R$ ${fmt(patrimonio)}`,
+      change: loading ? '' : `${fmtPct(varDia)} hoje`,
+      positive: varDia >= 0,
+      icon: DollarSign,
+    },
+    {
+      label: 'Retorno no Mês',
+      value: loading ? '–' : (varMes != null ? fmtPct(varMes) : '–'),
+      change: selic != null ? `Selic ${selic.toFixed(2)}% a.a.` : 'Selic –',
+      positive: (varMes ?? 0) >= 0,
+      icon: TrendingUp,
+    },
+    {
+      label: 'Retorno Total',
+      value: loading ? '–' : fmtPct(totalPct),
+      change: ibov != null ? `IBOV ${fmtPct(ibov)}` : 'vs IBOV –',
+      positive: totalPct >= 0,
+      icon: Activity,
+    },
+    {
+      label: 'Renda do Mês',
+      value: rendaMes != null ? `R$ ${fmt(rendaMes)}` : '–',
+      change: 'Dividendos + FIIs',
+      positive: true,
+      icon: Calendar,
+    },
   ]
+
+  if (loading) {
+    return (
+      <div className="p-8 flex items-center justify-center h-64">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-8 h-8 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: '#00E676', borderTopColor: 'transparent' }} />
+          <span className="text-sm font-mono" style={{ color: '#64748b' }}>Carregando dashboard…</span>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="p-8 space-y-6">
@@ -64,9 +153,9 @@ export default function DashboardPage() {
           </div>
           <div className="grid grid-cols-3 gap-4">
             {[
-              { label: 'Renda Mensal Projetada', value: 'R$ 1.240', sub: 'Dividendos + JCP + FIIs', color: '#00BFA5' },
-              { label: 'Yield on Cost', value: '8,4% a.a.', sub: 'Sobre preço médio', color: '#00BFA5' },
-              { label: 'Cobertura da Meta', value: '62%', sub: 'R$ 1.240 / R$ 2.000 alvo', color: '#FFD740' },
+              { label: 'Renda Mensal Projetada', value: rendaMes != null ? `R$ ${fmt(rendaMes)}` : '–', sub: 'Dividendos + JCP + FIIs', color: '#00BFA5' },
+              { label: 'Yield on Cost', value: '–', sub: 'Sobre preço médio', color: '#00BFA5' },
+              { label: 'Cobertura da Meta', value: '–', sub: 'Aguardando meta configurada', color: '#FFD740' },
             ].map((item) => (
               <div key={item.label} className="rounded-lg p-4" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
                 <p className="text-xs font-mono uppercase tracking-wider mb-2" style={{ color: '#64748b' }}>{item.label}</p>
@@ -110,39 +199,15 @@ export default function DashboardPage() {
         >
           <div className="flex items-center justify-between mb-5">
             <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>PERFORMANCE DESDE O INÍCIO</h3>
-            <div className="flex gap-4 text-xs font-mono">
-              {[
-                { label: 'APEX', color: '#00E676' },
-                { label: 'IBOV', color: '#4A6FA5' },
-                { label: 'CDI', color: '#475569' },
-              ].map((l) => (
-                <div key={l.label} className="flex items-center gap-1.5">
-                  <div className="w-3 h-0.5 rounded" style={{ background: l.color }} />
-                  <span style={{ color: '#64748b' }}>{l.label}</span>
-                </div>
-              ))}
-            </div>
           </div>
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={mockPerformance}>
-              <defs>
-                <linearGradient id="apexGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#00E676" stopOpacity={0.2} />
-                  <stop offset="95%" stopColor="#00E676" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => `${v}%`} />
-              <Tooltip
-                contentStyle={{ background: '#0f1729', border: '1px solid #1e293b', borderRadius: '8px' }}
-                labelStyle={{ color: '#94a3b8' }}
-                formatter={(v: number) => [`${v}%`, '']}
-              />
-              <Area type="monotone" dataKey="apex" stroke="#00E676" fill="url(#apexGrad)" strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="ibov" stroke="#4A6FA5" fill="transparent" strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
-              <Area type="monotone" dataKey="cdi" stroke="#475569" fill="transparent" strokeWidth={1.5} dot={false} strokeDasharray="2 2" />
-            </AreaChart>
-          </ResponsiveContainer>
+          <div className="flex flex-col items-center justify-center h-[200px] gap-3" style={{ color: '#475569' }}>
+            <BarChart2 size={36} style={{ color: '#1e293b' }} />
+            <p className="text-xs font-mono text-center" style={{ color: '#475569' }}>
+              Histórico de performance em construção
+              <br />
+              <span style={{ color: '#334155' }}>Dados disponíveis após 1º mês de operação</span>
+            </p>
+          </div>
         </motion.div>
 
         {/* Allocation */}
@@ -156,6 +221,7 @@ export default function DashboardPage() {
           <div className="space-y-3">
             {allocationData.map((item) => {
               const dev = getDeviation(item.target, item.current)
+              const barMax = Math.max(...allocationData.map(a => Math.max(a.current, a.target)), 5)
               return (
                 <div key={item.module}>
                   <div className="flex items-center justify-between mb-1">
@@ -171,7 +237,7 @@ export default function DashboardPage() {
                     </div>
                   </div>
                   <div className="allocation-bar">
-                    <div className="allocation-fill" style={{ width: `${(item.current / 40) * 100}%`, background: item.color }} />
+                    <div className="allocation-fill" style={{ width: `${Math.min((item.current / barMax) * 100, 100)}%`, background: item.color }} />
                   </div>
                 </div>
               )
@@ -187,11 +253,9 @@ export default function DashboardPage() {
         animate={{ opacity: 1 }}
         transition={{ delay: 0.5 }}
       >
-        <div className="w-2.5 h-2.5 rounded-full animate-pulse" style={{ background: '#00E676' }} />
-        <span className="text-sm font-mono" style={{ color: '#00E676' }}>BULL</span>
-        <span className="text-sm" style={{ color: '#64748b' }}>
-          BOVA11 acima da MM200 há 18 pregões · MM50 acima da MM200 com inclinação positiva
-        </span>
+        <div className="w-2.5 h-2.5 rounded-full animate-pulse" style={{ background: regimeColor }} />
+        <span className="text-sm font-mono" style={{ color: regimeColor }}>{regimeNome}</span>
+        <span className="text-sm" style={{ color: '#64748b' }}>{regimeMotivo}</span>
       </motion.div>
     </div>
   )

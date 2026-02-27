@@ -9,9 +9,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.config import APP_HOST, APP_PORT, DEBUG, BRIEFING_HOUR, BRIEFING_MINUTE
-from app.models import create_tables
+from app.models import create_tables, migrate_db
 from app.tasks import tarefa_morning_briefing
-from app.api.routes import onboarding, dashboard, chat, briefing, portfolio, market, settings
+from app.api.routes import onboarding, dashboard, chat, briefing, portfolio, market, settings, scanner, teses
 
 # ─── Scheduler (APScheduler — substitui Celery/Redis nesta fase) ───────────────
 scheduler = AsyncIOScheduler()
@@ -22,6 +22,7 @@ async def lifespan(app: FastAPI):
     """Executado na inicialização e no encerramento do servidor."""
     # Startup
     create_tables()
+    migrate_db()
     print("✅ Banco de dados SQLite inicializado: data/apex.db")
 
     # Agendar morning briefing (dias úteis, segunda a sexta)
@@ -66,6 +67,8 @@ app.include_router(chat.router)
 app.include_router(briefing.router)
 app.include_router(portfolio.router)
 app.include_router(market.router)
+app.include_router(scanner.router)
+app.include_router(teses.router)
 
 
 @app.get("/health")

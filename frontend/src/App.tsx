@@ -12,6 +12,7 @@ import ScannerPage from '@/pages/Scanner'
 import ChatPage from '@/pages/Chat'
 import SettingsPage from '@/pages/Settings'
 import AISetupPage from '@/pages/AISetup'
+import TesesPage from '@/pages/Teses'
 
 function App() {
   const { userId } = useStore()
@@ -57,6 +58,7 @@ function App() {
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/briefing" element={<BriefingPage />} />
               <Route path="/positions" element={<PositionsPage />} />
+              <Route path="/teses" element={<TesesPage />} />
               <Route path="/scanner" element={<ScannerPage />} />
               <Route path="/chat" element={<ChatPage />} />
               <Route path="/settings" element={<SettingsPage />} />

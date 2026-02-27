@@ -71,21 +71,24 @@ def calcular_regime(
             "detalhes": detalhes,
         }
 
-    # BULL: tudo alinhado
-    if acima_mm200 and mm50_acima_mm200:
-        if breadth_pct is None or breadth_pct >= 60:
-            return {
-                "regime": Regime.BULL,
-                "motivo": "IBOV acima da MM200, MM50 acima da MM200" + (
-                    f", breadth {breadth_pct:.0f}%" if breadth_pct else ""
-                ),
-                "detalhes": detalhes,
-            }
+    # BULL: tudo alinhado E breadth confirmado >= 60%
+    # Sem dados de breadth (None) → conservador: classifica como MISTO
+    if acima_mm200 and mm50_acima_mm200 and breadth_pct is not None and breadth_pct >= 60:
+        return {
+            "regime": Regime.BULL,
+            "motivo": f"IBOV acima da MM200, MM50 acima da MM200, breadth {breadth_pct:.0f}%",
+            "detalhes": detalhes,
+        }
 
-    # MISTO: demais casos
-    motivo = "IBOV em zona intermediária"
-    if breadth_pct and breadth_pct < 60:
-        motivo += f" — breadth fraco ({breadth_pct:.0f}% das ações acima da MM200)"
+    # MISTO: demais casos (inclui quando breadth é None ou < 60%)
+    if not acima_mm200:
+        motivo = "IBOV abaixo da MM200"
+    elif breadth_pct is None:
+        motivo = "IBOV acima da MM200 e MM50 — breadth não disponível (conservador: MISTO)"
+    elif breadth_pct < 60:
+        motivo = f"IBOV acima das médias mas breadth fraco ({breadth_pct:.0f}% das ações acima da MM200)"
+    else:
+        motivo = "IBOV em zona intermediária"
 
     return {
         "regime": Regime.MISTO,

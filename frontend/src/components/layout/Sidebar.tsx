@@ -1,5 +1,5 @@
 import { NavLink, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Newspaper, TrendingUp, Search, MessageSquare, LogOut, RefreshCw, Settings } from 'lucide-react'
+import { LayoutDashboard, Newspaper, TrendingUp, Search, MessageSquare, LogOut, RefreshCw, Settings, Lightbulb } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import clsx from 'clsx'
 
@@ -7,6 +7,7 @@ const navItems = [
   { path: '/briefing', label: 'Briefing', icon: Newspaper },
   { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { path: '/positions', label: 'Posições', icon: TrendingUp },
+  { path: '/teses', label: 'Teses', icon: Lightbulb },
   { path: '/scanner', label: 'Scanner', icon: Search },
   { path: '/chat', label: 'Chat', icon: MessageSquare },
 ]

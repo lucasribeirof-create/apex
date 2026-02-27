@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Settings, Trash2, AlertTriangle, X, Bot } from 'lucide-react'
+import { Settings, Trash2, AlertTriangle, X, Bot, CheckCircle, XCircle, Loader2 } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import { useNavigate } from 'react-router-dom'
 import api from '@/services/api'
@@ -10,14 +10,29 @@ export default function SettingsPage() {
   const navigate = useNavigate()
 
   // AI provider info
-  const [aiInfo, setAiInfo] = useState<{ provider: string; model: string; key_hint: string } | null>(null)
+  const [aiInfo, setAiInfo] = useState<{ provider: string; model: string; key_hint: string; configured: boolean } | null>(null)
+  const [testingAI, setTestingAI] = useState(false)
+  const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null)
 
-  useEffect(() => {
-    api.get('/settings/ai').then((r) => setAiInfo(r.data)).catch(() => null)
-  }, [])
+  const loadAI = () => api.get('/settings/ai').then((r) => setAiInfo(r.data)).catch(() => null)
+
+  useEffect(() => { loadAI() }, [])
 
   const handleChangeAI = () => {
     window.location.replace('/configurar-ia')
+  }
+
+  const handleTestAI = async () => {
+    setTestingAI(true)
+    setTestResult(null)
+    try {
+      const r = await api.post('/settings/ai/test-saved')
+      setTestResult({ ok: r.data.ok, msg: r.data.ok ? 'Chave válida e funcionando ✓' : (r.data.erro || 'Falhou.') })
+    } catch (e: any) {
+      setTestResult({ ok: false, msg: e?.response?.data?.detail || 'Erro ao testar.' })
+    } finally {
+      setTestingAI(false)
+    }
   }
 
   // Step 0 = idle, 1 = first confirm, 2 = type name confirm
@@ -83,24 +98,51 @@ export default function SettingsPage() {
           <p className="text-xs font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>Motor de IA</p>
         </div>
         {aiInfo ? (
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <p className="text-sm font-semibold capitalize" style={{ color: '#f1f5f9' }}>
-                {aiInfo.provider === 'gemini' ? 'Google Gemini' : aiInfo.provider === 'anthropic' ? 'Claude (Anthropic)' : 'GPT-4o Mini'}
-              </p>
-              <p className="text-xs font-mono mt-0.5" style={{ color: '#475569' }}>
-                {aiInfo.model} · chave {aiInfo.key_hint}
-              </p>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-semibold capitalize" style={{ color: '#f1f5f9' }}>
+                  {aiInfo.provider === 'gemini' ? 'Google Gemini'
+                    : aiInfo.provider === 'anthropic' ? 'Claude — Anthropic'
+                    : aiInfo.provider === 'openai' ? 'GPT-4o Mini — OpenAI'
+                    : aiInfo.provider === 'groq' ? 'Groq — Llama 3 (Gratuito)'
+                    : aiInfo.provider === 'grok' ? 'Grok — xAI'
+                    : aiInfo.provider}
+                </p>
+                <p className="text-xs font-mono mt-0.5" style={{ color: '#475569' }}>
+                  {aiInfo.model} · chave {aiInfo.key_hint}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  onClick={handleTestAI}
+                  disabled={testingAI}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5"
+                  style={{ background: 'rgba(0,230,118,0.08)', border: '1px solid rgba(0,230,118,0.2)', color: '#00E676' }}
+                >
+                  {testingAI ? <Loader2 size={12} className="animate-spin" /> : null}
+                  {testingAI ? 'Testando…' : 'Testar'}
+                </button>
+                <button
+                  onClick={handleChangeAI}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+                  style={{ background: 'rgba(100,116,139,0.1)', border: '1px solid #1e293b', color: '#94a3b8' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = '#334155' }}
+                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#1e293b' }}
+                >
+                  Trocar IA
+                </button>
+              </div>
             </div>
-            <button
-              onClick={handleChangeAI}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium flex-shrink-0 transition-all"
-              style={{ background: 'rgba(100,116,139,0.1)', border: '1px solid #1e293b', color: '#94a3b8' }}
-              onMouseEnter={(e) => { e.currentTarget.style.borderColor = '#334155' }}
-              onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#1e293b' }}
-            >
-              Trocar IA
-            </button>
+            {testResult && (
+              <div className="flex items-start gap-2 rounded-lg px-3 py-2 text-xs"
+                style={{ background: testResult.ok ? 'rgba(0,230,118,0.06)' : 'rgba(255,82,82,0.06)', border: `1px solid ${testResult.ok ? 'rgba(0,230,118,0.2)' : 'rgba(255,82,82,0.2)'}` }}>
+                {testResult.ok
+                  ? <CheckCircle size={13} style={{ color: '#00E676', flexShrink: 0, marginTop: 1 }} />
+                  : <XCircle size={13} style={{ color: '#FF5252', flexShrink: 0, marginTop: 1 }} />}
+                <span style={{ color: testResult.ok ? '#00E676' : '#FF5252' }}>{testResult.msg}</span>
+              </div>
+            )}
           </div>
         ) : (
           <p className="text-sm" style={{ color: '#475569' }}>Carregando...</p>

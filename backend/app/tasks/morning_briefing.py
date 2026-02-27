@@ -3,7 +3,7 @@ Morning Briefing automático com APScheduler.
 Substitui Celery + Redis — roda direto no processo do FastAPI.
 """
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.models import SessionLocal, Portfolio, Briefing, Position, User
 from app.ai import chat, build_briefing_prompt
@@ -44,6 +44,15 @@ async def gerar_briefing_portfolio(portfolio_id: int, db: Session) -> str | None
     macro_br, macro_global = await asyncio.gather(get_macro_br(), get_macro_global())
     macro = {**macro_br, **macro_global}
 
+    # Data de hoje formatada em português
+    from datetime import date
+    import locale
+    try:
+        locale.setlocale(locale.LC_TIME, 'pt_BR.UTF-8')
+    except Exception:
+        pass
+    data_hoje = datetime.now().strftime("%A, %d de %B de %Y")
+
     # System prompt
     system = build_briefing_prompt(
         user_name=user.name,
@@ -51,19 +60,20 @@ async def gerar_briefing_portfolio(portfolio_id: int, db: Session) -> str | None
         posicoes=posicoes,
         regime=portfolio.regime or "MISTO",
         macro=macro,
+        data_hoje=data_hoje,
     )
 
-    # Gerar briefing com Claude
+    # Gerar briefing com IA
     conteudo = await chat(
         system=system,
-        messages=[{"role": "user", "content": "Gere o morning briefing de hoje."}],
-        max_tokens=1500,
+        messages=[{"role": "user", "content": "Gere o morning call de hoje."}],
+        max_tokens=5000,
     )
 
     # Salvar no banco
     briefing = Briefing(
         portfolio_id=portfolio_id,
-        data=datetime.utcnow(),
+        data=datetime.now(timezone.utc),
         tipo="morning",
         conteudo=conteudo,
         dolar=macro.get("dolar"),

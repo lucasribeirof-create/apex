@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, X, TrendingUp, TrendingDown, Circle, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
+import { Plus, X, TrendingUp, TrendingDown, Circle, Trash2, ChevronDown, ChevronUp, BrainCircuit, LayoutList } from 'lucide-react'
+import AnaliseModal from '@/components/AnaliseModal'
+import CarteiraPanel from '@/components/CarteiraPanel'
 import api from '@/services/api'
 
 interface Position {
@@ -20,6 +22,7 @@ interface Position {
   alvo_1: number | null
   apex_score: number | null
   data_entrada: string | null
+  tese?: string | null
 }
 
 interface FormData {
@@ -40,6 +43,7 @@ const MODULE_LABELS: Record<string, string> = {
   renda_fixa: 'Renda Fixa',
   alpha: 'Alpha',
   dividendos: 'Dividendos',
+  teses: 'Teses',
   caixa: 'Caixa',
 }
 
@@ -183,7 +187,29 @@ function PLBadge({ value }: { value: number }) {
   )
 }
 
-function ModuleGroup({ modulo, positions, onDelete }: { modulo: string; positions: Position[]; onDelete: (id: number) => void }) {
+function StopBadge({ preco_atual, stop_loss }: { preco_atual: number; stop_loss: number | null }) {
+  if (!stop_loss || preco_atual <= 0) return null
+  const distPct = ((preco_atual - stop_loss) / stop_loss) * 100
+  if (preco_atual <= stop_loss) {
+    return (
+      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-bold animate-pulse"
+        style={{ background: 'rgba(255,82,82,0.18)', color: '#FF5252' }}>
+        STOP
+      </span>
+    )
+  }
+  if (distPct <= 5) {
+    return (
+      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-bold"
+        style={{ background: 'rgba(255,152,0,0.15)', color: '#FF9800' }}>
+        -{distPct.toFixed(1)}%
+      </span>
+    )
+  }
+  return null
+}
+
+function ModuleGroup({ modulo, positions, onDelete, onAnalise }: { modulo: string; positions: Position[]; onDelete: (id: number) => void; onAnalise: (id: number, ticker: string, modulo: string, tese?: string | null) => void }) {
   const [open, setOpen] = useState(true)
   const totalVal = positions.reduce((a, p) => a + p.valor_atual, 0)
   const totalPL = positions.reduce((a, p) => a + p.pl_reais, 0)
@@ -224,7 +250,7 @@ function ModuleGroup({ modulo, positions, onDelete }: { modulo: string; position
             style={{ overflow: 'hidden' }}
           >
             <div style={{ borderTop: '1px solid #1e293b' }}>
-              <div className="grid px-4 py-2 text-xs font-mono uppercase tracking-wider" style={{ color: '#64748b', gridTemplateColumns: '1fr 70px 90px 90px 90px 90px 80px 36px' }}>
+              <div className="grid px-4 py-2 text-xs font-mono uppercase tracking-wider" style={{ color: '#64748b', gridTemplateColumns: '1fr 70px 90px 90px 90px 90px 80px 72px' }}>
                 <span>Ativo</span>
                 <span className="text-right">Qtd</span>
                 <span className="text-right">PM</span>
@@ -239,7 +265,7 @@ function ModuleGroup({ modulo, positions, onDelete }: { modulo: string; position
                 <div
                   key={p.id}
                   className="grid items-center px-4 py-3 text-sm transition-colors"
-                  style={{ gridTemplateColumns: '1fr 70px 90px 90px 90px 90px 80px 36px', borderTop: '1px solid rgba(30,41,59,0.5)' }}
+                  style={{ gridTemplateColumns: '1fr 70px 90px 90px 90px 90px 80px 72px', borderTop: '1px solid rgba(30,41,59,0.5)' }}
                   onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.01)')}
                   onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                 >
@@ -264,19 +290,34 @@ function ModuleGroup({ modulo, positions, onDelete }: { modulo: string; position
                   <div className="flex justify-end">
                     <PLBadge value={p.pl_percentual} />
                   </div>
-                  <span className="text-right font-mono text-xs" style={{ color: p.stop_loss ? '#FF5252' : '#475569' }}>
-                    {p.stop_loss ? `R$ ${p.stop_loss.toFixed(2)}` : '—'}
-                  </span>
-                  <button
-                    onClick={() => onDelete(p.id)}
-                    title="Encerrar posição"
-                    className="flex items-center justify-center w-7 h-7 rounded ml-auto transition-all"
-                    style={{ color: '#FF5252', opacity: 0.35 }}
-                    onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(255,82,82,0.1)' }}
-                    onMouseLeave={e => { e.currentTarget.style.opacity = '0.35'; e.currentTarget.style.background = 'transparent' }}
-                  >
-                    <Trash2 size={13} />
-                  </button>
+                  <div className="flex items-center justify-end gap-1">
+                    <StopBadge preco_atual={p.preco_atual} stop_loss={p.stop_loss} />
+                    <span className="font-mono text-xs" style={{ color: p.stop_loss ? '#FF5252' : '#475569' }}>
+                      {p.stop_loss ? `R$ ${p.stop_loss.toFixed(2)}` : '—'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-end gap-1">
+                    <button
+                      onClick={() => onAnalise(p.id, p.ticker, p.modulo || 'outros', p.tese)}
+                      title="Analisar posição"
+                      className="flex items-center justify-center w-7 h-7 rounded transition-all"
+                      style={{ color: '#a78bfa', opacity: 0.5 }}
+                      onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(139,92,246,0.12)' }}
+                      onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; e.currentTarget.style.background = 'transparent' }}
+                    >
+                      <BrainCircuit size={13} />
+                    </button>
+                    <button
+                      onClick={() => onDelete(p.id)}
+                      title="Encerrar posição"
+                      className="flex items-center justify-center w-7 h-7 rounded transition-all"
+                      style={{ color: '#FF5252', opacity: 0.35 }}
+                      onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(255,82,82,0.1)' }}
+                      onMouseLeave={e => { e.currentTarget.style.opacity = '0.35'; e.currentTarget.style.background = 'transparent' }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -290,7 +331,10 @@ function ModuleGroup({ modulo, positions, onDelete }: { modulo: string; position
 export default function PositionsPage() {
   const [positions, setPositions] = useState<Position[]>([])
   const [loading, setLoading] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [showAdd, setShowAdd] = useState(false)
+  const [showCarteira, setShowCarteira] = useState(false)
+  const [analisando, setAnalisando] = useState<{ id: number; ticker: string; modulo: string; tese?: string | null } | null>(null)
 
   const loadPositions = async () => {
     setLoading(true)
@@ -301,6 +345,15 @@ export default function PositionsPage() {
     setLoading(false)
   }
 
+  const refreshPrices = async () => {
+    setRefreshing(true)
+    try {
+      await api.post('/portfolio/refresh-prices')
+      await loadPositions()  // recarrega com os preços atualizados do banco
+    } catch { /* silent */ }
+    setRefreshing(false)
+  }
+
   const deletePosition = async (id: number) => {
     if (!confirm('Encerrar esta posição?')) return
     try {
@@ -309,7 +362,7 @@ export default function PositionsPage() {
     } catch { /* silent */ }
   }
 
-  useEffect(() => { loadPositions() }, [])
+  useEffect(() => { refreshPrices() }, [])
 
   const grouped = positions.reduce<Record<string, Position[]>>((acc, p) => {
     const key = p.modulo || 'outros'
@@ -325,17 +378,47 @@ export default function PositionsPage() {
 
   return (
     <div className="p-8 space-y-6">
+      {/* Side panel análise de carteira */}
+      {showCarteira && <CarteiraPanel onClose={() => setShowCarteira(false)} />}
+
+      {/* Análise IA modal */}
+      {analisando && (
+        <AnaliseModal
+          positionId={analisando.id}
+          ticker={analisando.ticker}
+          modulo={analisando.modulo}
+          tese={analisando.tese}
+          onClose={() => setAnalisando(null)}
+          onTeseSalva={(novaTese) => {
+            setPositions(prev => prev.map(p =>
+              p.id === analisando.id ? { ...p, tese: novaTese } : p
+            ))
+          }}
+        />
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold" style={{ color: '#f1f5f9' }}>Posições</h1>
           <p className="text-sm mt-1" style={{ color: '#64748b' }}>
             {positions.length} ativo{positions.length !== 1 ? 's' : ''} no portfólio
+            {refreshing && <span className="ml-2" style={{ color: '#00E676' }}>• atualizando preços...</span>}
           </p>
         </div>
-        <button onClick={() => setShowAdd(true)} className="btn-primary flex items-center gap-2">
-          <Plus size={16} />
-          Nova Posição
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowCarteira(true)}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all"
+            style={{ background: 'rgba(0,230,118,0.1)', color: '#00E676', border: '1px solid rgba(0,230,118,0.25)' }}
+          >
+            <LayoutList size={16} />
+            Analisar Carteira
+          </button>
+          <button onClick={() => setShowAdd(true)} className="btn-primary flex items-center gap-2">
+            <Plus size={16} />
+            Nova Posição
+          </button>
+        </div>
       </div>
 
       {positions.length > 0 && (
@@ -378,7 +461,7 @@ export default function PositionsPage() {
 
       {!loading && Object.entries(grouped).map(([modulo, pos]) => (
         <motion.div key={modulo} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
-          <ModuleGroup modulo={modulo} positions={pos} onDelete={deletePosition} />
+          <ModuleGroup modulo={modulo} positions={pos} onDelete={deletePosition} onAnalise={(id, ticker, mod, tese) => setAnalisando({ id, ticker, modulo: mod, tese })} />
         </motion.div>
       ))}
 
