@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
-import { TrendingUp, Activity, DollarSign, Calendar, BarChart2 } from 'lucide-react'
+import { TrendingUp, Activity, DollarSign, Calendar, BarChart2, Globe, Shield, FileText, AlertTriangle } from 'lucide-react'
 import api from '@/services/api'
 import { useStore } from '@/store/useStore'
 
@@ -42,6 +42,9 @@ export default function DashboardPage() {
 
   const [dash, setDash] = useState<any>(null)
   const [regime, setRegime] = useState<any>(null)
+  const [macroData, setMacroData] = useState<any>(null)
+  const [tesesData, setTesesData] = useState<any>(null)
+  const [stressData, setStressData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -53,6 +56,11 @@ export default function DashboardPage() {
         ])
         setDash(dashRes.data)
         setRegime(regimeRes.data)
+
+        // V2 endpoints — load in background
+        api.get('/dashboard/macro').then(r => setMacroData(r.data)).catch(() => {})
+        api.get('/dashboard/teses').then(r => setTesesData(r.data)).catch(() => {})
+        api.get('/dashboard/stress').then(r => setStressData(r.data)).catch(() => {})
       } catch (err) {
         console.error('Dashboard load error:', err)
       } finally {
@@ -257,6 +265,140 @@ export default function DashboardPage() {
         <span className="text-sm font-mono" style={{ color: regimeColor }}>{regimeNome}</span>
         <span className="text-sm" style={{ color: '#64748b' }}>{regimeMotivo}</span>
       </motion.div>
+
+      {/* ── Dashboard V2 — Painéis enriquecidos ────────────────────── */}
+
+      {/* Painel Macro */}
+      {macroData && (
+        <motion.div
+          className="apex-card p-5"
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.6 }}
+        >
+          <div className="flex items-center gap-2 mb-4">
+            <Globe size={16} style={{ color: '#00B0FF' }} />
+            <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>PAINEL MACRO</h3>
+          </div>
+
+          <div className="grid grid-cols-5 gap-3 mb-3">
+            {[
+              { label: 'VIX', value: macroData.global?.vix, fmt: (v: number) => v?.toFixed(1), warn: (v: number) => v > 25 },
+              { label: 'Treasury 10Y', value: macroData.global?.treasury_10y, fmt: (v: number) => `${v?.toFixed(2)}%` },
+              { label: 'DXY', value: macroData.global?.dxy, fmt: (v: number) => v?.toFixed(2) },
+              { label: 'Petróleo WTI', value: macroData.global?.petroleo_wti, fmt: (v: number) => `$${v?.toFixed(0)}` },
+              { label: 'Ouro', value: macroData.global?.ouro, fmt: (v: number) => `$${fmt(v ?? 0)}` },
+            ].map(item => (
+              <div key={item.label} className="rounded-lg p-3" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
+                <p className="text-xs font-mono uppercase tracking-wider mb-1" style={{ color: '#475569' }}>{item.label}</p>
+                <p className="text-lg font-bold font-data" style={{ color: item.warn?.(item.value) ? '#FF5252' : '#f1f5f9' }}>
+                  {item.value != null ? item.fmt(item.value) : '–'}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-5 gap-3">
+            {[
+              { label: 'Selic', value: macroData.brasil?.selic, fmt: (v: number) => `${v?.toFixed(2)}%` },
+              { label: 'IPCA 12m', value: macroData.brasil?.ipca_12m, fmt: (v: number) => `${v?.toFixed(2)}%` },
+              { label: 'Juro Real', value: macroData.brasil?.juro_real, fmt: (v: number) => `${v?.toFixed(1)}%`, warn: (v: number) => v > 6 },
+              { label: 'Dólar', value: macroData.brasil?.dolar_brl, fmt: (v: number) => `R$${v?.toFixed(2)}` },
+              { label: 'IBOV', value: macroData.brasil?.ibov, fmt: (v: number) => fmt(v ?? 0) },
+            ].map(item => (
+              <div key={item.label} className="rounded-lg p-3" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
+                <p className="text-xs font-mono uppercase tracking-wider mb-1" style={{ color: '#475569' }}>{item.label}</p>
+                <p className="text-lg font-bold font-data" style={{ color: item.warn?.(item.value) ? '#FFD740' : '#f1f5f9' }}>
+                  {item.value != null ? item.fmt(item.value) : '–'}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          {macroData.flags?.length > 0 && (
+            <div className="mt-3 space-y-1">
+              {macroData.flags.map((flag: string, i: number) => (
+                <div key={i} className="flex items-center gap-2 text-xs" style={{ color: '#FFD740' }}>
+                  <AlertTriangle size={12} />
+                  <span>{flag}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </motion.div>
+      )}
+
+      <div className="grid grid-cols-2 gap-4">
+        {/* Teses de Investimento */}
+        {tesesData && tesesData.total > 0 && (
+          <motion.div
+            className="apex-card p-5"
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.7 }}
+          >
+            <div className="flex items-center gap-2 mb-4">
+              <FileText size={16} style={{ color: '#AA00FF' }} />
+              <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>TESES DE INVESTIMENTO</h3>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3 mb-3">
+              <div className="rounded-lg p-3 text-center" style={{ background: 'rgba(0,230,118,0.06)', border: '1px solid rgba(0,230,118,0.15)' }}>
+                <p className="text-2xl font-bold font-data" style={{ color: '#00E676' }}>{tesesData.ativas ?? 0}</p>
+                <p className="text-xs mt-1" style={{ color: '#475569' }}>Ativas</p>
+              </div>
+              <div className="rounded-lg p-3 text-center" style={{ background: 'rgba(255,215,64,0.06)', border: '1px solid rgba(255,215,64,0.15)' }}>
+                <p className="text-2xl font-bold font-data" style={{ color: '#FFD740' }}>{tesesData.enfraquecidas ?? 0}</p>
+                <p className="text-xs mt-1" style={{ color: '#475569' }}>Enfraquecidas</p>
+              </div>
+              <div className="rounded-lg p-3 text-center" style={{ background: 'rgba(255,82,82,0.06)', border: '1px solid rgba(255,82,82,0.15)' }}>
+                <p className="text-2xl font-bold font-data" style={{ color: '#FF5252' }}>{tesesData.invalidadas ?? 0}</p>
+                <p className="text-xs mt-1" style={{ color: '#475569' }}>Invalidadas</p>
+              </div>
+            </div>
+
+            {tesesData.alertas?.length > 0 && (
+              <div className="space-y-1">
+                {tesesData.alertas.slice(0, 3).map((alerta: string, i: number) => (
+                  <div key={i} className="flex items-start gap-2 text-xs" style={{ color: '#FFD740' }}>
+                    <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                    <span>{alerta}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </motion.div>
+        )}
+
+        {/* Stress Test */}
+        {stressData && Array.isArray(stressData) && stressData.length > 0 && (
+          <motion.div
+            className="apex-card p-5"
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.8 }}
+          >
+            <div className="flex items-center gap-2 mb-4">
+              <Shield size={16} style={{ color: '#FF6D00' }} />
+              <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>STRESS TEST</h3>
+            </div>
+
+            <div className="space-y-2">
+              {stressData.map((cenario: any, i: number) => (
+                <div key={i} className="rounded-lg p-3 flex items-center justify-between" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
+                  <span className="text-xs font-mono" style={{ color: '#94a3b8' }}>{cenario.cenario}</span>
+                  <span className="text-sm font-bold font-data" style={{
+                    color: cenario.impacto_estimado_pct < -10 ? '#FF5252' :
+                           cenario.impacto_estimado_pct < -5 ? '#FFD740' : '#00E676'
+                  }}>
+                    {cenario.impacto_estimado_pct?.toFixed(1)}%
+                  </span>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </div>
     </div>
   )
 }

@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_user_id
 from app.models import User, Portfolio, Position, Briefing
-from app.ai import chat_stream, build_onboarding_prompt, chat
+from app.cerebro import chat_stream, build_onboarding_prompt, chat
 
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 
@@ -29,6 +29,11 @@ class FinalizeOnboarding(BaseModel):
     name: str | None = None        # optional, used as fallback if user not found by id
     answers: dict
     total_patrimony: float
+    aporte_mensal: float | None = None  # R$ por mês (0 ou None = sem aportes regulares)
+
+
+class PlanoRequest(BaseModel):
+    user_id: int
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -100,6 +105,10 @@ def finalize_onboarding(body: FinalizeOnboarding, db: Session = Depends(get_db))
         "tempo": a.get("time_available"),
         "objetivo": a.get("objective"),
         "horizonte": a.get("horizon"),
+        # Preserva dados do objetivo para o Estrategista
+        "goal_type": a.get("goal_type"),
+        "goal_value": a.get("goal_value"),
+        "goal_description": a.get("goal_description"),
     }
 
     score = _calcular_score(respostas)
@@ -122,10 +131,13 @@ def finalize_onboarding(body: FinalizeOnboarding, db: Session = Depends(get_db))
         user.objetivo_tipo = a.get("goal_type", "crescimento")
         user.objetivo_valor = a.get("goal_value")
         user.objetivo_prazo = a.get("horizon")
+        user.objetivo_descricao = a.get("goal_description") or None
         user.onboarding_respostas = respostas
         user.onboarding_score = score
         user.onboarding_completo = True
         user.estrategia = estrategia
+        if body.aporte_mensal is not None:
+            user.aporte_mensal = body.aporte_mensal
     else:
         user = User(
             name=body.name or "Investidor",
@@ -133,10 +145,12 @@ def finalize_onboarding(body: FinalizeOnboarding, db: Session = Depends(get_db))
             objetivo_tipo=a.get("goal_type", "crescimento"),
             objetivo_valor=a.get("goal_value"),
             objetivo_prazo=a.get("horizon"),
+            objetivo_descricao=a.get("goal_description") or None,
             onboarding_respostas=respostas,
             onboarding_score=score,
             onboarding_completo=True,
             estrategia=estrategia,
+            aporte_mensal=body.aporte_mensal,
         )
         db.add(user)
         db.flush()
@@ -145,6 +159,8 @@ def finalize_onboarding(body: FinalizeOnboarding, db: Session = Depends(get_db))
     if not portfolio:
         portfolio = Portfolio(
             user_id=user.id,
+            nome="Carteira Real",
+            tipo="real",
             patrimonio_total=body.total_patrimony,
             patrimonio_inicio=body.total_patrimony,
             **{f"alvo_{k}": v for k, v in alocacao.items()},
@@ -158,6 +174,9 @@ def finalize_onboarding(body: FinalizeOnboarding, db: Session = Depends(get_db))
     db.commit()
     db.refresh(user)
     portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
+    if portfolio and not user.portfolio_ativo_id:
+        user.portfolio_ativo_id = portfolio.id
+        db.commit()
 
     return {
         "user_id": user.id,
@@ -167,6 +186,62 @@ def finalize_onboarding(body: FinalizeOnboarding, db: Session = Depends(get_db))
         "allocation": alocacao,
         "ai_explanation": _get_ai_explanation(estrategia, score),
     }
+
+
+@router.post("/plano")
+async def gerar_plano_estrategico(body: PlanoRequest, db: Session = Depends(get_db)):
+    """
+    Gera o plano estratégico de longo prazo para o usuário.
+    Chamado logo após o onboarding — o Estrategista (cerebro/plano.py) raciocina
+    livremente sobre a meta declarada e define fases, marcos e estratégia correta.
+    O resultado é salvo em user.plano_estrategico e retornado ao frontend.
+    """
+    from app.cerebro.plano import diagnosticar
+
+    user = db.query(User).filter(User.id == body.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+
+    plano = await diagnosticar(
+        nome=user.name,
+        patrimonio_atual=user.patrimonio_total or 0,
+        objetivo_tipo=user.objetivo_tipo or "crescimento",
+        objetivo_valor=user.objetivo_valor,
+        objetivo_prazo=user.objetivo_prazo,
+        objetivo_descricao=user.objetivo_descricao,
+        estrategia_atual=user.estrategia or "CORE",
+        onboarding_respostas=user.onboarding_respostas or {},
+        onboarding_score=user.onboarding_score or 0,
+        aporte_mensal=user.aporte_mensal,
+    )
+
+    # Persiste o plano no banco
+    user.plano_estrategico = plano.to_dict()
+    # Se o Estrategista recomenda estratégia diferente, atualiza e recalcula alocação
+    if plano.estrategia_recomendada != user.estrategia:
+        user.estrategia = plano.estrategia_recomendada
+        nova_alocacao = _get_alocacao(plano.estrategia_recomendada)
+        portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
+        if portfolio:
+            for k, v in nova_alocacao.items():
+                setattr(portfolio, f"alvo_{k}", v)
+
+    db.commit()
+
+    result = plano.to_dict()
+    result["allocation"] = _get_alocacao(user.estrategia)
+    return result
+
+
+@router.get("/plano/{user_id}")
+def obter_plano_estrategico(user_id: int, db: Session = Depends(get_db)):
+    """Retorna o plano estratégico salvo de um usuário."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    if not user.plano_estrategico:
+        raise HTTPException(status_code=404, detail="Plano estratégico não gerado ainda")
+    return user.plano_estrategico
 
 
 class OnboardingRespostas(BaseModel):
@@ -256,6 +331,8 @@ def salvar_onboarding(body: OnboardingRespostas, db: Session = Depends(get_db)):
     if not portfolio:
         portfolio = Portfolio(
             user_id=user.id,
+            nome="Carteira Real",
+            tipo="real",
             patrimonio_total=body.patrimonio_total,
             patrimonio_inicio=body.patrimonio_total,
             **{f"alvo_{k}": v for k, v in alocacao.items()},
@@ -267,6 +344,9 @@ def salvar_onboarding(body: OnboardingRespostas, db: Session = Depends(get_db)):
 
     db.commit()
     db.refresh(user)
+    if portfolio and not user.portfolio_ativo_id:
+        user.portfolio_ativo_id = portfolio.id
+        db.commit()
 
     return {
         "user_id": user.id,
@@ -376,19 +456,22 @@ def _calcular_score(respostas: dict) -> int:
 def _get_alocacao(estrategia: str) -> dict:
     if estrategia == "ALPHA":
         return {
-            "etfs": 25.0, "fiis": 10.0, "renda_fixa": 10.0,
-            "momentum": 20.0, "wheel": 10.0, "alpha": 10.0,
-            "dividendos": 0.0, "caixa": 5.0,
+            # Agressivo: foco em momentum + alpha + wheel
+            "etfs": 20.0, "fiis": 10.0, "renda_fixa": 5.0,
+            "momentum": 25.0, "wheel": 10.0, "alpha": 20.0,
+            "dividendos": 0.0, "caixa": 10.0,
         }
     elif estrategia == "RENDA":
         return {
-            "etfs": 10.0, "fiis": 35.0, "renda_fixa": 30.0,
-            "momentum": 0.0, "wheel": 0.0, "alpha": 0.0,
-            "dividendos": 20.0, "caixa": 5.0,
+            # Foco em renda: FIIs + dividendos + RF, com wheel para premium de opções
+            "etfs": 10.0, "fiis": 30.0, "renda_fixa": 25.0,
+            "momentum": 0.0, "wheel": 5.0, "alpha": 0.0,
+            "dividendos": 25.0, "caixa": 5.0,
         }
     else:  # CORE
         return {
-            "etfs": 35.0, "fiis": 20.0, "renda_fixa": 20.0,
-            "momentum": 15.0, "wheel": 0.0, "alpha": 0.0,
-            "dividendos": 0.0, "caixa": 10.0,
+            # Equilibrado: todos os módulos representados
+            "etfs": 30.0, "fiis": 15.0, "renda_fixa": 15.0,
+            "momentum": 15.0, "wheel": 5.0, "alpha": 5.0,
+            "dividendos": 5.0, "caixa": 10.0,
         }

@@ -1,14 +1,16 @@
 """Rota do chat com o gestor IA."""
 import asyncio
+from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_user_id
-from app.models import User, Portfolio, Position
-from app.ai import chat_stream, build_portfolio_prompt, chat
-from app.data import get_macro_br, get_macro_global, get_dados_tecnicos, formatar_tecnico_para_prompt
+from app.models import Position
+from app.cerebro import chat_stream, build_portfolio_prompt
+from app.cerebro.contexto import montar as montar_contexto
+from app.data import get_dados_tecnicos, formatar_tecnico_para_prompt
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -18,15 +20,21 @@ class ChatMensagem(BaseModel):
     historico: list[dict] = []
 
 
-class PropostaMudanca(BaseModel):
-    descricao: str   # o que o usuário quer mudar, em linguagem livre
+
 
 
 @router.post("/")
 async def chat_com_gestor(body: ChatMensagem, user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
-    """Streaming de chat com o gestor IA com contexto completo do portfólio."""
-    user, portfolio, posicoes, macro, system = await _build_context(db, user_id)
-    messages = body.historico + [{"role": "user", "content": body.mensagem}]
+    """Streaming de chat com o gestor IA com contexto completo do portfólio (v2)."""
+    ctx, system = await _build_context(db, user_id)
+
+    # Chat V2: injeta contexto enriquecido na mensagem do usuário
+    contexto_extra = _montar_contexto_chat(ctx, db)
+    mensagem_user = body.mensagem
+    if contexto_extra:
+        mensagem_user = f"{body.mensagem}\n\n---\n[CONTEXTO AUTOMÁTICO — não mencione que recebeu isto]\n{contexto_extra}"
+
+    messages = body.historico + [{"role": "user", "content": mensagem_user}]
 
     async def gerador():
         async for trecho in chat_stream(system=system, messages=messages, max_tokens=4000):
@@ -38,76 +46,120 @@ async def chat_com_gestor(body: ChatMensagem, user_id: Optional[int] = Depends(g
 @router.get("/analisar-posicao/{position_id}")
 async def analisar_posicao(position_id: int, user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
     """
-    Streaming: análise focada de uma posição individual.
-    Adapta o framework automaticamente ao módulo (tese DCA vs trade tático vs renda).
+    Streaming: CEO Brain diagnostica uma posição com cotação ao vivo e técnicos reais.
+    Sem rodar motores — monitoramento puro da posição existente.
     """
-    user, portfolio, posicoes, macro, system = await _build_context(db, user_id)
+    ctx, _ = await _build_context(db, user_id)
 
-    # Busca a posição específica
     pos_db = db.query(Position).filter(
         Position.id == position_id,
-        Position.portfolio_id == portfolio.id,
+        Position.portfolio_id == ctx.portfolio_id,
         Position.ativa == True,
     ).first()
     if not pos_db:
         raise HTTPException(status_code=404, detail="Posição não encontrada")
 
-    modulo = pos_db.modulo or "—"
-    ticker = pos_db.ticker
+    mercado = getattr(pos_db, "mercado", "B3") or "B3"
     moeda = getattr(pos_db, "moeda", "BRL") or "BRL"
+    moeda_str = "US$" if moeda == "USD" else "R$"
+    modulo = (pos_db.modulo or "alpha").lower()
 
-    # Monta contexto específico da posição
-    if moeda == "USD":
-        pm_usd = getattr(pos_db, "preco_medio_usd", None) or pos_db.preco_medio
-        preco_info = f"Preço médio: US$ {pm_usd:,.2f} | Moeda: USD"
-    else:
-        preco_atual = pos_db.preco_atual or pos_db.preco_medio
-        pl = pos_db.pl_percentual or 0
-        preco_info = f"Preço médio: R$ {pos_db.preco_medio:,.2f} | Atual: R$ {preco_atual:,.2f} | P&L: {pl:+.1f}%"
-
-    tese_str = f"\nTese registrada: \"{pos_db.tese}\"" if getattr(pos_db, "tese", None) else ""
-    stop_str = f"\nStop atual: R$ {pos_db.stop_loss:,.2f}" if pos_db.stop_loss else ""
-    alvo_str = f"\nAlvo 1: R$ {pos_db.alvo_1:,.2f}" if pos_db.alvo_1 else ""
-    mercado_str = f" | Mercado: {pos_db.mercado}" if getattr(pos_db, "mercado", None) else ""
-
-    from datetime import datetime
-    data_atual = datetime.now().strftime("%d/%m/%Y")
-
-    # Busca dados técnicos em tempo real
-    mercado_cod = getattr(pos_db, "mercado", None) or "B3"
-    tecnico = await get_dados_tecnicos(ticker, mercado_cod)
-    bloco_tecnico = formatar_tecnico_para_prompt(
-        tecnico,
-        moeda="US$" if moeda == "USD" else "R$"
-    )
-
-    # Atualiza preco_info com cotação ao vivo se disponível
-    preco_live = tecnico.get("preco_atual")
-    if preco_live and moeda != "USD":
-        pl_live = ((preco_live - pos_db.preco_medio) / pos_db.preco_medio * 100) if pos_db.preco_medio else 0
-        preco_info = f"Preço médio: R$ {pos_db.preco_medio:,.2f} | Cotação ao vivo: R$ {preco_live:,.2f} | P&L agora: {pl_live:+.1f}%"
-
-    prompt = f"""DATA DE HOJE: {data_atual}. Use esta data como referência para todas as suas análises, projeções e recomendações. Nunca cite datas anteriores a esta como futuras.
-
-Analise a posição abaixo de forma objetiva e completa. Não repita o que eu disse — adicione informação.
-
-POSIÇÃO: {ticker} | Módulo: {modulo}{mercado_str}
-{preco_info}{tese_str}{stop_str}{alvo_str}
-
-ANÁLISE TÉCNICA (dados em tempo real):
-{bloco_tecnico}
-
-Aplique o framework correto para o módulo:
-
-{"— É uma posição de TESE (DCA de convicção). Avalie: (1) o fundamento original ainda se sustenta dado o cenário macro atual? (2) o preço atual fortalece ou enfraquece a convicção — é oportunidade de aportar mais ou sinal de deterioração? (3) há algo no cenário macroeconômico atual (juros, câmbio, setor) que invalida ou reforça a tese? Diga claramente: MANTER, APORTAR MAIS ou TESE INVALIDADA — e justifique." if modulo == "teses" else
-"— É uma posição TÁTICA. Avalie: (1) o setup original ainda está válido? (2) o stop atual está adequado ou precisa ser ajustado? (3) o alvo segue sendo realista? (4) há razão para aumentar, reduzir ou zerar a posição agora? Seja específico." if modulo in ("momentum", "alpha") else
-"— É uma posição de RENDA. Avalie: (1) o yield atual é compatível com a taxa de juros vigente? (2) há risco de corte de dividendo/distribuição? (3) a posição está bem alocada dentro do portfólio? Recomende manter, aumentar ou reduzir."}
-
-Contexto macro relevante: {_formatar_macro_simples(macro)}
-Regime: {portfolio.regime}"""
+    # Detecta se posição é recente (< 24h)
+    pos_age_hours = None
+    if pos_db.created_at:
+        pos_age_hours = (datetime.utcnow() - pos_db.created_at).total_seconds() / 3600
+    is_fresh = pos_age_hours is not None and pos_age_hours < 24
 
     async def gerador():
-        async for trecho in chat_stream(system=system, messages=[{"role": "user", "content": prompt}], max_tokens=2500):
+        yield f"🔍 Buscando dados ao vivo de {pos_db.ticker}...\n\n"
+
+        # Busca cotação e dados técnicos ao vivo — sem motores
+        tecnico = await get_dados_tecnicos(pos_db.ticker, mercado)
+        tec_texto = formatar_tecnico_para_prompt(tecnico, moeda=moeda_str)
+
+        pm = pos_db.preco_medio or 0
+        pm_usd = getattr(pos_db, "preco_medio_usd", None)
+        preco_live = tecnico.get("preco_atual") or pos_db.preco_atual or pm
+        pl_pct = ((preco_live - pm) / pm * 100) if pm > 0 else (pos_db.pl_percentual or 0)
+
+        tese = pos_db.tese or "Sem tese registrada"
+        stop = pos_db.stop_loss
+        alvo = pos_db.alvo_1
+
+        stop_info = ""
+        if stop and preco_live:
+            dist_stop = ((preco_live - stop) / preco_live) * 100
+            stop_info = f"\nStop: {moeda_str} {stop:,.2f} ({dist_stop:+.1f}% do preço atual)"
+
+        alvo_info = ""
+        if alvo and preco_live:
+            dist_alvo = ((alvo - preco_live) / preco_live) * 100
+            alvo_info = f"\nAlvo: {moeda_str} {alvo:,.2f} ({dist_alvo:+.1f}% do preço atual)"
+
+        plano_resumo = ""
+        if ctx.plano_estrategico:
+            p = ctx.plano_estrategico
+            plano_resumo = f"\nPlano: {p.get('objetivo', '')} | Horizonte: {p.get('horizonte', '')} | Perfil: {ctx.estrategia}"
+
+        macro_str = ""
+        if ctx.macro:
+            m = ctx.macro
+            macro_str = f"\nMacro: Selic {m.get('selic_atual', '?')}% | VIX {m.get('vix', '?')} | Regime: {ctx.regime or '—'}"
+
+        fresh_clause = ""
+        if is_fresh:
+            fresh_clause = """
+CONTEXTO IMPORTANTE: Esta posição foi montada há menos de 24 horas.
+NÃO gere red flags sobre itens que já foram avaliados na montagem (stops, alocação, tese).
+Foque em confirmar a configuração e validar que a execução está conforme o planejado.
+Uma posição recém-criada com P&L próximo de zero é NORMAL."""
+
+        SYSTEM = f"""\
+Você é o CEO Brain APEX — gestor sênior com visão completa do portfólio.
+Sua missão é diagnosticar esta posição com dados reais ao vivo.
+{fresh_clause}
+FRAMEWORK DE DIAGNÓSTICO:
+  APORTAR MAIS  → tese sólida, preço representa oportunidade, técnicos favoráveis
+  MANTER        → posição ok, sem catalisador para mudar, risco controlado
+  REDUZIR       → risco/retorno desfavorável, posição acima do peso ideal
+  ZERAR         → fundamento deteriorado, stop rompido ou tese invalidada
+
+PRINCÍPIOS:
+1. Use os dados técnicos ao vivo como evidência — não especule.
+2. Analise o stop com precisão: está próximo? foi rompido?
+3. A tese de entrada ainda é válida dado o preço atual?
+4. Selic alta = renda fixa competitiva — o retorno esperado justifica o risco?
+5. Seja específico: mostre os números. Evite respostas vagas.
+6. Retorne markdown limpo. Sem JSON, sem blocos de código."""
+
+        pm_str = f"PM: {moeda_str} {pm:,.2f}"
+        if pm_usd:
+            pm_str += f" (US$ {pm_usd:,.2f})"
+
+        age_str = ""
+        if is_fresh and pos_age_hours is not None:
+            age_str = f"\n⏱️ POSIÇÃO RECÉM-CRIADA (há {pos_age_hours:.0f}h) — avalie como revisão pós-montagem, não como correção."
+
+        USER = f"""DIAGNÓSTICO DE POSIÇÃO — {pos_db.ticker.upper()} [{modulo.upper()}]{age_str}
+
+Tese de entrada: {tese}
+{pm_str}
+P&L atual: {pl_pct:+.1f}%{stop_info}{alvo_info}
+{plano_resumo}{macro_str}
+
+DADOS TÉCNICOS AO VIVO:
+{tec_texto}
+
+Diagnostique esta posição. Devo APORTAR MAIS, MANTER, REDUZIR ou ZERAR?
+Seja direto e use os dados acima como base."""
+
+        yield "✅ Dados ao vivo coletados — CEO Brain analisando...\n\n"
+
+        async for trecho in chat_stream(
+            system=SYSTEM,
+            messages=[{"role": "user", "content": USER}],
+            max_tokens=2500,
+        ):
             yield trecho
 
     return StreamingResponse(gerador(), media_type="text/plain")
@@ -115,286 +167,238 @@ Regime: {portfolio.regime}"""
 
 @router.get("/analisar-carteira")
 async def analisar_carteira(
-    modulo: Optional[str] = None,  # None = tudo, ou "teses", "momentum", "fiis", etc.
+    modulo: Optional[str] = None,
     user_id: Optional[int] = Depends(get_user_id),
     db: Session = Depends(get_db),
 ):
     """
-    Streaming: análise completa da carteira (ou de um módulo específico).
-    Produz diagnóstico + ação recomendada para cada posição.
+    Streaming: CEO Brain monitora a carteira com cotações ao vivo.
+    Sem rodar motores — análise de saúde pura do que já existe.
     """
-    from datetime import datetime
-    user, portfolio, posicoes, macro, system = await _build_context(db, user_id)
-    data_atual = datetime.now().strftime("%d/%m/%Y")
+    ctx, _ = await _build_context(db, user_id)
 
-    # Filtra por módulo se solicitado
-    if modulo and modulo != "todos":
-        posicoes_filtradas = [p for p in posicoes if (p.get("modulo") or "").lower() == modulo.lower()]
-    else:
-        posicoes_filtradas = posicoes
-
-    if not posicoes_filtradas:
+    if not ctx.posicoes:
         async def vazio():
-            yield "Nenhuma posição encontrada para este filtro."
+            yield "Nenhuma posição encontrada na carteira."
         return StreamingResponse(vazio(), media_type="text/plain")
 
-    # Busca cotações ao vivo para todas as posições de forma paralela
-    tarefas_tecnico = [
-        get_dados_tecnicos(p.get("ticker", ""), p.get("mercado") or "B3")
-        for p in posicoes_filtradas
-    ]
-    resultados_tecnicos = await asyncio.gather(*tarefas_tecnico, return_exceptions=True)
+    posicoes_filtradas = ctx.posicoes
+    if modulo and modulo != "todos":
+        posicoes_filtradas = [p for p in ctx.posicoes if (p.get("modulo") or "").lower() == modulo.lower()]
 
-    # Formata cada posição com todos os dados disponíveis
-    linhas = []
-    for i, p in enumerate(posicoes_filtradas):
-        ticker = p.get("ticker", "?")
-        tipo = p.get("tipo", "-")
-        mod = p.get("modulo") or "-"
-        pm = p.get("preco_medio") or 0
-        moeda = p.get("moeda") or "BRL"
-        mercado = p.get("mercado") or "B3"
-        stop = p.get("stop_loss")
-        tese = p.get("tese")
-        pm_usd = p.get("preco_medio_usd")
-
-        # Usa cotação ao vivo se disponível
-        tec = resultados_tecnicos[i] if not isinstance(resultados_tecnicos[i], Exception) else {}
-        preco_live = tec.get("preco_atual") if isinstance(tec, dict) else None
-
-        if moeda == "USD":
-            # Para posições em dólar NÃO mistura preços — usa P&L armazenado
-            pl = p.get("pl_percentual") or 0
-            preco_live_str = f" → US${preco_live:,.2f} [live]" if preco_live else ""
-            pm_ref = f"US${pm_usd:,.2f}" if pm_usd else f"R${pm:,.2f}"
-            linha = f"- {ticker} ({tipo}, {mod}, {mercado}): PM {pm_ref}{preco_live_str} | P&L {pl:+.1f}%"
-        else:
-            atual = preco_live or p.get("preco_atual") or pm
-            pl = ((atual - pm) / pm * 100) if (pm and atual) else (p.get("pl_percentual") or 0)
-            fonte = "live" if preco_live else "bd"
-            linha = f"- {ticker} ({tipo}, {mod}): PM R${pm:,.2f} → R${atual:,.2f} [{fonte}] | P&L {pl:+.1f}%"
-
-        # Indicadores técnicos compactos
-        if isinstance(tec, dict) and not tec.get("erro"):
-            rsi = tec.get("rsi14")
-            tend = tec.get("tendencia", "")
-            macd_d = tec.get("macd")
-            tech_parts = []
-            if rsi:
-                tech_parts.append(f"RSI={rsi}")
-            if tend:
-                tech_parts.append(tend.split(" (")[0])  # só a palavra chave
-            if macd_d:
-                tech_parts.append(f"MACD={macd_d['cruzamento']}")
-            if tech_parts:
-                linha += f" | {' | '.join(tech_parts)}"
-
-        if stop:
-            linha += f" | stop R${stop:,.2f}"
-        if tese:
-            linha += f"\n  Tese: \"{tese[:120]}{'...' if len(tese) > 120 else ''}\""
-        linhas.append(linha)
-
-    posicoes_str = "\n".join(linhas)
-    filtro_label = f"Módulo: {modulo.upper()}" if (modulo and modulo != "todos") else "Carteira completa"
-
-    prompt = f"""DATA DE HOJE: {data_atual}. Use esta data em todas as projeções — nunca cite datas passadas como futuras.
-
-Faça o DIAGNÓSTICO COMPLETO DA CARTEIRA abaixo. Você tem visão do portfólio inteiro — use isso.
-
-{filtro_label} | {len(posicoes_filtradas)} posições
-
-POSIÇÕES:
-{posicoes_str}
-
-MACRO ATUAL: {_formatar_macro_simples(macro)}
-Regime: {portfolio.regime}
-
----
-
-ESTRUTURA OBRIGATÓRIA:
-
-**DIAGNÓSTICO GERAL** (4-5 linhas)
-Saúde da carteira: P&L agregado, concentração de risco, exposição ao macro atual. Há posições correlacionadas que aumentam o risco sem que o investidor perceba? O portfólio está adequado ao regime {portfolio.regime}?
-
-**ANÁLISE POR POSIÇÃO**
-Para cada posição, uma linha de ação clara:
-
-Formato obrigatório por posição:
-**[TICKER]** → [AÇÃO EM MAIÚSCULA] — justificativa em 1-2 linhas
-
-Ações possíveis: APORTAR MAIS | MANTER | REDUZIR | ZERAR | AJUSTAR STOP | AJUSTAR ALVO | TESE INVALIDADA
-
-Framework por tipo:
-- Teses (DCA): fundamento ainda válido? Preço é oportunidade ou deterioração? Selic {macro.get('selic', '?')}% compete com esse ativo?
-- Momentum/Alpha: stop adequado? Alvo realista? Setup ainda ativo?
-- FIIs/Renda: yield vs curva de juros. Manter, aumentar ou reduzir exposição?
-
-**TOP 3 PRIORIDADES AGORA**
-As 3 ações mais urgentes desta carteira, em ordem de prioridade. Seja específico — ticker + número concreto quando aplicável."""
+    # Detecta se carteira é recém-criada (posição mais antiga < 24h)
+    _agora = datetime.utcnow()
+    _idades = []
+    for p in posicoes_filtradas:
+        ca = p.get("created_at")
+        if ca:
+            try:
+                dt = datetime.fromisoformat(ca) if isinstance(ca, str) else ca
+                _idades.append((_agora - dt).total_seconds() / 3600)
+            except Exception:
+                pass
+    carteira_recente = bool(_idades) and max(_idades) < 24
 
     async def gerador():
-        async for trecho in chat_stream(system=system, messages=[{"role": "user", "content": prompt}], max_tokens=4000):
+        n = len(posicoes_filtradas)
+        yield f"📡 Buscando cotações ao vivo de {n} posições...\n\n"
+
+        # Busca técnicos de todas as posições em paralelo — sem motores
+        tarefas = [
+            get_dados_tecnicos(p["ticker"], p.get("mercado", "B3") or "B3")
+            for p in posicoes_filtradas
+        ]
+        resultados = await asyncio.gather(*tarefas, return_exceptions=True)
+
+        linhas_pos = []
+        stops_proximos = []
+
+        for pos, tec in zip(posicoes_filtradas, resultados):
+            ticker = pos.get("ticker", "?")
+            moeda = pos.get("moeda", "BRL") or "BRL"
+            moeda_str = "US$" if moeda == "USD" else "R$"
+            pm = pos.get("preco_medio") or 0
+            stop = pos.get("stop_loss")
+            modulo_pos = pos.get("modulo", "-")
+
+            if isinstance(tec, Exception) or not isinstance(tec, dict):
+                preco_live = pos.get("preco_atual") or pm
+                tec_resumo = "dados técnicos indisponíveis"
+            else:
+                preco_live = tec.get("preco_atual") or pos.get("preco_atual") or pm
+                tendencia = tec.get("tendencia", "—")
+                rsi = tec.get("rsi14")
+                dist_ma20 = tec.get("dist_ma20", "?")
+                tec_resumo = f"Tendência: {tendencia} | RSI: {rsi} | vs MA20: {dist_ma20}"
+
+            pl = ((preco_live - pm) / pm * 100) if pm > 0 else 0
+
+            linha = f"  • {ticker} [{modulo_pos}]: PM {moeda_str}{pm:,.2f} → {moeda_str}{preco_live:,.2f} | P&L {pl:+.1f}%"
+            if stop and preco_live:
+                dist_stop = ((preco_live - stop) / preco_live) * 100
+                linha += f" | stop {moeda_str}{stop:,.2f} ({dist_stop:+.1f}%)"
+                if abs(dist_stop) < 5:
+                    stops_proximos.append(f"{ticker} ({dist_stop:+.1f}% do stop)")
+            linha += f"\n    {tec_resumo}"
+            linhas_pos.append(linha)
+
+        macro_str = ""
+        if ctx.macro:
+            m = ctx.macro
+            macro_str = (
+                f"\nMacro: Selic {m.get('selic_atual', '?')}% | "
+                f"IPCA 12m {m.get('ipca_12m', '?')}% | "
+                f"VIX {m.get('vix', '?')} | "
+                f"Regime: {ctx.regime or '—'}"
+            )
+
+        plano_str = ""
+        if ctx.plano_estrategico:
+            p = ctx.plano_estrategico
+            plano_str = f"\nPlano: {p.get('objetivo', '')} | Horizonte: {p.get('horizonte', '')} | Perfil: {ctx.estrategia}"
+
+        stops_alerta = ""
+        if stops_proximos:
+            stops_alerta = "\n⚠️ STOPS PRÓXIMOS (< 5%): " + ", ".join(stops_proximos)
+
+        fresh_cart = ""
+        if carteira_recente:
+            fresh_cart = """
+CONTEXTO IMPORTANTE: Esta carteira foi montada há menos de 24 horas pelo próprio sistema.
+As posições, stops, alvos e alocações foram escolhidos com base no perfil e nos motores especializados.
+NÃO critique decisões recém-tomadas — P&L próximo de zero é ESPERADO. Stops configurados pelo sistema são intencionais.
+Foque em: confirmar que a montagem está coerente com o plano, e apontar APENAS riscos externos ou mudanças macro que ocorreram APÓS a montagem."""
+
+        SYSTEM = f"""\
+Você é o CEO Brain APEX — gestor sênior com visão completa do portfólio.
+Sua missão é monitorar a saúde da carteira com dados reais ao vivo.
+
+ESTA É UMA ANÁLISE DE MONITORAMENTO — não de reconstrução. A carteira já foi montada.
+Seu papel: identificar riscos imediatos, desvios do plano e posições que merecem atenção.
+{fresh_cart}
+
+PERGUNTAS QUE DEVE RESPONDER:
+1. Algum stop está prestes a ser atingido? Qual a urgência?
+2. O P&L de cada posição está saudável para o tempo de vida esperado?
+3. A alocação real está desviando do plano estratégico?
+4. O cenário macro atual afeta alguma posição específica?
+5. Alguma posição perdeu a tese? O que fazer?
+
+FORMATO DE RESPOSTA:
+- **Saúde Geral:** [ÓTIMA / BOA / ATENÇÃO / CRÍTICA]
+- Destaques positivos
+- Alertas e riscos imediatos
+- Posições que merecem revisão (com dados)
+- Recomendação de curto prazo
+
+Use markdown limpo. Sem JSON. Seja direto e baseado nos dados."""
+
+        age_cart = ""
+        if carteira_recente and _idades:
+            age_cart = f"\n⏱️ CARTEIRA RECÉM-MONTADA (posição mais antiga: {max(_idades):.0f}h atrás)"
+
+        USER = f"""MONITORAMENTO DE CARTEIRA{' — módulo ' + modulo.upper() if modulo else ''}{age_cart}
+
+POSIÇÕES COM COTAÇÃO AO VIVO:
+{chr(10).join(linhas_pos)}{stops_alerta}{plano_str}{macro_str}
+
+Patrimônio total: R$ {(ctx.patrimonio_total or 0):,.0f}
+Módulos ativos: {', '.join(ctx.modulos_ativos or [])}
+
+Faça o diagnóstico de saúde desta carteira. Foque nos riscos imediatos e desvios do plano."""
+
+        yield "✅ Dados ao vivo coletados — CEO Brain analisando...\n\n"
+
+        async for trecho in chat_stream(
+            system=SYSTEM,
+            messages=[{"role": "user", "content": USER}],
+            max_tokens=4000,
+        ):
             yield trecho
 
     return StreamingResponse(gerador(), media_type="text/plain")
 
 
-async def propor_mudanca(body: PropostaMudanca, user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
-    """
-    Analisa uma proposta de mudança estrutural no portfólio.
-    Não streaming — retorna JSON com análise + ação proposta para confirmação.
-    """
-    user, portfolio, posicoes, macro, system = await _build_context(db, user_id)
-
-    # Alocação REAL: calculada a partir das posições abertas, não dos alvos
-    patrimonio_calc = sum(p["valor_atual"] for p in posicoes)
-    alocacao_atual = _calcular_alocacao_real(posicoes, patrimonio_calc)
-
-    prompt_analise = f"""O investidor está solicitando a seguinte mudança no portfólio:
-
-"{body.descricao}"
-
-Alocação atual: {alocacao_atual}
-Estratégia atual: APEX {user.estrategia}
-
-Analise esta proposta considerando:
-1. O perfil do investidor e sua tolerância declarada ao risco
-2. O regime de mercado atual ({portfolio.regime})
-3. Se a mudança é prudente e bem fundamentada
-4. Quais riscos e oportunidades ela traz
-
-Depois da análise, proponha a nova alocação em JSON no formato exato abaixo (obrigatório, ao final da resposta):
-
-PROPOSTA_JSON:{{
-  "tipo": "rebalancear" | "ativar_modulo" | "desativar_modulo" | "mudar_estrategia",
-  "descricao_curta": "Resumo em 1 linha",
-  "nova_estrategia": "CORE|ALPHA|RENDA|CUSTOM ou null",
-  "nova_alocacao": {{"etfs": X, "fiis": X, "renda_fixa": X, "momentum": X, "wheel": X, "alpha": X, "dividendos": X, "caixa": X}},
-  "pode_aplicar": true | false,
-  "motivo_bloqueio": "Se pode_aplicar=false, explicar por quê"
-}}
-
-Seja direto e honesto. Se a mudança não fizer sentido para o perfil, diga claramente."""
-
-    resposta = await chat(
-        system=system,
-        messages=[{"role": "user", "content": prompt_analise}],
-        max_tokens=1200,
-    )
-
-    # Extrai o bloco JSON da resposta
-    import json, re
-    analise = resposta
-    acao_proposta = None
-
-    match = re.search(r"PROPOSTA_JSON:(\{.*?\})\s*$", resposta, re.DOTALL)
-    if match:
-        analise = resposta[:match.start()].strip()
-        try:
-            acao_proposta = json.loads(match.group(1))
-        except Exception:
-            acao_proposta = None
-
-    return {
-        "analise": analise,
-        "acao_proposta": acao_proposta,
-        "requer_confirmacao": acao_proposta is not None and acao_proposta.get("pode_aplicar", False),
-    }
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async def _build_context(db: Session, user_id: Optional[int] = None):
-    """Monta contexto completo de portfólio para injetar no prompt."""
-    user = (db.query(User).filter(User.id == user_id).first() if user_id
-            else db.query(User).first())
-    if not user or not user.onboarding_completo:
-        raise HTTPException(status_code=400, detail="Onboarding não concluído")
+    """Monta ContextoCerebro e o system prompt — fonte única de verdade para todos os endpoints."""
+    try:
+        ctx = await montar_contexto(db, user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
-    portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
-    if not portfolio:
-        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+    if not ctx:
+        raise HTTPException(status_code=400, detail="Não foi possível montar o contexto")
 
-    posicoes_db = db.query(Position).filter(
-        Position.portfolio_id == portfolio.id,
-        Position.ativa == True,
-    ).all()
-    posicoes = [
-        {
-            "ticker": p.ticker, "tipo": p.tipo, "modulo": p.modulo,
-            "preco_medio": p.preco_medio,
-            "preco_atual": p.preco_atual or p.preco_medio,
-            "pl_percentual": p.pl_percentual or 0,
-            "stop_loss": p.stop_loss,
-            "quantidade": p.quantidade or 0,
-            "valor_investido": p.valor_investido or 0,
-            "valor_atual": (p.preco_atual or p.preco_medio or 0) * (p.quantidade or 0),
-            # Módulo Teses
-            "tese": p.tese or None,
-            "mercado": p.mercado or None,
-            "moeda": p.moeda or "BRL",
-            "preco_medio_usd": getattr(p, 'preco_medio_usd', None),
-        }
-        for p in posicoes_db
-    ]
-
-    macro_br, macro_global = await get_macro_br(), await get_macro_global()
-    macro = {**macro_br, **macro_global}
-
-    drawdown_map = {"CORE": 15, "RENDA": 10, "ALPHA": 30, "CUSTOM": 20}
+    macro_flags = []
+    if ctx.regime_info and hasattr(ctx.regime_info, "flags"):
+        macro_flags = ctx.regime_info.flags
+    elif ctx.macro_context and hasattr(ctx.macro_context, "flags"):
+        macro_flags = ctx.macro_context.flags
 
     system = build_portfolio_prompt(
-        user_name=user.name,
-        estrategia=user.estrategia or "CORE",
-        patrimonio=portfolio.patrimonio_total or 0,
-        modulos_ativos=_get_modulos_ativos(portfolio),
-        tolerancia_drawdown=drawdown_map.get(user.estrategia or "CORE", 15),
-        perfil_resumo=user.estrategia_resumo or "Perfil definido no onboarding.",
-        posicoes=posicoes,
-        regime=portfolio.regime or "MISTO",
-        macro=macro,
+        user_name=ctx.user_name,
+        estrategia=ctx.estrategia,
+        patrimonio=ctx.patrimonio_total,
+        modulos_ativos=ctx.modulos_ativos,
+        tolerancia_drawdown=ctx.drawdown_tolerado,
+        perfil_resumo=ctx.perfil_resumo,
+        posicoes=ctx.posicoes,
+        regime=ctx.regime,
+        macro=ctx.macro,
+        narrativa_macro=ctx.narrativa_macro,
+        macro_flags=macro_flags,
     )
 
-    return user, portfolio, posicoes, macro, system
+    return ctx, system
 
 
-def _get_modulos_ativos(portfolio: Portfolio) -> list[str]:
-    modulos = []
-    if portfolio.alvo_etfs > 0: modulos.append("ETFs")
-    if portfolio.alvo_fiis > 0: modulos.append("FIIs")
-    if portfolio.alvo_renda_fixa > 0: modulos.append("Renda Fixa")
-    if portfolio.alvo_momentum > 0: modulos.append("Momentum")
-    if portfolio.alvo_wheel > 0: modulos.append("Wheel")
-    if getattr(portfolio, "alvo_dividendos", 0) > 0: modulos.append("Dividendos")
-    if portfolio.alvo_alpha > 0: modulos.append("Convicção ALPHA")
-    if getattr(portfolio, "alvo_teses", 0) > 0: modulos.append("Teses")
-    return modulos
-
-
-def _calcular_alocacao_real(posicoes: list[dict], patrimonio: float) -> dict:
-    """Calcula a alocação REAL em % por módulo a partir das posições abertas."""
-    modulos = {"etfs": 0.0, "fiis": 0.0, "renda_fixa": 0.0, "momentum": 0.0,
-               "wheel": 0.0, "alpha": 0.0, "dividendos": 0.0, "caixa": 0.0}
-    if patrimonio <= 0:
-        return modulos
-    for p in posicoes:
-        modulo = (p.get("modulo") or "caixa").lower()
-        if modulo in modulos:
-            modulos[modulo] += (p["valor_atual"] / patrimonio) * 100
-    return {k: round(v, 1) for k, v in modulos.items()}
-
-
-def _formatar_macro_simples(macro: dict) -> str:
+def _montar_contexto_chat(ctx, db) -> str:
+    """Monta contexto enriquecido para o Chat V2 — macro, teses, correlação, histórico."""
     partes = []
-    if macro.get("selic"):
-        partes.append(f"Selic {macro['selic']}%")
-    if macro.get("ipca"):
-        partes.append(f"IPCA {macro['ipca']}%")
-    if macro.get("dolar"):
-        partes.append(f"USD/BRL {macro['dolar']}")
-    if macro.get("sp500"):
-        partes.append(f"S&P500 {macro['sp500']}")
-    if macro.get("vix"):
-        partes.append(f"VIX {macro['vix']}")
-    return " | ".join(partes) if partes else "dados não disponíveis"
+
+    # Narrativa macro
+    if ctx.narrativa_macro:
+        partes.append(f"NARRATIVA MACRO:\n{ctx.narrativa_macro[:1000]}")
+
+    # Alertas macro
+    macro_flags = []
+    if ctx.regime_info and hasattr(ctx.regime_info, "flags"):
+        macro_flags = ctx.regime_info.flags
+    elif ctx.macro_context and hasattr(ctx.macro_context, "flags"):
+        macro_flags = ctx.macro_context.flags
+    if macro_flags:
+        partes.append("ALERTAS MACRO: " + " | ".join(macro_flags))
+
+    # Status das teses
+    try:
+        from app.cerebro.teses import monitorar_teses
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            pass  # monitorar é async, skip se não pudermos aguardar
+        else:
+            status = loop.run_until_complete(monitorar_teses(db, ctx.portfolio_id))
+            if status.get("total", 0) > 0:
+                teses_txt = f"TESES: {status['total']} total, {status.get('ativas', 0)} ativas"
+                if status.get("enfraquecidas"):
+                    teses_txt += f", {status['enfraquecidas']} enfraquecidas"
+                if status.get("alertas"):
+                    teses_txt += "\n  " + "\n  ".join(status["alertas"][:3])
+                partes.append(teses_txt)
+    except Exception:
+        pass
+
+    # Performance recente
+    try:
+        from app.cerebro.aprendizado import analisar_performance, resumo_performance_texto
+        perf = analisar_performance(db, ctx.portfolio_id, periodo_dias=90)
+        if perf.get("total_trades", 0) > 0:
+            partes.append(f"PERFORMANCE 90d: {resumo_performance_texto(perf)}")
+    except Exception:
+        pass
+
+    return "\n\n".join(partes)

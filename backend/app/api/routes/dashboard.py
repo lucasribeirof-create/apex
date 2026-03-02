@@ -1,11 +1,14 @@
-"""Rota do Dashboard — patrimônio, alocação, performance."""
+"""Rota do Dashboard — patrimônio, alocação, performance, macro, risco."""
 from typing import Optional
 from datetime import datetime, date
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.api.deps import get_db, get_user_id
+from app.api.deps import get_db, get_user_id, get_portfolio_ativo
 from app.models import User, Portfolio, Position
-from app.data import get_quotes, get_macro_br, get_macro_global
+from app.data import get_quotes, get_macro_br, get_macro_global, get_history_global
+from app.data.cache import cache as _market_cache
+from app.core.regime import calcular_regime
+from app.logger import logger
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -18,7 +21,7 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
     if not user or not user.onboarding_completo:
         raise HTTPException(status_code=400, detail="Onboarding não concluído")
 
-    portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
+    portfolio = get_portfolio_ativo(user, db)
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfólio não encontrado")
 
@@ -84,6 +87,42 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
         "caixa": portfolio.alvo_caixa,
     }
 
+    # ── Regime de mercado: calcula e persiste no portfolio ─────────────────────
+    # Usa o cache compartilhado com /market/regime (TTL 1h) para não reprocessar
+    _REGIME_KEY = "market:regime"
+    _cached_regime = _market_cache.get(_REGIME_KEY)
+    from app.core.regime import RegimeInfo as _RegimeInfo
+    regime_info = None
+    if _cached_regime:
+        if isinstance(_cached_regime, _RegimeInfo):
+            regime_atual = str(_cached_regime.regime)
+            regime_info = _cached_regime
+        else:
+            regime_atual = str(_cached_regime.get("regime", "MISTO"))
+    else:
+        # Tenta calcular com dados macro enriquecidos
+        macro_ctx = None
+        try:
+            from app.cerebro.macro import montar_macro
+            macro_ctx = await montar_macro()
+        except Exception:
+            pass
+
+        ibov_data = await get_history_global("^BVSP", period="1y", interval="1d")
+        if ibov_data and len(ibov_data) >= 50:
+            closes = [r["close"] for r in ibov_data if r.get("close") is not None]
+            _res = calcular_regime(closes, macro_context=macro_ctx)
+            regime_atual = str(_res.regime)
+            regime_info = _res
+            _market_cache.set(_REGIME_KEY, _res, ttl=3600)
+        else:
+            regime_atual = portfolio.regime or "MISTO"
+
+    if portfolio.regime != regime_atual:
+        portfolio.regime = regime_atual
+        portfolio.regime_atualizado_em = datetime.utcnow()
+        db.commit()
+
     # Dados macro
     macro_br, macro_global = await get_macro_br(), await get_macro_global()
 
@@ -108,7 +147,7 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
             "alvo": alocacao_alvo,
             "desvios": _calcular_desvios(alocacao_atual, alocacao_alvo),
         },
-        "regime": portfolio.regime or "MISTO",
+        "regime": regime_atual,
         "posicoes": posicoes_data,
         "macro": {**macro_br, **macro_global},
     }
@@ -136,3 +175,146 @@ def _calcular_desvios(atual: dict, alvo: dict) -> dict:
             semaforo = "vermelho"
         result[modulo] = {"desvio": round(desvio, 1), "semaforo": semaforo}
     return result
+
+
+# ─── Dashboard V2 — Endpoints enriquecidos ────────────────────────────────────
+
+@router.get("/macro")
+async def get_macro_dashboard():
+    """Painel macro completo — VIX, DXY, yields, commodities, Brasil."""
+    try:
+        from app.cerebro.macro import montar_macro
+        macro = await montar_macro()
+        return {
+            "global": {
+                "treasury_10y": macro.treasury_10y,
+                "vix": macro.vix,
+                "dxy": macro.dxy,
+                "sp500": macro.sp500,
+                "sp500_var_pct": macro.sp500_var_pct,
+                "petroleo_wti": macro.petroleo_wti,
+                "petroleo_brent": macro.petroleo_brent,
+                "ouro": macro.ouro,
+            },
+            "brasil": {
+                "selic": macro.selic,
+                "ipca_12m": macro.ipca_12m,
+                "ipca_expectativa": macro.ipca_expectativa,
+                "selic_expectativa": macro.selic_expectativa,
+                "juro_real": macro.juro_real,
+                "dolar_brl": macro.dolar_brl,
+                "dolar_var_pct": macro.dolar_var_pct,
+                "ibov": macro.ibov,
+                "ibov_var_pct": macro.ibov_var_pct,
+            },
+            "flags": macro.flags,
+            "atualizado_em": macro.atualizado_em,
+        }
+    except Exception as e:
+        logger.error("dashboard/macro falhou: %s", e)
+        raise HTTPException(status_code=503, detail="Dados macro indisponíveis")
+
+
+@router.get("/correlacao")
+async def get_correlacao(user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Mapa de correlação entre posições do portfólio."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    posicoes = db.query(Position).filter(
+        Position.portfolio_id == portfolio.id,
+        Position.ativa == True,
+    ).all()
+
+    posicoes_dict = [
+        {"ticker": p.ticker, "tipo": p.tipo, "modulo": p.modulo,
+         "valor_atual": p.valor_atual or 0}
+        for p in posicoes
+    ]
+
+    try:
+        from app.cerebro.risco import calcular_correlacao
+        resultado = await calcular_correlacao(posicoes_dict)
+        return resultado
+    except Exception as e:
+        logger.error("dashboard/correlacao falhou: %s", e)
+        return {"matriz": {}, "clusters": [], "alertas": []}
+
+
+@router.get("/teses")
+async def get_teses_status(user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Status das teses de investimento do portfólio."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    try:
+        from app.cerebro.teses import monitorar_teses
+        status = await monitorar_teses(db, portfolio.id)
+        return status
+    except Exception as e:
+        logger.error("dashboard/teses falhou: %s", e)
+        return {"total": 0, "ativas": 0, "enfraquecidas": 0, "invalidadas": 0, "alertas": []}
+
+
+@router.get("/performance")
+def get_performance(periodo: int = 90, user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Performance de trading no período (dias)."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    try:
+        from app.cerebro.aprendizado import analisar_performance
+        return analisar_performance(db, portfolio.id, periodo_dias=periodo)
+    except Exception as e:
+        logger.error("dashboard/performance falhou: %s", e)
+        return {"total_trades": 0, "win_rate": 0, "rr_medio": 0}
+
+
+@router.get("/stress")
+async def get_stress_test(user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Stress test do portfólio."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    posicoes = db.query(Position).filter(
+        Position.portfolio_id == portfolio.id,
+        Position.ativa == True,
+    ).all()
+
+    posicoes_dict = [
+        {"ticker": p.ticker, "tipo": p.tipo, "modulo": p.modulo,
+         "valor_atual": p.valor_atual or 0}
+        for p in posicoes
+    ]
+    patrimonio = portfolio.patrimonio_total or sum(p.get("valor_atual", 0) for p in posicoes_dict)
+
+    try:
+        from app.cerebro.risco import stress_test
+        return await stress_test(posicoes_dict, patrimonio)
+    except Exception as e:
+        logger.error("dashboard/stress falhou: %s", e)
+        return []
