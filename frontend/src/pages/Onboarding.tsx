@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ChevronRight, ChevronLeft, Check } from 'lucide-react'
+import { ChevronRight, ChevronLeft, Check, AlertTriangle, TrendingUp, Wallet, Target, Loader2, BrainCircuit, Shield } from 'lucide-react'
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
 import api from '@/services/api'
 import { useStore } from '@/store/useStore'
+import ThinkingSteps from '@/components/ThinkingSteps'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -20,6 +21,7 @@ type Step =
   | 'time'
   | 'objective'
   | 'horizon'
+  | 'aporte'
   | 'result'
 
 interface OnboardingState {
@@ -36,6 +38,8 @@ interface OnboardingState {
   timeAvailable: string
   objective: string
   horizon: string
+  aporteMensal: string   // R$ por mês (vazio = sem aportes)
+  fazAporte: string      // 'sim' | 'nao' | 'eventual'
 }
 
 // ─── Typewriter Hook ─────────────────────────────────────────────────────────
@@ -201,19 +205,37 @@ export default function OnboardingPage() {
     timeAvailable: '',
     objective: '',
     horizon: '',
+    aporteMensal: '',
+    fazAporte: '',
   })
   const [userId, setUserId] = useState<string | null>(null)
   const [result, setResult] = useState<any>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
+  // Plano estratégico (Estrategista)
+  const [plano, setPlano] = useState<any>(null)
+  const [planoLoading, setPlanoLoading] = useState(false)
+  const [selectedCenarioIdx, setSelectedCenarioIdx] = useState<number | null>(null)
+
   const { setUser, setStrategy } = useStore()
   const navigate = useNavigate()
+
+  // Quando chega ao step result, dispara o Estrategista em background
+  useEffect(() => {
+    if (step === 'result' && result?.user_id && !plano && !planoLoading) {
+      setPlanoLoading(true)
+      api.post('/onboarding/plano', { user_id: result.user_id })
+        .then((r) => setPlano(r.data))
+        .catch(() => setPlano(null))
+        .finally(() => setPlanoLoading(false))
+    }
+  }, [step, result])
 
   const stepOrder: Step[] = [
     'welcome', 'name', 'patrimony', 'goal',
     'volatility', 'liquidity', 'income',
-    'experience', 'time', 'objective', 'horizon', 'result',
+    'experience', 'time', 'objective', 'horizon', 'aporte', 'result',
   ]
 
   const stepIndex = stepOrder.indexOf(step)
@@ -253,6 +275,17 @@ export default function OnboardingPage() {
     }
 
     if (step === 'horizon') {
+      if (!state.horizon) return setError('Selecione uma opção para continuar.')
+      setError('')
+      const nextIndex = stepIndex + 1
+      if (nextIndex < stepOrder.length) setStep(stepOrder[nextIndex])
+      return
+    }
+
+    if (step === 'aporte') {
+      if (!state.fazAporte) return setError('Selecione uma opção para continuar.')
+      if (state.fazAporte === 'sim' && !state.aporteMensal) return setError('Informe o valor do aporte mensal.')
+      setError('')
       // Finaliza onboarding
       setLoading(true)
       try {
@@ -268,17 +301,20 @@ export default function OnboardingPage() {
           objective: state.objective,
           horizon: state.horizon,
         }
+        const aporteMensal = state.fazAporte === 'sim'
+          ? (parseFloat(state.aporteMensal.replace(/\./g, '').replace(',', '.')) || 0)
+          : 0
 
         const res = await api.post('/onboarding/finalize', {
           user_id: userId,
           name: state.name,
           answers,
           total_patrimony: parseFloat(state.patrimony.replace(/\D/g, '')) || 0,
+          aporte_mensal: aporteMensal,
         })
 
         setResult(res.data)
-        setUser(String(res.data.user_id), state.name)
-        setStrategy(res.data.strategy_type as 'CORE' | 'ALPHA' | 'RENDA' | 'CUSTOM')
+        // Não autenticar ainda — o usuário precisa escolher o fluxo antes de entrar no app.
         setStep('result')
       } catch {
         setError('Erro ao finalizar onboarding.')
@@ -463,7 +499,7 @@ export default function OnboardingPage() {
                         <OptionButton
                           key={opt.value}
                           selected={state.goalType === opt.value}
-                          onClick={() => setState({ ...state, goalType: opt.value, goalValue: '', goalDescription: '' })}
+                          onClick={() => setState({ ...state, goalType: opt.value, goalValue: '' })}
                         >
                           {opt.label}
                         </OptionButton>
@@ -526,6 +562,23 @@ export default function OnboardingPage() {
                           value={state.goalDescription}
                           onChange={(e) => setState({ ...state, goalDescription: e.target.value })}
                           autoFocus
+                          style={{ lineHeight: '1.6' }}
+                        />
+                      </div>
+                    )}
+
+                    {/* Campo livre complementar — para qualquer tipo de objetivo */}
+                    {state.goalType && state.goalType !== 'livre' && (
+                      <div className="mt-3">
+                        <label className="text-xs mb-1.5 block" style={{ color: '#64748b' }}>
+                          Quer acrescentar algo? (opcional)
+                        </label>
+                        <textarea
+                          className="apex-input resize-none"
+                          rows={3}
+                          placeholder="Ex: Quero crescimento agressivo nos próximos 5 anos e depois viver de renda..."
+                          value={state.goalDescription}
+                          onChange={(e) => setState({ ...state, goalDescription: e.target.value })}
                           style={{ lineHeight: '1.6' }}
                         />
                       </div>
@@ -725,10 +778,54 @@ export default function OnboardingPage() {
                   </div>
                 )}
 
+                {/* ── Aporte ─────────────────────────────────────────────────────── */}
+                {step === 'aporte' && (
+                  <div>
+                    <AIMessage
+                      text={`Quase lá, ${state.name}. Aportes regulares mudam completamente o plano de crescimento patrimonial. Você pretende fazer aportes mensais?`}
+                      typing
+                    />
+                    <div className="space-y-2 mb-4">
+                      {[
+                        { value: 'sim', label: 'Sim — tenho uma renda e consigo poupar todo mês' },
+                        { value: 'eventual', label: 'Eventualmente — quando sobrar dinheiro' },
+                        { value: 'nao', label: 'Não — vou trabalhar só com o capital atual' },
+                      ].map((opt) => (
+                        <OptionButton
+                          key={opt.value}
+                          selected={state.fazAporte === opt.value}
+                          onClick={() => setState({ ...state, fazAporte: opt.value, aporteMensal: opt.value !== 'sim' ? '' : state.aporteMensal })}
+                        >
+                          {opt.label}
+                        </OptionButton>
+                      ))}
+                    </div>
+                    {state.fazAporte === 'sim' && (
+                      <div className="mb-4">
+                        <p className="text-sm mb-2" style={{ color: '#94a3b8' }}>Qual valor mensal você consegue aportar?</p>
+                        <input
+                          className="apex-input"
+                          placeholder="R$ 0"
+                          value={state.aporteMensal ? `R$ ${state.aporteMensal}` : ''}
+                          onChange={(e) => {
+                            const digits = e.target.value.replace(/\D/g, '')
+                            if (!digits) { setState({ ...state, aporteMensal: '' }); return }
+                            setState({ ...state, aporteMensal: Number(digits).toLocaleString('pt-BR') })
+                          }}
+                          onKeyDown={(e) => e.key === 'Enter' && handleNext()}
+                          autoFocus
+                        />
+                      </div>
+                    )}
+                    {error && <p className="text-sm mb-3" style={{ color: '#FF5252' }}>{error}</p>}
+                  </div>
+                )}
+
                 {/* ── Result ───────────────────────────────────────────────── */}
                 {step === 'result' && result && (
                   <div>
-                    <div className="text-center mb-8">
+                    {/* Badge estratégia */}
+                    <div className="text-center mb-6">
                       <div
                         className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-sm font-mono mb-4"
                         style={{
@@ -750,54 +847,406 @@ export default function OnboardingPage() {
                       >
                         APEX {result.strategy_type}
                       </div>
-                      <h2 className="text-2xl font-bold mb-2" style={{ color: '#f1f5f9' }}>
-                        Sua estratégia está pronta
+                      <h2 className="text-2xl font-bold mb-1" style={{ color: '#f1f5f9' }}>
+                        Perfil configurado
                       </h2>
-                      <p className="text-sm" style={{ color: '#94a3b8' }}>
-                        Score de perfil: {result.risk_score}/20
-                      </p>
+                      <p className="text-sm" style={{ color: '#64748b' }}>Score: {result.risk_score}/15</p>
                     </div>
 
-                    {/* Análise da IA */}
-                    <div
-                      className="rounded-xl p-5 mb-6"
-                      style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid #1e293b' }}
-                    >
+                    {/* Diagnóstico do Estrategista */}
+                    <div className="rounded-xl p-5 mb-4" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
                       <div className="flex items-center gap-2 mb-3">
                         <div className="w-6 h-6 rounded-lg flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #00E676, #00BFA5)' }}>
                           <span className="text-xs font-bold" style={{ color: '#0a0e17' }}>A</span>
                         </div>
-                        <span className="text-sm font-medium" style={{ color: '#94a3b8' }}>Gestor APEX</span>
+                        <span className="text-sm font-medium" style={{ color: '#94a3b8' }}>Estrategista APEX</span>
+                        {planoLoading && <Loader2 size={13} className="animate-spin ml-1" style={{ color: '#64748b' }} />}
                       </div>
-                      <p className="text-sm leading-relaxed whitespace-pre-wrap" style={{ color: '#f1f5f9' }}>
-                        {result.ai_explanation}
-                      </p>
+
+                      {planoLoading && !plano && (
+                        <div className="py-3">
+                          <ThinkingSteps
+                            steps={[
+                              'Lendo seu perfil de risco e objetivos...',
+                              'Calculando viabilidade da sua meta financeira...',
+                              'Definindo a estratégia ideal para seu patrimônio...',
+                              'Projetando fases de crescimento e horizontes...',
+                              'Montando diagnóstico personalizado...',
+                            ]}
+                            intervalMs={2500}
+                            color="#00E676"
+                          />
+                        </div>
+                      )}
+
+                      {plano && (
+                        <div className="space-y-4">
+                          {/* Diagnóstico — rich text com **bold** */}
+                          <div className="text-sm leading-relaxed space-y-1.5" style={{ color: '#f1f5f9' }}>
+                            {plano.diagnostico.split('\n').map((line: string, i: number) => {
+                              const parts = line.split(/\*\*(.*?)\*\*/g)
+                              return (
+                                <p key={i} className={line === '' ? 'mb-2' : ''}>
+                                  {parts.map((part: string, j: number) =>
+                                    j % 2 === 1
+                                      ? <strong key={j} style={{ color: '#00E676' }}>{part}</strong>
+                                      : part
+                                  )}
+                                </p>
+                              )
+                            })}
+                          </div>
+
+                          {/* Alerta se meta inviável */}
+                          {!plano.meta_viavel && (
+                            <div className="flex items-start gap-2 rounded-lg px-3 py-2"
+                              style={{ background: 'rgba(251,191,36,0.06)', border: '1px solid rgba(251,191,36,0.2)' }}>
+                              <AlertTriangle size={13} style={{ color: '#f59e0b', flexShrink: 0, marginTop: 2 }} />
+                              <span className="text-xs" style={{ color: '#f59e0b' }}>
+                                Meta desafiadora no prazo declarado — veja os cenários abaixo.
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Fase atual */}
+                          <div className="flex items-start gap-3 pt-1">
+                            <div className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+                              style={{ background: 'rgba(0,230,118,0.08)', border: '1px solid rgba(0,230,118,0.15)' }}>
+                              <TrendingUp size={13} style={{ color: '#00E676' }} />
+                            </div>
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-wider mb-0.5" style={{ color: '#00E676' }}>
+                                Fase: {plano.fase_atual}
+                              </p>
+                              <p className="text-xs leading-relaxed" style={{ color: '#94a3b8' }}>{plano.fase_descricao}</p>
+                            </div>
+                          </div>
+
+                          {/* Estratégia recomendada (se diferente da classificada) */}
+                          {plano.estrategia_recomendada !== result.strategy_type && (
+                            <div className="rounded-lg px-3 py-2.5"
+                              style={{ background: 'rgba(0,230,118,0.04)', border: '1px solid rgba(0,230,118,0.12)' }}>
+                              <p className="text-xs font-semibold mb-1" style={{ color: '#00E676' }}>
+                                Estratégia ajustada → APEX {plano.estrategia_recomendada}
+                              </p>
+                              <p className="text-xs" style={{ color: '#64748b' }}>{plano.estrategia_razao}</p>
+                            </div>
+                          )}
+
+                          {/* ── Cenários comparáveis ────────────────────────── */}
+                          {plano.cenarios?.length > 0 && (
+                            <div className="pt-2">
+                              <p className="text-xs font-mono uppercase tracking-wider mb-3" style={{ color: '#475569' }}>Cenários para sua meta</p>
+                              <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${Math.min(plano.cenarios.length, 3)}, 1fr)` }}>
+                                {plano.cenarios.map((c: any, i: number) => {
+                                  const isRec = c.nome?.toLowerCase().includes('recomendado') || c.nome?.toLowerCase().includes('equilibrado')
+                                  const defaultIdx = plano.cenarios.findIndex((x: any) => x.nome?.toLowerCase().includes('recomendado') || x.nome?.toLowerCase().includes('equilibrado'))
+                                  const effectiveSelectedIdx = selectedCenarioIdx !== null ? selectedCenarioIdx : defaultIdx
+                                  const isSelected = i === effectiveSelectedIdx
+                                  const colorMap: Record<number, string> = { 0: '#3B82F6', 1: '#00E676', 2: '#FF9800' }
+                                  const accent = colorMap[i] || '#64748b'
+                                  return (
+                                    <div key={i}
+                                      onClick={() => setSelectedCenarioIdx(i)}
+                                      className="rounded-xl p-4 relative cursor-pointer transition-all"
+                                      style={{
+                                        background: isSelected ? `${accent}08` : 'rgba(30,41,59,0.3)',
+                                        border: isSelected ? `2px solid ${accent}55` : '1px solid #1e293b',
+                                        boxShadow: isSelected ? `0 0 16px ${accent}18` : 'none',
+                                      }}>
+                                      {isRec && (
+                                        <span className="absolute -top-2.5 left-3 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider"
+                                          style={{ background: '#00E676', color: '#0a0e17' }}>
+                                          Recomendado
+                                        </span>
+                                      )}
+                                      {isSelected && !isRec && (
+                                        <span className="absolute -top-2.5 right-3 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider"
+                                          style={{ background: accent, color: '#0a0e17' }}>
+                                          Selecionado
+                                        </span>
+                                      )}
+                                      <p className="text-sm font-bold mb-1.5" style={{ color: accent }}>{c.nome}</p>
+                                      <p className="text-xs leading-relaxed mb-3" style={{ color: '#94a3b8' }}>{c.descricao}</p>
+
+                                      {/* Módulos como chips */}
+                                      <div className="flex flex-wrap gap-1 mb-3">
+                                        {c.modulos?.map((mod: string, mi: number) => (
+                                          <span key={mi} className="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                                            style={{ background: `${accent}12`, color: accent, border: `1px solid ${accent}30` }}>
+                                            {mod}
+                                          </span>
+                                        ))}
+                                      </div>
+
+                                      <div className="space-y-1.5 text-xs">
+                                        <div>
+                                          <span className="block mb-0.5" style={{ color: '#64748b' }}>Alocação</span>
+                                          <span className="font-mono" style={{ color: '#cbd5e1', fontSize: '10px', lineHeight: '1.4' }}>{c.alocacao_resumo}</span>
+                                        </div>
+                                        <div>
+                                          <span className="block mb-0.5" style={{ color: '#64748b' }}>Retorno</span>
+                                          <span className="font-mono font-bold" style={{ color: accent }}>{c.rentabilidade_esperada}</span>
+                                        </div>
+                                        <div>
+                                          <span className="block mb-0.5" style={{ color: '#64748b' }}>Tempo</span>
+                                          <span className="font-mono font-bold" style={{ color: '#f1f5f9' }}>{c.tempo_meta}</span>
+                                        </div>
+                                        <div className="pt-1 mt-1" style={{ borderTop: '1px solid rgba(100,116,139,0.15)' }}>
+                                          <p className="text-[10px] leading-relaxed" style={{ color: '#f59e0b' }}>
+                                            ⚠ {c.risco_principal}
+                                          </p>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* ── Módulos + Riscos + Marcos — tudo reativo ao cenário selecionado ── */}
+                          {(() => {
+                            const defaultIdx = plano.cenarios?.findIndex((x: any) => x.nome?.toLowerCase().includes('recomendado') || x.nome?.toLowerCase().includes('equilibrado')) ?? 1
+                            const selIdx = selectedCenarioIdx !== null ? selectedCenarioIdx : defaultIdx
+                            const selCenario = plano.cenarios?.[selIdx]
+                            const colorMap: Record<number, string> = { 0: '#3B82F6', 1: '#00E676', 2: '#FF9800' }
+                            const accent = colorMap[selIdx] || '#00E676'
+
+                            // Parsear alocacao_resumo → [{pct, nome}]
+                            const parseAlocacao = (resumo: string) =>
+                              (resumo || '').split('·').map(part => {
+                                const t = part.trim()
+                                const m = t.match(/^(\d[\d,.]*)%?\s+(.+)$/)
+                                return m ? { pct: m[1] + '%', nome: m[2].trim() } : { pct: '', nome: t }
+                              }).filter(x => x.nome)
+
+                            const alocItems = parseAlocacao(selCenario?.alocacao_resumo || '')
+
+                            // Módulos enriquecidos: usa peso/por_que de modulos_sugeridos se o nome bater
+                            const sugeridos: Record<string, any> = {}
+                            plano.modulos_sugeridos?.forEach((ms: any) => {
+                              sugeridos[ms.nome?.toLowerCase()] = ms
+                            })
+
+                            const modItems = alocItems.length > 0
+                              ? alocItems.map(({ pct, nome }) => {
+                                  const match = sugeridos[nome.toLowerCase()]
+                                  return { pct: match?.peso_sugerido || pct, nome, por_que: match?.por_que || null }
+                                })
+                              : (selCenario?.modulos || []).map((nome: string) => {
+                                  const match = sugeridos[nome.toLowerCase()]
+                                  return { pct: match?.peso_sugerido || '●', nome, por_que: match?.por_que || null }
+                                })
+
+                            return (
+                              <>
+                                {/* Módulos */}
+                                {modItems.length > 0 && (
+                                  <div className="pt-1">
+                                    <p className="text-xs font-mono uppercase tracking-wider mb-2" style={{ color: '#475569' }}>
+                                      Módulos — {selCenario?.nome || 'Selecionado'}
+                                    </p>
+                                    <div className="space-y-1.5">
+                                      {modItems.map((mod: { pct: string; nome: string; por_que: string | null }, i: number) => (
+                                        <div key={i} className="flex items-center gap-3 rounded-lg px-3 py-2"
+                                          style={{ background: 'rgba(30,41,59,0.5)', border: '1px solid #1e293b' }}>
+                                          <span className="text-xs font-bold font-mono px-2 py-0.5 rounded flex-shrink-0"
+                                            style={{ background: `${accent}12`, color: accent, minWidth: 44, textAlign: 'center' }}>
+                                            {mod.pct}
+                                          </span>
+                                          <div className="min-w-0 flex-1">
+                                            <span className="text-sm font-semibold block" style={{ color: '#f1f5f9' }}>{mod.nome}</span>
+                                            {mod.por_que && (
+                                              <p className="text-xs" style={{ color: '#64748b', lineHeight: '1.4' }}>{mod.por_que}</p>
+                                            )}
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* Riscos — risco_principal do cenário + riscos gerais */}
+                                <div className="rounded-lg px-4 py-3"
+                                  style={{ background: 'rgba(239,68,68,0.04)', border: '1px solid rgba(239,68,68,0.15)' }}>
+                                  <div className="flex items-center gap-2 mb-2">
+                                    <Shield size={13} style={{ color: '#ef4444' }} />
+                                    <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: '#ef4444' }}>
+                                      Riscos — {selCenario?.nome}
+                                    </p>
+                                  </div>
+                                  <div className="space-y-1">
+                                    {selCenario?.risco_principal && (
+                                      <p className="text-xs leading-relaxed pl-5 font-medium" style={{ color: '#fca5a5' }}>
+                                        • {selCenario.risco_principal}
+                                      </p>
+                                    )}
+                                    {plano.riscos_e_tradeoffs?.map((r: string, i: number) => (
+                                      <p key={i} className="text-xs leading-relaxed pl-5" style={{ color: '#fca5a580' }}>
+                                        • {r}
+                                      </p>
+                                    ))}
+                                  </div>
+                                </div>
+
+                                {/* Marcos */}
+                                {plano.marcos?.length > 0 && (
+                                  <div>
+                                    <p className="text-xs font-mono uppercase tracking-wider mb-2" style={{ color: '#475569' }}>Marcos de progresso</p>
+                                    <div className="space-y-2">
+                                      {plano.marcos.map((m: any, i: number) => (
+                                        <div key={i} className="flex items-start gap-3 rounded-lg px-3 py-2"
+                                          style={{ background: 'rgba(30,41,59,0.5)', border: '1px solid #1e293b' }}>
+                                          <Target size={12} style={{ color: accent, flexShrink: 0, marginTop: 2 }} />
+                                          <div className="min-w-0 flex-1">
+                                            <div className="flex items-baseline gap-2 flex-wrap">
+                                              <span className="text-sm font-semibold" style={{ color: '#f1f5f9' }}>
+                                                R$ {(m.patrimonio / 1_000_000).toFixed(1)}M
+                                              </span>
+                                              <span className="text-xs" style={{ color: '#64748b' }}>→</span>
+                                              <span className="text-xs font-mono" style={{ color: '#00BFA5' }}>
+                                                ~R$ {m.renda_mensal_possivel.toLocaleString('pt-BR')}/mês
+                                              </span>
+                                              <span className="text-xs font-mono" style={{ color: accent }}>
+                                                ~{m.estimativa_anos}a
+                                              </span>
+                                            </div>
+                                            <p className="text-xs mt-0.5" style={{ color: '#475569' }}>{m.descricao}</p>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </>
+                            )
+                          })()}
+                        </div>
+                      )}
+
+                      {!planoLoading && !plano && (
+                        <p className="text-sm leading-relaxed" style={{ color: '#f1f5f9' }}>{result.ai_explanation}</p>
+                      )}
                     </div>
 
-                    {/* Gráfico de alocação */}
-                    <div
-                      className="rounded-xl p-5 mb-6"
-                      style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid #1e293b' }}
-                    >
-                      <h3 className="text-sm font-medium mb-4" style={{ color: '#94a3b8' }}>ALOCAÇÃO ALVO</h3>
+                    {/* Alocação alvo */}
+                    <div className="rounded-xl p-5 mb-6" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
+                      <h3 className="text-xs font-mono uppercase tracking-wider mb-4" style={{ color: '#64748b' }}>Alocação alvo inicial</h3>
                       <AllocationChart
-                        allocation={{
-                          ETFs: result.allocation.etfs,
-                          FIIs: result.allocation.fiis,
-                          'Renda Fixa': result.allocation.renda_fixa,
-                          Momentum: result.allocation.momentum,
-                          Wheel: result.allocation.wheel,
-                          Convicção: result.allocation.alpha,
-                          Dividendos: result.allocation.dividendos ?? 0,
-                          Caixa: result.allocation.caixa ?? result.allocation.cash ?? 0,
-                        }}
+                        allocation={(() => {
+                          // Se o Estrategista recomendou outra estratégia e já devolveu a alocação correta, usa ela
+                          const src = (plano?.allocation) || result.allocation
+                          return {
+                            ETFs: src.etfs ?? 0,
+                            FIIs: src.fiis ?? 0,
+                            'Renda Fixa': src.renda_fixa ?? 0,
+                            Momentum: src.momentum ?? 0,
+                            Wheel: src.wheel ?? 0,
+                            Convicção: src.alpha ?? 0,
+                            Dividendos: src.dividendos ?? 0,
+                            Caixa: src.caixa ?? src.cash ?? 0,
+                          }
+                        })()}
                       />
                     </div>
 
-                    <button className="btn-primary w-full flex items-center justify-center gap-2" onClick={handleFinish}>
-                      Entrar no APEX Manager
-                      <ChevronRight size={18} />
-                    </button>
+                    {/* ─── ESCOLHA DO FLUXO — só aparece quando análise concluída ─────────── */}
+                    <div className="mt-6">
+                      <div className="text-center mb-5">
+                        <p className="text-base font-bold" style={{ color: '#f1f5f9' }}>Como você quer começar?</p>
+                        <p className="text-sm mt-1" style={{ color: '#64748b' }}>Essa escolha define o próximo passo no APEX</p>
+                      </div>
+
+                      {/* Aguardando análise */}
+                      {planoLoading && (
+                        <div className="flex items-center gap-3 justify-center py-6 rounded-xl mb-3"
+                          style={{ background: 'rgba(0,230,118,0.03)', border: '1px dashed rgba(0,230,118,0.2)' }}>
+                          <Loader2 size={16} className="animate-spin" style={{ color: '#00E676' }} />
+                          <span className="text-sm" style={{ color: '#64748b' }}>Estrategista analisando seu perfil... aguarde para continuar</span>
+                        </div>
+                      )}
+
+                      {/* Card 1: Já tenho investimentos */}
+                      <button
+                        className="w-full text-left rounded-2xl p-5 mb-3 transition-all"
+                        style={{
+                          background: planoLoading ? 'rgba(30,41,59,0.4)' : 'rgba(0,230,118,0.05)',
+                          border: planoLoading ? '2px solid rgba(30,41,59,0.5)' : '2px solid rgba(0,230,118,0.3)',
+                          cursor: planoLoading ? 'not-allowed' : 'pointer',
+                          opacity: planoLoading ? 0.5 : 1,
+                        }}
+                        disabled={planoLoading}
+                        onMouseEnter={(e) => { if (!planoLoading) { e.currentTarget.style.background = 'rgba(0,230,118,0.10)'; e.currentTarget.style.borderColor = 'rgba(0,230,118,0.55)' }}}
+                        onMouseLeave={(e) => { if (!planoLoading) { e.currentTarget.style.background = 'rgba(0,230,118,0.05)'; e.currentTarget.style.borderColor = 'rgba(0,230,118,0.3)' }}}
+                        onClick={() => {
+                          if (planoLoading) return
+                          setUser(String(result.user_id), state.name)
+                          setStrategy((plano?.estrategia_recomendada || result.strategy_type) as 'CORE' | 'ALPHA' | 'RENDA' | 'CUSTOM')
+                          navigate('/positions')
+                        }}
+                      >
+                        <div className="flex items-start gap-4">
+                          <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: 'rgba(0,230,118,0.12)', border: '1px solid rgba(0,230,118,0.2)' }}>
+                            <Wallet size={20} style={{ color: '#00E676' }} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-base font-semibold mb-1" style={{ color: '#f1f5f9' }}>Já tenho investimentos</div>
+                            <div className="text-sm leading-relaxed" style={{ color: '#94a3b8' }}>
+                              Vou registrar os ativos que já tenho. O cérebro analisa minha carteira atual e sugere realocações baseadas na estratégia <strong style={{ color: '#00E676' }}>APEX {plano?.estrategia_recomendada || result.strategy_type}</strong>.
+                            </div>
+                            <div className="mt-3 flex items-center gap-2 text-xs font-mono flex-wrap">
+                              <span className="px-2 py-0.5 rounded" style={{ background: 'rgba(0,230,118,0.08)', color: '#00E676' }}>Preencher portfólio</span>
+                              <span style={{ color: '#475569' }}>→</span>
+                              <span className="px-2 py-0.5 rounded" style={{ background: 'rgba(0,230,118,0.08)', color: '#00E676' }}>Cérebro analisa</span>
+                              <span style={{ color: '#475569' }}>→</span>
+                              <span className="px-2 py-0.5 rounded" style={{ background: 'rgba(0,230,118,0.08)', color: '#00E676' }}>Sugestões de ajuste</span>
+                            </div>
+                          </div>
+                          <ChevronRight size={20} style={{ color: planoLoading ? '#1e293b' : '#475569', flexShrink: 0, marginTop: 2 }} />
+                        </div>
+                      </button>
+
+                      {/* Card 2: Começando do zero */}
+                      <button
+                        className="w-full text-left rounded-2xl p-5 transition-all"
+                        style={{
+                          background: planoLoading ? 'rgba(30,41,59,0.4)' : 'rgba(0,191,165,0.05)',
+                          border: planoLoading ? '2px solid rgba(30,41,59,0.5)' : '2px solid rgba(0,191,165,0.3)',
+                          cursor: planoLoading ? 'not-allowed' : 'pointer',
+                          opacity: planoLoading ? 0.5 : 1,
+                        }}
+                        disabled={planoLoading}
+                        onMouseEnter={(e) => { if (!planoLoading) { e.currentTarget.style.background = 'rgba(0,191,165,0.10)'; e.currentTarget.style.borderColor = 'rgba(0,191,165,0.55)' }}}
+                        onMouseLeave={(e) => { if (!planoLoading) { e.currentTarget.style.background = 'rgba(0,191,165,0.05)'; e.currentTarget.style.borderColor = 'rgba(0,191,165,0.3)' }}}
+                        onClick={() => {
+                          if (planoLoading) return
+                          setUser(String(result.user_id), state.name)
+                          setStrategy((plano?.estrategia_recomendada || result.strategy_type) as 'CORE' | 'ALPHA' | 'RENDA' | 'CUSTOM')
+                          navigate('/sugestoes-alocacao')
+                        }}
+                      >
+                        <div className="flex items-start gap-4">
+                          <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: 'rgba(0,191,165,0.12)', border: '1px solid rgba(0,191,165,0.2)' }}>
+                            <BrainCircuit size={20} style={{ color: '#00BFA5' }} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-base font-semibold mb-1" style={{ color: '#f1f5f9' }}>Estou começando do zero</div>
+                            <div className="text-sm leading-relaxed" style={{ color: '#94a3b8' }}>
+                              Ainda não tenho ativos. O gestor APEX age como um gestor profissional: analisa o momento de mercado, seu perfil e seu capital, e monta um plano de alocação inicial com o que comprar.
+                            </div>
+                            <div className="mt-3 flex items-center gap-2 text-xs font-mono flex-wrap">
+                              <span className="px-2 py-0.5 rounded" style={{ background: 'rgba(0,191,165,0.08)', color: '#00BFA5' }}>Macro + perfil</span>
+                              <span style={{ color: '#475569' }}>→</span>
+                              <span className="px-2 py-0.5 rounded" style={{ background: 'rgba(0,191,165,0.08)', color: '#00BFA5' }}>Plano de alocação</span>
+                              <span style={{ color: '#475569' }}>→</span>
+                              <span className="px-2 py-0.5 rounded" style={{ background: 'rgba(0,191,165,0.08)', color: '#00BFA5' }}>O que comprar</span>
+                            </div>
+                          </div>
+                          <ChevronRight size={20} style={{ color: planoLoading ? '#1e293b' : '#475569', flexShrink: 0, marginTop: 2 }} />
+                        </div>
+                      </button>
+                    </div>
                   </div>
                 )}
 

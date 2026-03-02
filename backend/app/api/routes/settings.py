@@ -7,7 +7,7 @@ DELETE /settings/ai      → limpa tudo
 """
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from app.ai.client import (
+from app.cerebro.client import (
     load_ai_settings, save_ai_settings, set_active_provider,
     is_ai_configured, load_all_providers, DEFAULT_MODELS, SETTINGS_FILE,
     testar_chave_api,

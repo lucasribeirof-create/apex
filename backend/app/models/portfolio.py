@@ -11,12 +11,20 @@ class Portfolio(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # Identificação do portfólio
+    nome = Column(String(100), default="Carteira Real")
+    tipo = Column(String(20), default="real")     # real | simulada
+
     # Patrimônio snapshot (atualizado quando o usuário acessa o app)
     patrimonio_total = Column(Float, default=0.0)
     patrimonio_ontem = Column(Float, default=0.0)
     patrimonio_mes_inicio = Column(Float, default=0.0)
     patrimonio_ano_inicio = Column(Float, default=0.0)
     patrimonio_inicio = Column(Float, default=0.0)        # desde o início
+
+    # Capital declarado pelo usuário (carteira real)
+    # Used to compute caixa_disponivel = capital_declarado - soma_posicoes
+    capital_declarado = Column(Float, nullable=True)      # None = não declarado
 
     # Alocação alvo (%) por módulo — definida no onboarding
     alvo_etfs = Column(Float, default=0.0)

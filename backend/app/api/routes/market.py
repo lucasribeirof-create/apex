@@ -53,13 +53,24 @@ async def regime_mercado():
         raise HTTPException(status_code=503, detail="Dados do IBOV indisponíveis")
 
     closes = [r["close"] for r in data if r.get("close") is not None]
-    resultado = calcular_regime(closes)
-    acoes = get_acoes_permitidas_regime(resultado["regime"])
+
+    # Tenta enriquecer com MacroContext se disponível
+    macro_ctx = None
+    try:
+        from app.cerebro.macro import montar_macro
+        macro_ctx = await montar_macro()
+    except Exception:
+        pass
+
+    resultado = calcular_regime(closes, macro_context=macro_ctx)
+    acoes = get_acoes_permitidas_regime(resultado.regime)
 
     resposta = {
-        "regime": resultado["regime"],
-        "motivo": resultado["motivo"],
-        "detalhes": resultado["detalhes"],
+        "regime": resultado.regime,
+        "motivo": resultado.regime_motivo,
+        "detalhes": resultado.detalhes,
+        "sinais": resultado.sinais,
+        "flags": resultado.flags,
         "acoes": acoes,
     }
     cache.set(cache_key, resposta, ttl=TTL)

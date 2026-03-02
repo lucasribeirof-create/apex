@@ -1,6 +1,7 @@
 import { NavLink, useNavigate } from 'react-router-dom'
 import { LayoutDashboard, Newspaper, TrendingUp, Search, MessageSquare, LogOut, RefreshCw, Settings, Lightbulb } from 'lucide-react'
 import { useStore } from '@/store/useStore'
+import PortfolioSwitcher from '@/components/PortfolioSwitcher'
 import clsx from 'clsx'
 
 const navItems = [
@@ -65,6 +66,11 @@ export default function Sidebar() {
             APEX {strategyType}
           </span>
         </div>
+      </div>
+
+      {/* Portfolio Switcher */}
+      <div className="py-3 border-b" style={{ borderColor: '#1e293b' }}>
+        <PortfolioSwitcher onSwitch={() => window.dispatchEvent(new Event('portfolio-changed'))} />
       </div>
 
       {/* Navigation */}

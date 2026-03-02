@@ -7,8 +7,10 @@
  * Painel de Tese: edita e salva a tese via PATCH /portfolio/posicoes/{id}.
  */
 import { useEffect, useRef, useState, KeyboardEvent } from 'react'
-import { X, BrainCircuit, Loader2, Send, BookText, Check, ChevronDown, ChevronUp } from 'lucide-react'
+import { X, BrainCircuit, Loader2, Send, BookText, Check, ChevronDown, ChevronUp, FlaskConical, Lightbulb, Download } from 'lucide-react'
+import DOMPurify from 'dompurify'
 import api from '@/services/api'
+import { useStore } from '@/store/useStore'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -50,6 +52,9 @@ const MODULO_LABEL: Record<string, string> = {
 export default function AnaliseModal({
   positionId, ticker, modulo, tese, onClose, onTeseSalva,
 }: AnaliseModalProps) {
+  const { portfolioAtivo, userId } = useStore()
+  const isSimulada = portfolioAtivo?.tipo === 'simulada'
+  const isTese = portfolioAtivo?.tipo === 'tese'
   const [fase, setFase] = useState<'analisando' | 'chat'>('analisando')
   const [mensagens, setMensagens] = useState<Mensagem[]>([])
   const [input, setInput] = useState('')
@@ -74,7 +79,9 @@ export default function AnaliseModal({
 
     async function fetchStream() {
       try {
-        const res = await fetch(`${API_BASE}/chat/analisar-posicao/${positionId}`)
+        const _headers: Record<string, string> = {}
+        if (userId) _headers['x-user-id'] = String(userId)
+        const res = await fetch(`${API_BASE}/chat/analisar-posicao/${positionId}`, { headers: _headers })
         if (!res.ok) {
           const j = await res.json().catch(() => ({ detail: 'Erro desconhecido' }))
           setErro(j.detail || 'Erro ao analisar posição')
@@ -127,9 +134,11 @@ export default function AnaliseModal({
     }, 50)
 
     try {
+      const _chatHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (userId) _chatHeaders['x-user-id'] = String(userId)
       const res = await fetch(`${API_BASE}/chat/`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: _chatHeaders,
         body: JSON.stringify({ mensagem: texto, historico: historicoAtual }),
       })
 
@@ -199,6 +208,30 @@ export default function AnaliseModal({
     setSalvandoTese(false)
   }
 
+  // ─── Download conversa ───────────────────────────────────────────────────────
+  const downloadConversa = () => {
+    if (mensagens.length === 0) return
+    const data = new Date().toLocaleDateString('pt-BR').replace(/\//g, '-')
+    const hora = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }).replace(':', 'h')
+    let md = `# Análise APEX — ${ticker}\n`
+    md += `**Módulo:** ${MODULO_LABEL[modulo] ?? modulo}  \n`
+    md += `**Data:** ${data} ${hora}  \n\n---\n\n`
+    for (const m of mensagens) {
+      if (m.role === 'user') {
+        md += `**Você:**\n${m.content}\n\n`
+      } else {
+        md += `**APEX Manager:**\n${m.content}\n\n`
+      }
+    }
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `APEX_${ticker}_${data}.md`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -216,20 +249,47 @@ export default function AnaliseModal({
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b flex-shrink-0" style={{ borderColor: '#1e293b' }}>
           <div className="flex items-center gap-3">
-            <BrainCircuit className="w-5 h-5" style={{ color: '#00E676' }} />
+            {isTese
+              ? <Lightbulb className="w-5 h-5" style={{ color: '#AA00FF' }} />
+              : isSimulada
+              ? <FlaskConical className="w-5 h-5" style={{ color: '#FF9800' }} />
+              : <BrainCircuit className="w-5 h-5" style={{ color: '#00E676' }} />
+            }
             <div>
-              <p className="font-bold text-white">{ticker}</p>
+              <div className="flex items-center gap-2">
+                <p className="font-bold text-white">{ticker}</p>
+                {isSimulada && (
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded" style={{ background: 'rgba(255,152,0,0.12)', color: '#FF9800', border: '1px solid rgba(255,152,0,0.25)' }}>SIMULADA</span>
+                )}
+                {isTese && (
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded" style={{ background: 'rgba(170,0,255,0.12)', color: '#AA00FF', border: '1px solid rgba(170,0,255,0.25)' }}>TESE</span>
+                )}
+              </div>
               <p className="text-xs" style={{ color: '#64748b' }}>
                 {MODULO_LABEL[modulo] ?? modulo}
                 {fase === 'chat' && (
-                  <span className="ml-2" style={{ color: '#00E676' }}>• chat ativo</span>
+                  <span className="ml-2" style={{ color: isTese ? '#AA00FF' : isSimulada ? '#FF9800' : '#00E676' }}>• chat ativo</span>
                 )}
               </p>
             </div>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg transition-colors" style={{ color: '#64748b' }}>
-            <X size={18} />
-          </button>
+          <div className="flex items-center gap-2">
+            {mensagens.length > 0 && (
+              <button
+                onClick={downloadConversa}
+                title="Download da conversa (.md)"
+                className="p-1.5 rounded-lg transition-colors"
+                style={{ color: '#64748b' }}
+                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = '#00E676'; (e.currentTarget as HTMLButtonElement).style.background = 'rgba(0,230,118,0.08)' }}
+                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = '#64748b'; (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
+              >
+                <Download size={15} />
+              </button>
+            )}
+            <button onClick={onClose} className="p-1.5 rounded-lg transition-colors" style={{ color: '#64748b' }}>
+              <X size={18} />
+            </button>
+          </div>
         </div>
 
         {/* Mensagens */}
@@ -267,7 +327,7 @@ export default function AnaliseModal({
                     </div>
                   ) : (
                     <>
-                      <div dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }} />
+                      <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(renderMarkdown(m.content)) }} />
                       {m.streaming && (
                         <span
                           className="inline-block w-1.5 h-4 ml-0.5 animate-pulse"

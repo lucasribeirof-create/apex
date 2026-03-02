@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Users, Plus, TrendingUp, ChevronRight, Loader2 } from 'lucide-react'
+import { Plus, TrendingUp, ChevronRight, Loader2, Trash2 } from 'lucide-react'
 import { useStore, StrategyType } from '@/store/useStore'
 import { useNavigate } from 'react-router-dom'
 import api from '@/services/api'
@@ -24,26 +24,50 @@ const fmt = (n: number | null) =>
   n == null ? '—' : `R$ ${n.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
 
 export default function UserPickerPage() {
-  const { setUser, setStrategy } = useStore()
+  const { setUser, setStrategy, userId: activeUserId } = useStore()
   const navigate = useNavigate()
   const [users, setUsers] = useState<UserRecord[]>([])
   const [loading, setLoading] = useState(true)
+  const [deletingId, setDeletingId] = useState<number | null>(null)
 
-  useEffect(() => {
+  const load = () => {
+    setLoading(true)
     api.get('/onboarding/usuarios')
       .then((r) => {
         setUsers(r.data)
-        // If no users exist, go straight to onboarding
         if (r.data.length === 0) navigate('/onboarding', { replace: true })
       })
       .catch(() => setUsers([]))
       .finally(() => setLoading(false))
-  }, [navigate])
+  }
+
+  useEffect(() => { load() }, [navigate])
 
   const selectUser = (user: UserRecord) => {
     setUser(String(user.id), user.name)
     if (user.estrategia) setStrategy(user.estrategia)
     navigate('/briefing')
+  }
+
+  const handleDelete = async (e: React.MouseEvent, user: UserRecord) => {
+    e.stopPropagation()
+    if (!confirm(`Apagar a carteira "${user.name}"? Esta ação não pode ser desfeita.`)) return
+    setDeletingId(user.id)
+    try {
+      await api.delete(`/onboarding/usuarios/${user.id}`)
+    } catch (err: any) {
+      if (err?.response?.status !== 404) {
+        alert('Erro ao apagar. Tente novamente.')
+        setDeletingId(null)
+        return
+      }
+    }
+    // Se era o usuário ativo, limpa o store
+    if (activeUserId === String(user.id)) {
+      useStore.getState().reset()
+    }
+    setDeletingId(null)
+    load()
   }
 
   return (
@@ -76,38 +100,55 @@ export default function UserPickerPage() {
               {users.map((u, i) => {
                 const meta = STRATEGY_META[u.estrategia ?? 'CORE'] ?? STRATEGY_META.CORE
                 return (
-                  <motion.button
+                  <motion.div
                     key={u.id}
                     initial={{ opacity: 0, y: 12 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: i * 0.06 }}
-                    onClick={() => selectUser(u)}
-                    className="w-full text-left p-4 rounded-xl flex items-center gap-4 transition-all group"
-                    style={{ background: 'rgba(15,23,42,0.7)', border: '1px solid #1e293b' }}
-                    onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'rgba(0,230,118,0.2)' }}
-                    onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#1e293b' }}
+                    className="flex items-center gap-2"
                   >
-                    {/* Avatar */}
-                    <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-                      style={{ background: meta.bg, border: `1px solid ${meta.color}22` }}>
-                      <TrendingUp size={16} style={{ color: meta.color }} />
-                    </div>
-
-                    {/* Info */}
-                    <div className="flex-1 min-w-0">
-                      <p className="font-semibold text-sm truncate" style={{ color: '#f1f5f9' }}>{u.name}</p>
-                      <div className="flex items-center gap-2 mt-0.5">
-                        <span className="text-xs font-mono px-1.5 py-0.5 rounded"
-                          style={{ background: meta.bg, color: meta.color }}>
-                          {meta.label}
-                        </span>
-                        <span className="text-xs" style={{ color: '#475569' }}>{fmt(u.patrimonio)}</span>
+                    <button
+                      onClick={() => selectUser(u)}
+                      className="flex-1 text-left p-4 rounded-xl flex items-center gap-4 transition-all group"
+                      style={{ background: 'rgba(15,23,42,0.7)', border: `1px solid ${activeUserId === String(u.id) ? 'rgba(0,230,118,0.3)' : '#1e293b'}` }}
+                      onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'rgba(0,230,118,0.2)' }}
+                      onMouseLeave={(e) => { e.currentTarget.style.borderColor = activeUserId === String(u.id) ? 'rgba(0,230,118,0.3)' : '#1e293b' }}
+                    >
+                      {/* Avatar */}
+                      <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+                        style={{ background: meta.bg, border: `1px solid ${meta.color}22` }}>
+                        <TrendingUp size={16} style={{ color: meta.color }} />
                       </div>
-                    </div>
 
-                    <ChevronRight size={15} style={{ color: '#475569' }}
-                      className="group-hover:text-green-400 transition-colors flex-shrink-0" />
-                  </motion.button>
+                      {/* Info */}
+                      <div className="flex-1 min-w-0">
+                        <p className="font-semibold text-sm truncate" style={{ color: '#f1f5f9' }}>{u.name}</p>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className="text-xs font-mono px-1.5 py-0.5 rounded"
+                            style={{ background: meta.bg, color: meta.color }}>
+                            {meta.label}
+                          </span>
+                          <span className="text-xs" style={{ color: '#475569' }}>{fmt(u.patrimonio)}</span>
+                        </div>
+                      </div>
+
+                      <ChevronRight size={15} style={{ color: '#475569' }}
+                        className="group-hover:text-green-400 transition-colors flex-shrink-0" />
+                    </button>
+
+                    {/* Delete button */}
+                    <button
+                      onClick={(e) => handleDelete(e, u)}
+                      disabled={deletingId === u.id}
+                      className="p-2.5 rounded-xl flex-shrink-0 transition-all"
+                      style={{ background: 'rgba(255,82,82,0.08)', border: '1px solid rgba(255,82,82,0.15)', color: '#FF5252' }}
+                      title="Apagar carteira"
+                    >
+                      {deletingId === u.id
+                        ? <Loader2 size={14} className="animate-spin" />
+                        : <Trash2 size={14} />}
+                    </button>
+                  </motion.div>
                 )
               })}
 

@@ -1,7 +1,7 @@
 ﻿import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Send, MessageSquare, Wand2, X, Check, AlertTriangle } from 'lucide-react'
-import { useStore } from '@/store/useStore'
+import { Send, MessageSquare, Wand2, X, Check, AlertTriangle, Trash2 } from 'lucide-react'
+import { useStore, ChatMessage, ChatRegularMessage, ChatProposalMessage, ChatProposalAction } from '@/store/useStore'
 import api from '@/services/api'
 
 // ─── Markdown renderer ───────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ interface ProposalMessage {
   status: 'pendente' | 'aprovado' | 'cancelado'
 }
 
-type ChatMessage = RegularMessage | ProposalMessage
+// ChatMessage re-exported from store (types kept local for compatibility)
 
 function toHistorico(msgs: ChatMessage[]) {
   return msgs
@@ -198,14 +198,23 @@ function ProposalCard({
 // â”€â”€â”€ Main page â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export default function ChatPage() {
-  const setStrategy = useStore((s) => s.setStrategy)
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const setStrategy     = useStore((s) => s.setStrategy)
+  const messages        = useStore((s) => s.chatMessages)
+  const setChatMessages = useStore((s) => s.setChatMessages)
+  const clearChat       = useStore((s) => s.clearChat)
   const [streamingText, setStreamingText] = useState('')
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [proposalMode, setProposalMode] = useState(false)
   const [applyingIdx, setApplyingIdx] = useState<number | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+
+  // Helper that mirrors the setState(fn) pattern but writes to store
+  const setMessages = (updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => {
+    const current = useStore.getState().chatMessages
+    const next = typeof updater === 'function' ? updater(current) : updater
+    setChatMessages(next)
+  }
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -324,7 +333,9 @@ export default function ChatPage() {
           api.get('/portfolio/posicoes'),
           api.get('/teses'),
         ])
-        const posicoes = posRes.status === 'fulfilled' ? posRes.value.data : []
+        const posicoes = posRes.status === 'fulfilled'
+          ? (Array.isArray(posRes.value.data) ? posRes.value.data : posRes.value.data?.posicoes ?? [])
+          : []
         const teses = tesRes.status === 'fulfilled' ? tesRes.value.data : []
 
         const sugs: string[] = []
@@ -361,6 +372,17 @@ export default function ChatPage() {
       <div className="flex items-center gap-2 mb-6 flex-shrink-0">
         <MessageSquare size={18} style={{ color: '#00E676' }} />
         <h1 className="text-2xl font-bold" style={{ color: '#f1f5f9' }}>Chat com o Gestor</h1>
+        {messages.length > 0 && (
+          <button
+            onClick={clearChat}
+            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all"
+            style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', color: '#ef4444' }}
+            title="Limpar conversa"
+          >
+            <Trash2 size={12} />
+            Limpar
+          </button>
+        )}
       </div>
 
       {/* Messages */}

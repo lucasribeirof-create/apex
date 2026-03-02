@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, X, TrendingUp, TrendingDown, Circle, Trash2, ChevronDown, ChevronUp, BrainCircuit, LayoutList } from 'lucide-react'
-import AnaliseModal from '@/components/AnaliseModal'
+import { useNavigate } from 'react-router-dom'
+import { Plus, X, TrendingUp, TrendingDown, Circle, Trash2, ChevronDown, ChevronUp, BrainCircuit, LayoutList, FlaskConical, Pencil, Check } from 'lucide-react'
+import PosicaoDetalheModal from '@/components/PosicaoDetalheModal'
 import CarteiraPanel from '@/components/CarteiraPanel'
 import api from '@/services/api'
+import { useStore } from '@/store/useStore'
 
 interface Position {
   id: number
@@ -43,7 +45,6 @@ const MODULE_LABELS: Record<string, string> = {
   renda_fixa: 'Renda Fixa',
   alpha: 'Alpha',
   dividendos: 'Dividendos',
-  teses: 'Teses',
   caixa: 'Caixa',
 }
 
@@ -209,7 +210,7 @@ function StopBadge({ preco_atual, stop_loss }: { preco_atual: number; stop_loss:
   return null
 }
 
-function ModuleGroup({ modulo, positions, onDelete, onAnalise }: { modulo: string; positions: Position[]; onDelete: (id: number) => void; onAnalise: (id: number, ticker: string, modulo: string, tese?: string | null) => void }) {
+function ModuleGroup({ modulo, positions, onDelete, onDetalhe }: { modulo: string; positions: Position[]; onDelete: (id: number) => void; onDetalhe: (p: Position) => void }) {
   const [open, setOpen] = useState(true)
   const totalVal = positions.reduce((a, p) => a + p.valor_atual, 0)
   const totalPL = positions.reduce((a, p) => a + p.pl_reais, 0)
@@ -298,8 +299,8 @@ function ModuleGroup({ modulo, positions, onDelete, onAnalise }: { modulo: strin
                   </div>
                   <div className="flex items-center justify-end gap-1">
                     <button
-                      onClick={() => onAnalise(p.id, p.ticker, p.modulo || 'outros', p.tese)}
-                      title="Analisar posição"
+                      onClick={() => onDetalhe(p)}
+                      title="Ver detalhes e analisar posição"
                       className="flex items-center justify-center w-7 h-7 rounded transition-all"
                       style={{ color: '#a78bfa', opacity: 0.5 }}
                       onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(139,92,246,0.12)' }}
@@ -329,20 +330,55 @@ function ModuleGroup({ modulo, positions, onDelete, onAnalise }: { modulo: strin
 }
 
 export default function PositionsPage() {
+  const navigate = useNavigate()
+  const { portfolioAtivo } = useStore()
+  const isSimulada = portfolioAtivo?.tipo === 'simulada'
   const [positions, setPositions] = useState<Position[]>([])
+  const [capitalDeclarado, setCapitalDeclarado] = useState<number | null>(null)
+  const [editandoCapital, setEditandoCapital] = useState(false)
+  const [capitalInput, setCapitalInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [showAdd, setShowAdd] = useState(false)
   const [showCarteira, setShowCarteira] = useState(false)
-  const [analisando, setAnalisando] = useState<{ id: number; ticker: string; modulo: string; tese?: string | null } | null>(null)
+  const [analisando, setAnalisando] = useState<Position | null>(null)
 
   const loadPositions = async () => {
     setLoading(true)
     try {
       const res = await api.get('/portfolio/posicoes')
-      setPositions(res.data)
+      // Backend retorna { posicoes, capital_declarado, caixa_disponivel }
+      const data = res.data
+      if (Array.isArray(data)) {
+        setPositions(data) // fallback para resposta antiga
+      } else {
+        setPositions(data.posicoes || [])
+        setCapitalDeclarado(data.capital_declarado ?? null)
+      }
     } catch { /* silent */ }
     setLoading(false)
+  }
+
+  const formatCapitalInput = (raw: string) => {
+    // Strip everything except digits and comma
+    const digits = raw.replace(/[^\d]/g, '')
+    if (!digits) return ''
+    const num = parseInt(digits, 10)
+    // Format as pt-BR integer (dots as thousand separators, no decimals while typing)
+    return num.toLocaleString('pt-BR')
+  }
+
+  const parseCapitalInput = (formatted: string) =>
+    parseFloat(formatted.replace(/\./g, '').replace(',', '.'))
+
+  const salvarCapital = async () => {
+    const val = parseCapitalInput(capitalInput)
+    if (isNaN(val) || val <= 0) return
+    try {
+      await api.patch('/portfolio/capital', { capital_declarado: val })
+      setCapitalDeclarado(val)
+    } catch { /* silent */ }
+    setEditandoCapital(false)
   }
 
   const refreshPrices = async () => {
@@ -362,7 +398,14 @@ export default function PositionsPage() {
     } catch { /* silent */ }
   }
 
-  useEffect(() => { refreshPrices() }, [])
+  useEffect(() => { loadPositions() }, [])
+
+  // Recarrega posições quando o usuário troca de carteira (sem reload completo da página)
+  useEffect(() => {
+    const handler = () => loadPositions()
+    window.addEventListener('portfolio-changed', handler)
+    return () => window.removeEventListener('portfolio-changed', handler)
+  }, [])
 
   const grouped = positions.reduce<Record<string, Position[]>>((acc, p) => {
     const key = p.modulo || 'outros'
@@ -375,26 +418,37 @@ export default function PositionsPage() {
   const totalCurrent = positions.reduce((a, p) => a + p.valor_atual, 0)
   const totalPL = totalCurrent - totalInvested
   const totalPLPct = totalInvested > 0 ? (totalPL / totalInvested) * 100 : 0
+  const caixaDisponivel = capitalDeclarado !== null ? capitalDeclarado - totalCurrent : null
+  const caixaPct = capitalDeclarado && capitalDeclarado > 0 ? (caixaDisponivel! / capitalDeclarado) * 100 : null
 
   return (
     <div className="p-8 space-y-6">
       {/* Side panel análise de carteira */}
       {showCarteira && <CarteiraPanel onClose={() => setShowCarteira(false)} />}
 
-      {/* Análise IA modal */}
+      {/* Detalhe da posição modal */}
       {analisando && (
-        <AnaliseModal
-          positionId={analisando.id}
-          ticker={analisando.ticker}
-          modulo={analisando.modulo}
-          tese={analisando.tese}
+        <PosicaoDetalheModal
+          position={analisando}
           onClose={() => setAnalisando(null)}
-          onTeseSalva={(novaTese) => {
-            setPositions(prev => prev.map(p =>
-              p.id === analisando.id ? { ...p, tese: novaTese } : p
-            ))
-          }}
+          onUpdate={() => loadPositions()}
         />
+      )}
+
+      {/* Banner: carteira simulada */}
+      {portfolioAtivo?.tipo === 'simulada' && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm"
+          style={{ background: 'rgba(255,152,0,0.08)', border: '1px solid rgba(255,152,0,0.25)' }}
+        >
+          <FlaskConical size={16} style={{ color: '#FF9800', flexShrink: 0 }} />
+          <span style={{ color: '#FF9800' }} className="font-medium">Carteira Simulada</span>
+          <span style={{ color: '#94a3b8' }} className="text-xs">
+            {'— Você está visualizando a carteira simulada. As posições não são executadas na corretora.'}
+          </span>
+        </motion.div>
       )}
 
       <div className="flex items-center justify-between">
@@ -414,6 +468,14 @@ export default function PositionsPage() {
             <LayoutList size={16} />
             Analisar Carteira
           </button>
+          <button
+            onClick={() => navigate('/sugestoes-alocacao', { state: { portfolioId: portfolioAtivo?.id, modo: 'rebalanceamento' } })}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all"
+            style={{ background: 'rgba(255,152,0,0.1)', color: '#FF9800', border: '1px solid rgba(255,152,0,0.25)' }}
+          >
+            <BrainCircuit size={16} />
+            Rebalancear
+          </button>
           <button onClick={() => setShowAdd(true)} className="btn-primary flex items-center gap-2">
             <Plus size={16} />
             Nova Posição
@@ -422,7 +484,7 @@ export default function PositionsPage() {
       </div>
 
       {positions.length > 0 && (
-        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="grid grid-cols-3 gap-4">
+        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
           {[
             { label: 'Custo Total', value: `R$ ${totalInvested.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, color: '#94a3b8' },
             { label: 'Valor Atual', value: `R$ ${totalCurrent.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, color: '#f1f5f9' },
@@ -433,6 +495,48 @@ export default function PositionsPage() {
               <p className="text-lg font-bold font-mono mt-1" style={{ color: s.color }}>{s.value}</p>
             </div>
           ))}
+          {/* Card de caixa disponível — clicável para declarar/editar capital */}
+          <div className="apex-card p-4" style={{ border: caixaDisponivel !== null && caixaDisponivel < 0 ? '1px solid rgba(255,82,82,0.35)' : '1px solid rgba(0,230,118,0.15)' }}>
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>Caixa Disponível</p>
+              {!editandoCapital && (
+                <button onClick={() => { setCapitalInput(capitalDeclarado !== null ? capitalDeclarado.toLocaleString('pt-BR') : ''); setEditandoCapital(true) }} title="Definir capital total">
+                  <Pencil size={11} style={{ color: '#475569' }} />
+                </button>
+              )}
+            </div>
+            {editandoCapital ? (
+              <div className="flex items-center gap-1 mt-2">
+                <span className="text-xs font-mono" style={{ color: '#64748b' }}>R$</span>
+                <input
+                  autoFocus
+                  type="text"
+                  value={capitalInput}
+                  onChange={e => setCapitalInput(formatCapitalInput(e.target.value))}
+                  onKeyDown={e => { if (e.key === 'Enter') salvarCapital(); if (e.key === 'Escape') setEditandoCapital(false) }}
+                  placeholder="1.000.000"
+                  className="bg-transparent border-b text-sm font-mono outline-none flex-1 min-w-0"
+                  style={{ borderColor: '#00E676', color: '#f1f5f9' }}
+                />
+                <button onClick={salvarCapital} style={{ color: '#00E676' }}><Check size={13} /></button>
+                <button onClick={() => setEditandoCapital(false)} style={{ color: '#64748b' }}><X size={13} /></button>
+              </div>
+            ) : capitalDeclarado !== null ? (
+              <>
+                <p className="text-lg font-bold font-mono mt-1" style={{ color: caixaDisponivel !== null && caixaDisponivel < 0 ? '#FF5252' : '#00E676' }}>
+                  R$ {caixaDisponivel !== null ? caixaDisponivel.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}
+                  {caixaPct !== null && <span className="text-xs font-normal ml-1" style={{ color: '#64748b' }}>{caixaPct.toFixed(1)}%</span>}
+                </p>
+                <p className="text-xs font-mono mt-0.5" style={{ color: '#475569' }}>
+                  de R$ {capitalDeclarado.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
+              </>
+            ) : (
+              <p className="text-xs mt-2 cursor-pointer" style={{ color: '#475569' }} onClick={() => { setCapitalInput(''); setEditandoCapital(true) }}>
+                Clique no lápis para declarar o capital total
+              </p>
+            )}
+          </div>
         </motion.div>
       )}
 
@@ -451,17 +555,33 @@ export default function PositionsPage() {
           </div>
           <h3 className="font-semibold mb-2" style={{ color: '#f1f5f9' }}>Nenhuma posição cadastrada</h3>
           <p className="text-sm mb-6" style={{ color: '#64748b' }}>
-            Adicione suas posições para que o gestor APEX possa monitorar e analisar seu portfólio.
+            {isSimulada
+              ? 'Deixe o APEX Manager alocar o capital automaticamente, ou adicione posições manualmente.'
+              : 'Adicione suas posições para que o gestor APEX possa monitorar e analisar seu portfólio.'}
           </p>
-          <button onClick={() => setShowAdd(true)} className="btn-primary inline-flex items-center gap-2">
-            <Plus size={15} /> Adicionar Primeira Posição
-          </button>
+          <div className="flex items-center justify-center gap-3 flex-wrap">
+            <button
+              onClick={() => navigate('/sugestoes-alocacao', { state: { portfolioId: portfolioAtivo?.id, modo: 'inicial' } })}
+              className="btn-primary inline-flex items-center gap-2"
+              style={{
+                background: isSimulada ? 'rgba(255,152,0,0.15)' : 'rgba(0,191,165,0.12)',
+                borderColor: isSimulada ? 'rgba(255,152,0,0.4)' : 'rgba(0,191,165,0.35)',
+                color: isSimulada ? '#FF9800' : '#00BFA5',
+              }}
+            >
+              <BrainCircuit size={15} />
+              {isSimulada ? 'Alocar via IA' : 'Deixar IA sugerir alocação'}
+            </button>
+            <button onClick={() => setShowAdd(true)} className="btn-primary inline-flex items-center gap-2">
+              <Plus size={15} /> {isSimulada ? 'Adicionar Manualmente' : 'Adicionar Primeira Posição'}
+            </button>
+          </div>
         </motion.div>
       )}
 
       {!loading && Object.entries(grouped).map(([modulo, pos]) => (
         <motion.div key={modulo} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
-          <ModuleGroup modulo={modulo} positions={pos} onDelete={deletePosition} onAnalise={(id, ticker, mod, tese) => setAnalisando({ id, ticker, modulo: mod, tese })} />
+          <ModuleGroup modulo={modulo} positions={pos} onDelete={deletePosition} onDetalhe={(p) => setAnalisando(p)} />
         </motion.div>
       ))}
 

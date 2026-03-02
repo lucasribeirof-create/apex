@@ -7,7 +7,7 @@ class Position(Base):
     __tablename__ = "positions"
 
     id = Column(Integer, primary_key=True, index=True)
-    portfolio_id = Column(Integer, ForeignKey("portfolios.id"), nullable=False)
+    portfolio_id = Column(Integer, ForeignKey("portfolios.id"), nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -57,6 +57,7 @@ class Position(Base):
 
     # Status
     ativa = Column(Boolean, default=True)
+    data_abertura = Column(DateTime, nullable=True)   # data da primeira compra / entrada
     data_entrada = Column(DateTime, default=datetime.utcnow)
     data_saida = Column(DateTime, nullable=True)
     motivo_saida = Column(Text, nullable=True)

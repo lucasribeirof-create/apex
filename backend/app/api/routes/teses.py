@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_user_id
 from app.models import User, Portfolio, Position, Aporte
@@ -28,11 +28,40 @@ class NovaTese(BaseModel):
     data_entrada: str | None = None   # ISO date string, default hoje
     nota_aporte: str | None = None
 
+    @field_validator('ticker')
+    @classmethod
+    def ticker_valido(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not v:
+            raise ValueError('Ticker não pode ser vazio')
+        return v
+
+    @field_validator('quantidade', 'preco_medio')
+    @classmethod
+    def deve_ser_positivo(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError('Deve ser maior que zero')
+        return v
+
+    @field_validator('mercado')
+    @classmethod
+    def mercado_valido(cls, v: str) -> str:
+        if v not in {"B3", "BDR", "NYSE", "NASDAQ", "AMEX"}:
+            raise ValueError(f'Mercado inválido: {v}')
+        return v
+
 class NovoAporte(BaseModel):
     quantidade: float
     preco: float                      # em BRL ou USD conforme moeda da posição
     data: str | None = None           # ISO date string, default hoje
     nota: str | None = None
+
+    @field_validator('quantidade', 'preco')
+    @classmethod
+    def deve_ser_positivo(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError('Deve ser maior que zero')
+        return v
 
 class AtualizarTese(BaseModel):
     tese: str | None = None
@@ -41,11 +70,12 @@ class AtualizarTese(BaseModel):
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _get_portfolio(user_id: int | None, db: Session) -> Portfolio:
+    from app.api.deps import get_portfolio_ativo
     user = (db.query(User).filter(User.id == user_id).first() if user_id
             else db.query(User).first())
     if not user:
         raise HTTPException(status_code=400, detail="Usuário não encontrado")
-    portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
+    portfolio = get_portfolio_ativo(user, db)
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfólio não encontrado")
     return portfolio

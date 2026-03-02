@@ -16,6 +16,7 @@ class User(Base):
     objetivo_tipo = Column(String(50), nullable=True)     # valor_alvo | percentual | renda | livre
     objetivo_valor = Column(Float, nullable=True)          # R$ ou %
     objetivo_prazo = Column(String(20), nullable=True)    # 3, 5, 10, +10 anos
+    objetivo_descricao = Column(Text, nullable=True)       # Texto livre do objetivo (quando tipo='livre')
 
     # Respostas do questionário (armazenadas como JSON)
     onboarding_respostas = Column(JSON, nullable=True)
@@ -25,3 +26,12 @@ class User(Base):
     # Estratégia definida
     estrategia = Column(String(20), nullable=True)        # CORE | ALPHA
     estrategia_resumo = Column(Text, nullable=True)       # Texto gerado pela IA
+
+    # Plano estratégico gerado pelo Estrategista (cerebro/plano.py)
+    plano_estrategico = Column(JSON, nullable=True)       # PlanoEstrategico.to_dict()
+
+    # Portfólio ativo (multi-portfolio)
+    portfolio_ativo_id = Column(Integer, nullable=True)   # ID do portfolio ativo
+
+    # Aportes regulares
+    aporte_mensal = Column(Float, nullable=True)          # R$ aportado por mês (0 = sem aportes)

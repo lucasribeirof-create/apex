@@ -44,8 +44,8 @@ class RegimeInfo:
         """Texto para injetar no prompt da IA."""
         partes = [f"Regime: {self.regime} — {self.regime_motivo}"]
         if self.flags:
-            for f in self.flags:
-                partes.append(f"  ⚠ {f}")
+            for flag in self.flags:
+                partes.append(f"  ⚠ {flag}")
         return "\n".join(partes)
 
 

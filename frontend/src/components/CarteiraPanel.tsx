@@ -4,6 +4,8 @@
  */
 import { useRef, useState } from 'react'
 import { X, BrainCircuit, Loader2, Copy, Check } from 'lucide-react'
+import DOMPurify from 'dompurify'
+import { useStore } from '@/store/useStore'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -38,6 +40,7 @@ interface CarteiraPanelProps {
 
 // ─── Componente ───────────────────────────────────────────────────────────────
 export default function CarteiraPanel({ onClose }: CarteiraPanelProps) {
+  const { userId } = useStore()
   const [moduloSelecionado, setModuloSelecionado] = useState('todos')
   const [texto, setTexto] = useState('')
   const [loading, setLoading] = useState(false)
@@ -58,7 +61,9 @@ export default function CarteiraPanel({ onClose }: CarteiraPanelProps) {
 
     try {
       const url = `${API_BASE}/chat/analisar-carteira${modulo !== 'todos' ? `?modulo=${modulo}` : ''}`
-      const res = await fetch(url)
+      const headers: Record<string, string> = {}
+      if (userId) headers['x-user-id'] = String(userId)
+      const res = await fetch(url, { headers })
       if (!res.ok) {
         const j = await res.json().catch(() => ({ detail: 'Erro desconhecido' }))
         setErro(j.detail || 'Erro ao analisar carteira')
@@ -208,7 +213,7 @@ export default function CarteiraPanel({ onClose }: CarteiraPanelProps) {
               </div>
             )}
             <div
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(texto) }}
+              dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(renderMarkdown(texto)) }}
             />
             {streaming && (
               <span className="inline-block w-1.5 h-4 ml-0.5 animate-pulse" style={{ background: '#00E676', verticalAlign: 'text-bottom' }} />

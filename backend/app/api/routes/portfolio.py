@@ -1,16 +1,19 @@
 """Rota de posições — CRUD de posições do portfólio."""
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
-from app.api.deps import get_db, get_user_id
+from app.api.deps import get_db, get_user_id, get_portfolio_ativo
 from app.models import User, Portfolio, Position
 from app.data import get_quotes
+from app.data.cache import cache as _portfolio_cache
 from app.data.tecnico import get_dados_tecnicos
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
+logger = logging.getLogger(__name__)
 
 MODULOS_VALIDOS = {"etfs", "fiis", "renda_fixa", "momentum", "wheel", "alpha", "dividendos", "teses", "caixa"}
 ESTRATEGIAS_VALIDAS = {"CORE", "ALPHA", "RENDA", "CUSTOM"}
@@ -32,6 +35,21 @@ class NovaPosicao(BaseModel):
     indexador: str | None = None
     taxa: float | None = None
 
+    @field_validator('ticker')
+    @classmethod
+    def ticker_valido(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not v:
+            raise ValueError('Ticker não pode ser vazio')
+        return v
+
+    @field_validator('quantidade', 'preco_medio')
+    @classmethod
+    def deve_ser_positivo(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError('Deve ser maior que zero')
+        return v
+
 
 @router.get("/posicoes")
 async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
@@ -41,7 +59,7 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
     if not user:
         raise HTTPException(status_code=400, detail="Usuário não encontrado")
 
-    portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
+    portfolio = get_portfolio_ativo(user, db)
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfólio não encontrado")
 
@@ -87,7 +105,16 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
             "premio_recebido": p.premio_recebido,
         })
 
-    return resultado
+    # Caixa disponível: capital declarado - soma dos valores atuais investidos
+    capital_declarado = getattr(portfolio, "capital_declarado", None)
+    soma_posicoes = sum(r["valor_atual"] for r in resultado)
+    caixa_disponivel = round(capital_declarado - soma_posicoes, 2) if capital_declarado else None
+
+    return {
+        "posicoes": resultado,
+        "capital_declarado": capital_declarado,
+        "caixa_disponivel": caixa_disponivel,
+    }
 
 
 @router.post("/posicoes")
@@ -98,7 +125,7 @@ def adicionar_posicao(body: NovaPosicao, user_id: Optional[int] = Depends(get_us
     if not user:
         raise HTTPException(status_code=400, detail="Usuário não encontrado")
 
-    portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
+    portfolio = get_portfolio_ativo(user, db)
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfólio não encontrado")
 
@@ -137,7 +164,7 @@ def encerrar_posicao(posicao_id: int, motivo: str = "Encerrado manualmente", use
     if not user:
         raise HTTPException(status_code=400, detail="Usuário não encontrado")
 
-    portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
+    portfolio = get_portfolio_ativo(user, db)
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfólio não encontrado")
 
@@ -176,7 +203,7 @@ def atualizar_posicao(posicao_id: int, body: AtualizarPosicao, user_id: Optional
     if not user:
         raise HTTPException(status_code=400, detail="Usuário não encontrado")
 
-    portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
+    portfolio = get_portfolio_ativo(user, db)
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfólio não encontrado")
 
@@ -216,7 +243,7 @@ async def refresh_prices(user_id: Optional[int] = Depends(get_user_id), db: Sess
     if not user:
         raise HTTPException(status_code=400, detail="Usuário não encontrado")
 
-    portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
+    portfolio = get_portfolio_ativo(user, db)
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfólio não encontrado")
 
@@ -292,7 +319,7 @@ def atualizar_alocacao(body: AtualizarAlocacao, user_id: Optional[int] = Depends
     if not user:
         raise HTTPException(status_code=400, detail="Usuário não encontrado")
 
-    portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
+    portfolio = get_portfolio_ativo(user, db)
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfólio não encontrado")
 
@@ -316,6 +343,9 @@ def atualizar_alocacao(body: AtualizarAlocacao, user_id: Optional[int] = Depends
 
     db.commit()
 
+    # Invalida cache de sugestões do portfólio (alocação mudou)
+    _portfolio_cache.delete(f"sugerir_portfolio:{portfolio.id}")
+
     return {
         "mensagem": "Alocação atualizada com sucesso.",
         "estrategia": user.estrategia,
@@ -329,5 +359,906 @@ def atualizar_alocacao(body: AtualizarAlocacao, user_id: Optional[int] = Depends
             "dividendos": portfolio.alvo_dividendos,
             "caixa": portfolio.alvo_caixa,
         },
+    }
+
+
+# ─── Multi-Portfolio: listagem, ativação, criação ─────────────────────────────
+
+@router.get("/listar")
+def listar_portfolios(user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Lista todos os portfólios do usuário com indicação de qual está ativo."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolios = db.query(Portfolio).filter(Portfolio.user_id == user.id).all()
+    ativo_id = user.portfolio_ativo_id or (portfolios[0].id if portfolios else None)
+
+    return [
+        {
+            "id": p.id,
+            "nome": p.nome or "Carteira Real",
+            "tipo": p.tipo or "real",
+            "patrimonio_total": p.patrimonio_total or 0,
+            "ativo": p.id == ativo_id,
+        }
+        for p in portfolios
+    ]
+
+
+@router.post("/ativar/{portfolio_id}")
+def ativar_portfolio(portfolio_id: int, user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Define o portfólio ativo do usuário."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = db.query(Portfolio).filter(
+        Portfolio.id == portfolio_id,
+        Portfolio.user_id == user.id,
+    ).first()
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    user.portfolio_ativo_id = portfolio_id
+    db.commit()
+    return {"mensagem": f"Portfólio '{portfolio.nome}' ativado.", "portfolio_id": portfolio_id, "tipo": portfolio.tipo}
+
+
+class CriarSimuladaBody(BaseModel):
+    nome: str = "Carteira Simulada APEX"
+    origem: str = "zero"    # "zero" | "copia" (copia do portfolio atual)
+
+
+@router.post("/criar-simulada")
+async def criar_carteira_simulada(body: CriarSimuladaBody, user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """
+    Cria uma nova carteira simulada.
+    origem='zero': carteira simulada vazia com os mesmos alvos do portfolio atual.
+    origem='copia': clona todas as posições ativas do portfolio atual com preços do momento.
+    """
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio_origem = get_portfolio_ativo(user, db)
+    if not portfolio_origem:
+        raise HTTPException(status_code=404, detail="Portfólio de origem não encontrado")
+
+    # Cria novo portfolio simulado com os mesmos alvos
+    novo = Portfolio(
+        user_id=user.id,
+        nome=body.nome,
+        tipo="simulada",
+        patrimonio_total=portfolio_origem.patrimonio_total or 0,
+        patrimonio_inicio=portfolio_origem.patrimonio_total or 0,
+        alvo_etfs=portfolio_origem.alvo_etfs,
+        alvo_fiis=portfolio_origem.alvo_fiis,
+        alvo_renda_fixa=portfolio_origem.alvo_renda_fixa,
+        alvo_momentum=portfolio_origem.alvo_momentum,
+        alvo_wheel=portfolio_origem.alvo_wheel,
+        alvo_alpha=portfolio_origem.alvo_alpha,
+        alvo_dividendos=getattr(portfolio_origem, "alvo_dividendos", 0.0) or 0.0,
+        alvo_teses=getattr(portfolio_origem, "alvo_teses", 0.0) or 0.0,
+        alvo_caixa=portfolio_origem.alvo_caixa,
+    )
+    db.add(novo)
+    db.flush()  # garante novo.id antes de criar posições
+
+    if body.origem == "copia":
+        # Busca posições ativas do portfolio de origem
+        posicoes_origem = db.query(Position).filter(
+            Position.portfolio_id == portfolio_origem.id,
+            Position.ativa == True,
+        ).all()
+
+        for p in posicoes_origem:
+            copia = Position(
+                portfolio_id=novo.id,
+                ticker=p.ticker,
+                nome=p.nome,
+                tipo=p.tipo,
+                modulo=p.modulo,
+                quantidade=p.quantidade,
+                preco_medio=p.preco_atual or p.preco_medio,   # entra ao preço atual
+                preco_atual=p.preco_atual or p.preco_medio,
+                valor_investido=(p.preco_atual or p.preco_medio) * p.quantidade,
+                valor_atual=p.valor_atual or p.valor_investido,
+                pl_reais=0.0,       # P&L começa do zero a partir deste momento
+                pl_percentual=0.0,
+                stop_loss=p.stop_loss,
+                alvo_1=p.alvo_1,
+                alvo_2=p.alvo_2,
+                tese=p.tese,
+                mercado=getattr(p, "mercado", None),
+                moeda=getattr(p, "moeda", "BRL"),
+                apex_score=p.apex_score,
+            )
+            db.add(copia)
+
+    # Ativa a nova carteira
+    user.portfolio_ativo_id = novo.id
+    db.commit()
+
+    return {
+        "mensagem": f"Carteira simulada '{body.nome}' criada com sucesso.",
+        "portfolio_id": novo.id,
+        "tipo": "simulada",
+        "origem": body.origem,
+    }
+
+
+@router.post("/criar-teste")
+async def criar_carteira_teste(user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """
+    Cria uma carteira real pré-alocada para testes.
+    Usa posições representativas de uma estratégia APEX CORE com R$ 100.000.
+    """
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    CAPITAL_TESTE = 100_000.0
+
+    # Alvos: APEX CORE
+    novo = Portfolio(
+        user_id=user.id,
+        nome="Carteira Alocada Teste",
+        tipo="real",
+        patrimonio_total=CAPITAL_TESTE,
+        patrimonio_inicio=CAPITAL_TESTE,
+        alvo_etfs=30.0,
+        alvo_fiis=20.0,
+        alvo_renda_fixa=15.0,
+        alvo_momentum=15.0,
+        alvo_dividendos=10.0,
+        alvo_caixa=10.0,
+        alvo_wheel=0.0,
+        alvo_alpha=0.0,
+        alvo_teses=0.0,
+    )
+    db.add(novo)
+    db.flush()
+
+    # Posições de teste — preços aproximados de fevereiro 2026
+    _POSICOES_TESTE = [
+        # ETFs (30% = R$ 30.000)
+        dict(ticker="BOVA11", nome="iShares IBOVESPA ETF", tipo="ETF", modulo="etfs",
+             quantidade=140, preco_medio=125.0, stop_loss=112.0),
+        dict(ticker="IVVB11", nome="iShares S&P500 ETF", tipo="ETF", modulo="etfs",
+             quantidade=25, preco_medio=500.0, stop_loss=450.0),
+        # FIIs (20% = R$ 20.000)
+        dict(ticker="KNRI11", nome="Kinea Renda Imobiliária", tipo="FII", modulo="fiis",
+             quantidade=100, preco_medio=98.0, stop_loss=88.0),
+        dict(ticker="HGLG11", nome="CSHG Logística FII", tipo="FII", modulo="fiis",
+             quantidade=58, preco_medio=175.0, stop_loss=157.0),
+        # Momentum (15% = R$ 15.000)
+        dict(ticker="PETR4", nome="Petrobras PN", tipo="ACAO", modulo="momentum",
+             quantidade=220, preco_medio=36.0, stop_loss=32.0),
+        dict(ticker="VALE3", nome="Vale ON", tipo="ACAO", modulo="momentum",
+             quantidade=130, preco_medio=55.0, stop_loss=49.0),
+        # Dividendos (10% = R$ 10.000)
+        dict(ticker="ITUB4", nome="Itaú Unibanco PN", tipo="ACAO", modulo="dividendos",
+             quantidade=150, preco_medio=35.0, stop_loss=31.0),
+        dict(ticker="WEGE3", nome="WEG ON", tipo="ACAO", modulo="dividendos",
+             quantidade=110, preco_medio=43.0, stop_loss=38.0),
+        # Renda Fixa (15% = R$ 15.000)
+        dict(ticker="RF-SELIC", nome="Tesouro Selic 2029", tipo="RF", modulo="renda_fixa",
+             quantidade=1, preco_medio=15000.0, stop_loss=None),
+        # Caixa (10% = R$ 10.000)
+        dict(ticker="CAIXA", nome="Caixa / Liquidez", tipo="CAIXA", modulo="caixa",
+             quantidade=1, preco_medio=10000.0, stop_loss=None),
+    ]
+
+    for p in _POSICOES_TESTE:
+        valor_investido = p["quantidade"] * p["preco_medio"]
+        posicao = Position(
+            portfolio_id=novo.id,
+            ticker=p["ticker"],
+            nome=p["nome"],
+            tipo=p["tipo"],
+            modulo=p["modulo"],
+            quantidade=p["quantidade"],
+            preco_medio=p["preco_medio"],
+            preco_atual=p["preco_medio"],
+            valor_investido=valor_investido,
+            valor_atual=valor_investido,
+            pl_reais=0.0,
+            pl_percentual=0.0,
+            stop_loss=p.get("stop_loss"),
+            moeda="BRL",
+        )
+        db.add(posicao)
+
+    # Ativa a nova carteira
+    user.portfolio_ativo_id = novo.id
+    db.commit()
+
+    return {
+        "mensagem": "Carteira Alocada Teste criada com sucesso! 10 posições de teste adicionadas.",
+        "portfolio_id": novo.id,
+        "tipo": "real",
+        "capital": CAPITAL_TESTE,
+        "posicoes": len(_POSICOES_TESTE),
+    }
+
+
+class CriarTeseBody(BaseModel):
+    nome: str = "Carteira Tese"
+
+
+@router.post("/criar-tese")
+async def criar_carteira_tese(
+    body: CriarTeseBody,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Cria uma carteira do tipo 'tese' — começa vazia,
+    destinada a testar teses de investimento isoladas.
+    """
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio_origem = get_portfolio_ativo(user, db)
+
+    novo = Portfolio(
+        user_id=user.id,
+        nome=body.nome,
+        tipo="tese",
+        patrimonio_total=0.0,
+        patrimonio_inicio=0.0,
+        alvo_etfs=getattr(portfolio_origem, "alvo_etfs", 0.0) or 0.0,
+        alvo_fiis=getattr(portfolio_origem, "alvo_fiis", 0.0) or 0.0,
+        alvo_renda_fixa=getattr(portfolio_origem, "alvo_renda_fixa", 0.0) or 0.0,
+        alvo_momentum=getattr(portfolio_origem, "alvo_momentum", 0.0) or 0.0,
+        alvo_wheel=getattr(portfolio_origem, "alvo_wheel", 0.0) or 0.0,
+        alvo_alpha=getattr(portfolio_origem, "alvo_alpha", 0.0) or 0.0,
+        alvo_dividendos=getattr(portfolio_origem, "alvo_dividendos", 0.0) or 0.0,
+        alvo_teses=getattr(portfolio_origem, "alvo_teses", 0.0) or 0.0,
+        alvo_caixa=getattr(portfolio_origem, "alvo_caixa", 0.0) or 0.0,
+    )
+    db.add(novo)
+
+    # Ativa a nova carteira
+    user.portfolio_ativo_id = novo.id
+    db.commit()
+
+    return {
+        "mensagem": f"Carteira tese '{body.nome}' criada com sucesso.",
+        "portfolio_id": novo.id,
+        "tipo": "tese",
+    }
+
+
+class CriarRealBody(BaseModel):
+    nome: str = "Nova Carteira Real"
+    capital_declarado: Optional[float] = None
+
+
+@router.post("/criar-real")
+def criar_carteira_real(
+    body: CriarRealBody,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """Cria uma nova carteira real vazia e a ativa."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio_origem = get_portfolio_ativo(user, db)
+
+    novo = Portfolio(
+        user_id=user.id,
+        nome=body.nome.strip() or "Nova Carteira Real",
+        tipo="real",
+        patrimonio_total=0.0,
+        patrimonio_inicio=0.0,
+        capital_declarado=body.capital_declarado,
+        alvo_etfs=getattr(portfolio_origem, "alvo_etfs", 0.0) or 0.0,
+        alvo_fiis=getattr(portfolio_origem, "alvo_fiis", 0.0) or 0.0,
+        alvo_renda_fixa=getattr(portfolio_origem, "alvo_renda_fixa", 0.0) or 0.0,
+        alvo_momentum=getattr(portfolio_origem, "alvo_momentum", 0.0) or 0.0,
+        alvo_wheel=getattr(portfolio_origem, "alvo_wheel", 0.0) or 0.0,
+        alvo_alpha=getattr(portfolio_origem, "alvo_alpha", 0.0) or 0.0,
+        alvo_dividendos=getattr(portfolio_origem, "alvo_dividendos", 0.0) or 0.0,
+        alvo_teses=getattr(portfolio_origem, "alvo_teses", 0.0) or 0.0,
+        alvo_caixa=getattr(portfolio_origem, "alvo_caixa", 0.0) or 0.0,
+    )
+    db.add(novo)
+    user.portfolio_ativo_id = None
+    db.flush()
+    user.portfolio_ativo_id = novo.id
+    db.commit()
+
+    return {
+        "mensagem": f"Carteira real '{novo.nome}' criada com sucesso.",
+        "portfolio_id": novo.id,
+        "tipo": "real",
+    }
+
+
+class CapitalBody(BaseModel):
+    capital_declarado: float
+
+
+@router.patch("/capital")
+def atualizar_capital(
+    body: CapitalBody,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """Atualiza o capital declarado da carteira ativa (usado para calcular caixa disponível)."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+    portfolio.capital_declarado = body.capital_declarado
+    db.commit()
+    return {"capital_declarado": portfolio.capital_declarado}
+
+
+@router.delete("/all")
+def deletar_todos_portfolios(
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Remove TODOS os portfólios do usuário — posições e transações incluídas.
+    O usuário em si é preservado.
+    Após a operação o usuário fica sem portfólio ativo (portfolio_ativo_id = None).
+    """
+    from app.models import Transacao, Briefing
+
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolios = db.query(Portfolio).filter(Portfolio.user_id == user.id).all()
+
+    total = len(portfolios)
+    for portfolio in portfolios:
+        # Briefings do portfólio
+        db.query(Briefing).filter(Briefing.portfolio_id == portfolio.id).delete()
+        # Posições e transações
+        posicoes = db.query(Position).filter(Position.portfolio_id == portfolio.id).all()
+        for pos in posicoes:
+            db.query(Transacao).filter(Transacao.position_id == pos.id).delete()
+            db.delete(pos)
+        db.delete(portfolio)
+
+    user.portfolio_ativo_id = None
+    db.commit()
+
+    return {
+        "mensagem": f"{total} portfólio(s) deletado(s). Usuário mantido.",
+        "portfolios_deletados": total,
+    }
+
+
+@router.delete("/{portfolio_id}")
+def deletar_portfolio(
+    portfolio_id: int,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Remove um portfólio do usuário.
+    - Não permite deletar se for o único portfólio.
+    - Se o portfólio deletado estiver ativo, ativa automaticamente outro.
+    - Cascade: deleta todas as posições e transações do portfólio.
+    """
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolios = db.query(Portfolio).filter(Portfolio.user_id == user.id).all()
+    if len(portfolios) <= 1:
+        raise HTTPException(status_code=400, detail="Não é possível deletar o único portfólio. Crie outro antes.")
+
+    portfolio = next((p for p in portfolios if p.id == portfolio_id), None)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    era_ativo = (user.portfolio_ativo_id == portfolio_id)
+
+    # Se era o ativo, ativa o próximo disponível
+    if era_ativo:
+        outro = next((p for p in portfolios if p.id != portfolio_id), None)
+        user.portfolio_ativo_id = outro.id if outro else None
+
+    # Cascade delete: posições e transações
+    from app.models import Transacao
+    posicoes = db.query(Position).filter(Position.portfolio_id == portfolio_id).all()
+    for pos in posicoes:
+        db.query(Transacao).filter(Transacao.position_id == pos.id).delete()
+        db.delete(pos)
+
+    db.delete(portfolio)
+    db.commit()
+
+    return {
+        "mensagem": f"Portfólio '{portfolio.nome}' deletado com sucesso.",
+        "novo_ativo_id": user.portfolio_ativo_id,
+    }
+
+
+# ─── Sugerir alocação para Carteira Simulada (perfil + capital) ───────────────
+
+class SugerirAlocacaoBody(BaseModel):
+    capital: float
+    answers: dict   # mesmo formato do onboarding: volatility, liquidity, income, experience, time_available, objective, horizon
+
+
+@router.post("/sugerir-alocacao")
+async def sugerir_alocacao(body: SugerirAlocacaoBody):
+    """
+    Calcula o score de perfil e retorna a alocação recomendada + explicação.
+    Reutiliza a mesma lógica do onboarding — não salva nada no banco.
+    """
+    from app.api.routes.onboarding import _calcular_score, _get_alocacao, _get_ai_explanation
+
+    a = body.answers
+    respostas = {
+        "volatilidade": a.get("volatility"),
+        "liquidez": a.get("liquidity"),
+        "renda": a.get("income"),
+        "experiencia": a.get("experience", []),
+        "tempo": a.get("time_available"),
+        "objetivo": a.get("objective"),
+        "horizonte": a.get("horizon"),
+    }
+
+    score = _calcular_score(respostas)
+    objetivo_declarado = a.get("goal_type", "")
+    if objetivo_declarado == "renda":
+        estrategia = "RENDA"
+    elif score >= 11:
+        estrategia = "ALPHA"
+    else:
+        estrategia = "CORE"
+
+    alocacao = _get_alocacao(estrategia)
+
+    return {
+        "score": score,
+        "estrategia": estrategia,
+        "alocacao": alocacao,
+        "explicacao": _get_ai_explanation(estrategia, score),
+    }
+
+
+class CriarSimuladaPerfilBody(BaseModel):
+    nome: str = "Carteira Simulada APEX"
+    capital: float
+    alocacao: dict   # {etfs: 35, fiis: 20, renda_fixa: 20, momentum: 15, wheel: 0, alpha: 0, dividendos: 0, caixa: 10}
+
+
+@router.post("/criar-simulada-perfil")
+async def criar_carteira_simulada_perfil(
+    body: CriarSimuladaPerfilBody,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Cria uma nova carteira simulada com capital e alocação definidos
+    a partir do questionário de perfil (wizard SetupSimulada).
+    """
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    a = body.alocacao
+    novo = Portfolio(
+        user_id=user.id,
+        nome=body.nome,
+        tipo="simulada",
+        patrimonio_total=body.capital,
+        patrimonio_inicio=body.capital,
+        alvo_etfs=float(a.get("etfs", 0)),
+        alvo_fiis=float(a.get("fiis", 0)),
+        alvo_renda_fixa=float(a.get("renda_fixa", 0)),
+        alvo_momentum=float(a.get("momentum", 0)),
+        alvo_wheel=float(a.get("wheel", 0)),
+        alvo_alpha=float(a.get("alpha", 0)),
+        alvo_dividendos=float(a.get("dividendos", 0)),
+        alvo_teses=float(a.get("teses", 0)),
+        alvo_caixa=float(a.get("caixa", 0)),
+    )
+    db.add(novo)
+    user.portfolio_ativo_id = None  # será atualizado após flush
+    db.flush()
+    user.portfolio_ativo_id = novo.id
+    db.commit()
+
+    return {
+        "mensagem": f"Carteira simulada '{body.nome}' criada com alocação personalizada.",
+        "portfolio_id": novo.id,
+        "tipo": "simulada",
+        "capital": body.capital,
+    }
+
+
+# ─── Sugestão de portfólio completo via IA ────────────────────────────────────
+
+class SugerirPortfolioBody(BaseModel):
+    portfolio_id: Optional[int] = None   # None = usa carteira ativa
+    force_refresh: bool = False          # True = ignora cache e recalcula
+    modo: str = "inicial"                # "inicial" | "rebalanceamento"
+
+
+@router.post("/sugerir-portfolio")
+async def sugerir_portfolio(
+    body: SugerirPortfolioBody,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Sugere um portfólio completo usando os MOTORES de estratégia APEX.
+
+    Cada módulo é processado por seu motor dedicado que usa dados reais de mercado:
+      - ETFs:       motor_etfs     → alocação por perfil com preços yfinance
+      - FIIs:       motor_fiis     → screener DY/P-VP com diversificação por segmento
+      - Renda Fixa: motor_renda_fixa → mix SELIC/IPCA+/PRÉ por cenário macro
+      - Momentum:   motor_momentum → screener RSI+MACD+MM com alvo e stop reais
+      - Wheel:      motor_wheel    → COTAHIST B3 + scoring de opções + timing de entrada
+      - Alpha:      motor_alpha    → screener fundamentalista P/L, P/VP, crescimento
+      - Dividendos: motor_dividendos → DY real, payout, consistência, diversificação setorial
+      - Caixa:      posição direta sem motor
+
+    Os motores são os mesmos para carteira real e simulada — não existe diferença
+    de lógica, apenas o destino do capital.
+    """
+    import asyncio
+    from app.cerebro.especialistas import etfs as motor_etfs, fiis as motor_fiis, renda_fixa as motor_renda_fixa
+    from app.cerebro.especialistas import momentum as motor_momentum, wheel as motor_wheel, alpha as motor_alpha, dividendos as motor_dividendos
+    from app.cerebro.especialistas import prefetch as motor_prefetch
+    from app.cerebro.especialistas.watchlist import (
+        FIIS_WATCHLIST_FLAT, DIVIDENDOS_WATCHLIST, MOMENTUM_WATCHLIST,
+        WHEEL_WATCHLIST, ALPHA_WATCHLIST,
+    )
+
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    if body.portfolio_id:
+        portfolio = db.query(Portfolio).filter(
+            Portfolio.id == body.portfolio_id,
+            Portfolio.user_id == user.id,
+        ).first()
+    else:
+        portfolio = get_portfolio_ativo(user, db)
+
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    capital = portfolio.patrimonio_total or 0
+    if capital <= 0:
+        raise HTTPException(status_code=400, detail="Capital da carteira é zero. Ajuste o patrimônio antes.")
+
+    # ── Cache: evita rodar todos os motores (2-5 min) a cada clique ──────────
+    _CACHE_KEY = f"sugerir_portfolio:{portfolio.id}"
+    _CACHE_TTL = 1800  # 30 minutos
+    if not body.force_refresh:
+        _cached = _portfolio_cache.get(_CACHE_KEY)
+        if _cached:
+            return _cached
+
+    estrategia = (user.estrategia or "CORE").upper()
+
+    # ── Capital por módulo ────────────────────────────────────────────────────
+    def _cap(pct_attr: str) -> float:
+        pct = getattr(portfolio, pct_attr, 0) or 0
+        return round(capital * pct / 100, 2)
+
+    cap_etfs       = _cap("alvo_etfs")
+    cap_fiis       = _cap("alvo_fiis")
+    cap_rf         = _cap("alvo_renda_fixa")
+    cap_momentum   = _cap("alvo_momentum")
+    cap_wheel      = _cap("alvo_wheel")
+    cap_alpha      = _cap("alvo_alpha")
+    cap_dividendos = _cap("alvo_dividendos")
+    cap_caixa      = _cap("alvo_caixa")
+
+    # ── Dispara todos os motores com capital > 0 em paralelo ─────────────────
+
+    # Pre-fetch: busca dados de mercado UMA VEZ antes de disparar os motores
+    # Isso evita que 7 motores chamem yfinance para os mesmos tickers
+    _all_tickers: set[str] = set()
+    if cap_fiis > 0:       _all_tickers.update(FIIS_WATCHLIST_FLAT)
+    if cap_dividendos > 0: _all_tickers.update(DIVIDENDOS_WATCHLIST)
+    if cap_momentum > 0:   _all_tickers.update(MOMENTUM_WATCHLIST)
+    if cap_wheel > 0:      _all_tickers.update(WHEEL_WATCHLIST)
+    if cap_alpha > 0:      _all_tickers.update(ALPHA_WATCHLIST)
+    if _all_tickers:
+        try:
+            await motor_prefetch.buscar(list(_all_tickers))
+        except Exception as _pf_err:
+            logger.warning("sugerir-portfolio: prefetch falhou (%s) — motores usarão fallback direto", _pf_err)
+
+    # Tickers já em carteira: motores não devem sugeri-los de novo
+    _posicoes_db = db.query(Position).filter(
+        Position.portfolio_id == portfolio.id,
+        Position.ativa == True,
+    ).all() if portfolio else []
+    _excluir_tickers = [p.ticker for p in _posicoes_db if p.ticker and p.ticker != "CAIXA"]
+
+    tarefas: list = []
+    labels:  list = []
+
+    if cap_etfs > 0:
+        tarefas.append(motor_etfs.rodar(cap_etfs, estrategia=estrategia))
+        labels.append("etfs")
+    if cap_fiis > 0:
+        tarefas.append(motor_fiis.rodar(cap_fiis, estrategia=estrategia, excluir_tickers=_excluir_tickers))
+        labels.append("fiis")
+    if cap_rf > 0:
+        tarefas.append(motor_renda_fixa.rodar(cap_rf, estrategia=estrategia))
+        labels.append("renda_fixa")
+    if cap_momentum > 0:
+        tarefas.append(motor_momentum.rodar(cap_momentum, excluir_tickers=_excluir_tickers))
+        labels.append("momentum")
+    if cap_wheel > 0:
+        tarefas.append(motor_wheel.rodar(cap_wheel, excluir_tickers=_excluir_tickers, tickers_carteira=_excluir_tickers))
+        labels.append("wheel")
+    if cap_alpha > 0:
+        tarefas.append(motor_alpha.rodar(cap_alpha, excluir_tickers=_excluir_tickers))
+        labels.append("alpha")
+    if cap_dividendos > 0:
+        tarefas.append(motor_dividendos.rodar(cap_dividendos, excluir_tickers=_excluir_tickers))
+        labels.append("dividendos")
+
+    # Teses: módulo de convicção manual — capital é reservado e exibido para entrada manual
+    cap_teses = _cap("alvo_teses")
+
+    if not tarefas:
+        raise HTTPException(status_code=400, detail="Nenhum módulo com alocação > 0%.")
+
+    resultados = await asyncio.gather(*tarefas, return_exceptions=True)
+
+    # ── Coleta todas as sugestões ─────────────────────────────────────────────
+    sugestoes_raw = []
+    motores_sem_resultado = []
+
+    for label, resultado in zip(labels, resultados):
+        if isinstance(resultado, Exception) or resultado is None:
+            motores_sem_resultado.append(label)
+            continue
+        if not resultado:
+            motores_sem_resultado.append(label)
+            continue
+        for item in resultado:
+            sugestoes_raw.append(item)
+
+    # ── Caixa explícito: entrega ao CEO como candidato com peso definido ──────
+    from app.cerebro.especialistas import SugestaoMotor as _SM
+    if cap_caixa > 0:
+        sugestoes_raw.append(_SM(
+            modulo="caixa", ticker="CAIXA", nome="Reserva de Liquidez",
+            tipo="CAIXA", quantidade=cap_caixa, preco_atual=1.0, valor_total=cap_caixa,
+            justificativa=(
+                f"Caixa de {portfolio.alvo_caixa or 0:.0f}% configurado na estratégia "
+                f"({cap_caixa:,.2f} de capital). Reserva para oportunidades e proteção."
+            ),
+            score=0.0, dados_extras={"tipo": "liquidez_imediata"},
+        ))
+
+    # ── CEO Brain: Gestor Geral analisa todos os candidatos e decide o portfólio final ──
+    from app.cerebro import gestor as gestor_geral
+    from app.data.cache import cache as _global_cache
+    from app.cerebro.contexto import montar as montar_contexto
+
+    # Contexto unificado — CEO vê as posições existentes para evitar duplicar teses
+    try:
+        _ctx_cerebro = await montar_contexto(db, user_id=user.id)
+    except Exception as _ctx_err:
+        logger.warning("sugerir-portfolio: falha ao montar ContextoCerebro (%s) — CEO opera sem histórico", _ctx_err)
+        _ctx_cerebro = None
+
+    # Regime do mercado — do cache compartilhado com o dashboard (TTL 1h)
+    _regime_cached = _global_cache.get("market:regime")
+    _regime_str = str(_regime_cached.get("regime", "MISTO")) if _regime_cached else "MISTO"
+
+    # Score de perfil de risco do usuário (0-15, do onboarding)
+    _score_perfil = getattr(user, "onboarding_score", None) or 7  # default: moderado
+
+    # Capital que o CEO gerencia = total menos teses (teses são manuais, CEO não interfere)
+    _capital_ceo = round(capital - cap_teses, 2)
+
+    resultado_ceo = await gestor_geral.analisar(
+        candidatos=sugestoes_raw,
+        capital=_capital_ceo,
+        estrategia=estrategia,
+        regime=_regime_str,
+        score_perfil=_score_perfil,
+        contexto=_ctx_cerebro,
+        modo=body.modo,
+    )
+
+    # ── Converte sugestões assinadas pelo CEO → dict compatível com o frontend ──
+    sugestoes_enriquecidas = []
+    for s in resultado_ceo.sugestoes_finais:
+        sugestoes_enriquecidas.append({
+            "modulo":        s.modulo,
+            "ticker":        s.ticker,
+            "nome":          s.nome,
+            "tipo":          s.tipo,
+            "quantidade":    s.quantidade,
+            "preco_atual":   s.preco_atual,
+            "valor_total":   s.valor_total,
+            "justificativa": s.justificativa,
+            "score":         s.score,
+            "dados_extras":  s.dados_extras,
+        })
+
+    # ── Teses: capital reservado para gestão manual — CEO não interfere ───────
+    if cap_teses > 0:
+        sugestoes_enriquecidas.append({
+            "modulo":    "teses",
+            "ticker":    "TESES",
+            "nome":      "Capital para Teses (Gestão Manual)",
+            "tipo":      "CAIXA",
+            "quantidade": cap_teses,
+            "preco_atual": 1.0,
+            "valor_total": cap_teses,
+            "justificativa": (
+                f"R${cap_teses:,.2f} reservados para o módulo Teses ({portfolio.alvo_teses or 0:.0f}% da carteira). "
+                "Posições de convicção construídas manualmente — sem algoritmo de seleção automática."
+            ),
+            "score": 0,
+            "dados_extras": {"tipo": "capital_reservado_gestao_manual"},
+        })
+
+    total_sugerido   = sum(s["valor_total"] for s in sugestoes_enriquecidas)
+    capital_restante = max(round(capital - total_sugerido, 2), 0)
+
+    resultado = {
+        "portfolio_id":          portfolio.id,
+        "capital_total":         capital,
+        "total_sugerido":        round(total_sugerido, 2),
+        "capital_restante":      capital_restante,
+        "sugestoes":             sugestoes_enriquecidas,
+        "observacao":            resultado_ceo.analise,
+        "estrategia":            estrategia,
+        "motores_executados":    labels,
+        "motores_sem_resultado": motores_sem_resultado,
+        # ── Análise assinada pelo Gestor Geral ──────────────────────────────
+        "gestor_analise": {
+            "analise":            resultado_ceo.analise,
+            "alertas":            resultado_ceo.alertas,
+            "ajustes_realizados": resultado_ceo.ajustes_realizados,
+            "score_portfolio":    resultado_ceo.score_portfolio,
+            "usou_ia":            resultado_ceo.usou_ia,
+            "regime":             _regime_str,
+        },
+    }
+    _portfolio_cache.set(_CACHE_KEY, resultado, ttl=_CACHE_TTL)
+    return resultado
+
+
+# ─── Aplicar sugestões aprovadas como posições reais ─────────────────────────
+
+class SugestaoAplicarItem(BaseModel):
+    ticker: str
+    nome: str
+    tipo: str
+    modulo: str
+    quantidade: float
+    preco_atual: float
+
+
+class AplicarSugestoesBody(BaseModel):
+    portfolio_id: Optional[int] = None
+    sugestoes: list[SugestaoAplicarItem]
+    capital_caixa: float = 0.0   # capital de sugestões rejeitadas → vai para caixa
+
+
+@router.post("/aplicar-sugestoes")
+async def aplicar_sugestoes(
+    body: AplicarSugestoesBody,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Aplica as sugestões aprovadas como posições reais na carteira simulada,
+    usando os preços atuais de mercado. Capital de sugestões rejeitadas vai para caixa.
+    """
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    if body.portfolio_id:
+        portfolio = db.query(Portfolio).filter(
+            Portfolio.id == body.portfolio_id,
+            Portfolio.user_id == user.id,
+        ).first()
+    else:
+        portfolio = get_portfolio_ativo(user, db)
+
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    criadas = []
+    for s in body.sugestoes:
+        # Usa sempre o preço da sugestão para garantir que a soma das posições
+        # não ultrapasse o capital alocado (as quantidades foram calculadas com esses preços)
+        preco_exec = s.preco_atual
+
+        valor_inv = round(preco_exec * s.quantidade, 2)
+
+        posicao = Position(
+            portfolio_id=portfolio.id,
+            ticker=s.ticker,
+            nome=s.nome,
+            tipo=s.tipo,
+            modulo=s.modulo,
+            quantidade=s.quantidade,
+            preco_medio=round(preco_exec, 2),
+            preco_atual=round(preco_exec, 2),
+            valor_investido=valor_inv,
+            valor_atual=valor_inv,
+            pl_reais=0.0,
+            pl_percentual=0.0,
+            moeda="BRL",
+            data_entrada=datetime.now(timezone.utc),
+        )
+        db.add(posicao)
+        criadas.append(s.ticker)
+
+    # Capital rejeitado → adiciona/atualiza posição CAIXA
+    if body.capital_caixa > 0.5:
+        caixa_existente = db.query(Position).filter(
+            Position.portfolio_id == portfolio.id,
+            Position.ticker == "CAIXA",
+            Position.ativa == True,
+        ).first()
+
+        if caixa_existente:
+            caixa_existente.quantidade = round(caixa_existente.quantidade + body.capital_caixa, 2)
+            caixa_existente.preco_medio = 1.0
+            caixa_existente.preco_atual = 1.0
+            caixa_existente.valor_investido = round(caixa_existente.valor_investido + body.capital_caixa, 2)
+            caixa_existente.valor_atual = caixa_existente.valor_investido
+        else:
+            db.add(Position(
+                portfolio_id=portfolio.id,
+                ticker="CAIXA",
+                nome="Reserva de Liquidez",
+                tipo="CAIXA",
+                modulo="caixa",
+                quantidade=body.capital_caixa,
+                preco_medio=1.0,
+                preco_atual=1.0,
+                valor_investido=body.capital_caixa,
+                valor_atual=body.capital_caixa,
+                pl_reais=0.0,
+                pl_percentual=0.0,
+                moeda="BRL",
+                data_entrada=datetime.now(timezone.utc),
+            ))
+
+    db.commit()
+
+    return {
+        "mensagem": f"{len(criadas)} posição(ões) criada(s) com sucesso.",
+        "posicoes_criadas": criadas,
+        "capital_caixa": body.capital_caixa,
     }
 

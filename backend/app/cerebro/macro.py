@@ -118,8 +118,8 @@ class MacroContext:
 
         if self.flags:
             partes.append("\n=== ALERTAS MACRO ===")
-            for f in self.flags:
-                partes.append(f"⚠ {f}")
+            for flag in self.flags:
+                partes.append(f"⚠ {flag}")
 
         return "\n".join(partes)
 

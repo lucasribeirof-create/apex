@@ -11,7 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.config import APP_HOST, APP_PORT, DEBUG, BRIEFING_HOUR, BRIEFING_MINUTE
 from app.models import create_tables, migrate_db
 from app.tasks import tarefa_morning_briefing
-from app.api.routes import onboarding, dashboard, chat, briefing, portfolio, market, settings, scanner, teses
+from app.api.routes import onboarding, dashboard, chat, briefing, portfolio, market, settings, scanner, teses, transacoes
 
 # ─── Scheduler (APScheduler — substitui Celery/Redis nesta fase) ───────────────
 scheduler = AsyncIOScheduler()
@@ -23,23 +23,23 @@ async def lifespan(app: FastAPI):
     # Startup
     create_tables()
     migrate_db()
-    print("✅ Banco de dados SQLite inicializado: data/apex.db")
+    print("[OK] Banco de dados SQLite inicializado: data/apex.db")
 
     # Agendar morning briefing (dias úteis, segunda a sexta)
     scheduler.add_job(
         tarefa_morning_briefing,
-        CronTrigger(hour=BRIEFING_HOUR, minute=BRIEFING_MINUTE, day_of_week="mon-fri"),
+        CronTrigger(hour=BRIEFING_HOUR, minute=BRIEFING_MINUTE, day_of_week="mon-fri", timezone="America/Sao_Paulo"),
         id="morning_briefing",
         replace_existing=True,
     )
     scheduler.start()
-    print(f"✅ Scheduler iniciado — briefing agendado para {BRIEFING_HOUR:02d}:{BRIEFING_MINUTE:02d} (seg-sex)")
+    print(f"[OK] Scheduler iniciado — briefing agendado para {BRIEFING_HOUR:02d}:{BRIEFING_MINUTE:02d} (seg-sex)")
 
     yield
 
     # Shutdown
     scheduler.shutdown()
-    print("⏹ Scheduler encerrado")
+    print("[--] Scheduler encerrado")
 
 
 # ─── App ──────────────────────────────────────────────────────────────────────
@@ -69,6 +69,7 @@ app.include_router(portfolio.router)
 app.include_router(market.router)
 app.include_router(scanner.router)
 app.include_router(teses.router)
+app.include_router(transacoes.router)
 
 
 @app.get("/health")

@@ -41,6 +41,25 @@ export default function SettingsPage() {
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState('')
 
+  // Limpar todas as carteiras (mantém usuário)
+  const [clearStep, setClearStep] = useState<0 | 1>(0)
+  const [clearing, setClearing] = useState(false)
+  const [clearError, setClearError] = useState('')
+
+  const handleClearStart = () => { setClearStep(1); setClearError('') }
+  const handleClearCancel = () => { setClearStep(0); setClearError('') }
+  const handleClearConfirm = async () => {
+    setClearing(true)
+    setClearError('')
+    try {
+      await api.delete('/portfolios/all')
+      navigate('/onboarding', { replace: true })
+    } catch (e: any) {
+      setClearError(e?.response?.data?.detail || 'Erro ao limpar carteiras.')
+      setClearing(false)
+    }
+  }
+
   const handleDeleteStart = () => {
     setDeleteStep(1)
     setNameInput('')
@@ -60,12 +79,16 @@ export default function SettingsPage() {
     setError('')
     try {
       await api.delete(`/onboarding/usuarios/${userId}`)
-      reset()
-      navigate('/selecionar', { replace: true })
-    } catch {
-      setError('Erro ao apagar carteira. Tente novamente.')
-      setDeleting(false)
+    } catch (e: any) {
+      // 404 = usuário já não existe no banco — trata como sucesso
+      if (e?.response?.status !== 404) {
+        setError('Erro ao apagar carteira. Tente novamente.')
+        setDeleting(false)
+        return
+      }
     }
+    reset()
+    navigate('/selecionar', { replace: true })
   }
 
   const handleCancel = () => {
@@ -87,8 +110,7 @@ export default function SettingsPage() {
         <p className="text-xs font-mono uppercase tracking-wider mb-3" style={{ color: '#64748b' }}>
           Carteira ativa
         </p>
-        <p className="text-base font-semibold" style={{ color: '#f1f5f9' }}>{userName}</p>
-        <p className="text-sm mt-0.5" style={{ color: '#475569' }}>ID #{userId}</p>
+        <p className="text-base font-semibold" style={{ color: '#f1f5f9' }}>{userName} <span style={{ color: '#475569', fontWeight: 400 }}>·</span> <span className="font-mono text-sm" style={{ color: '#64748b' }}>ID #{userId}</span></p>
       </div>
 
       {/* AI provider */}
@@ -155,6 +177,68 @@ export default function SettingsPage() {
           <AlertTriangle size={15} style={{ color: '#ef4444' }} />
           <p className="text-sm font-semibold uppercase tracking-wider" style={{ color: '#ef4444' }}>Zona de perigo</p>
         </div>
+
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium mb-1" style={{ color: '#f1f5f9' }}>Limpar todas as carteiras</p>
+            <p className="text-xs leading-relaxed" style={{ color: '#64748b' }}>
+              Remove todos os portfólios, posições e histórico. O usuário <span className="font-semibold" style={{ color: '#94a3b8' }}>{userName}</span> é mantido e você pode criar uma nova carteira do zero.
+            </p>
+          </div>
+          {clearStep === 0 && (
+            <button
+              onClick={handleClearStart}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium flex-shrink-0 transition-all"
+              style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', color: '#ef4444' }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(239,68,68,0.15)' }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(239,68,68,0.08)' }}
+            >
+              <Trash2 size={14} />
+              Limpar
+            </button>
+          )}
+        </div>
+
+        <AnimatePresence>
+          {clearStep === 1 && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mt-3 overflow-hidden"
+            >
+              <div className="rounded-lg p-4 space-y-3"
+                style={{ background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)' }}>
+                <p className="text-sm" style={{ color: '#f1f5f9' }}>
+                  Todos os portfólios de <span className="font-semibold" style={{ color: '#ef4444' }}>{userName}</span> serão apagados. O usuário é mantido. Confirmar?
+                </p>
+                {clearError && <p className="text-xs" style={{ color: '#ef4444' }}>{clearError}</p>}
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleClearConfirm}
+                    disabled={clearing}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-semibold transition-all"
+                    style={{ background: clearing ? '#1e293b' : '#ef4444', color: clearing ? '#475569' : '#fff', cursor: clearing ? 'not-allowed' : 'pointer' }}
+                  >
+                    <Trash2 size={13} />
+                    {clearing ? 'Limpando...' : 'Sim, limpar tudo'}
+                  </button>
+                  <button
+                    onClick={handleClearCancel}
+                    disabled={clearing}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-all"
+                    style={{ background: 'rgba(100,116,139,0.1)', border: '1px solid #1e293b', color: '#94a3b8' }}
+                  >
+                    <X size={13} />
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <div className="my-4" style={{ height: '1px', background: 'rgba(239,68,68,0.1)' }} />
 
         <div className="flex items-start justify-between gap-4">
           <div>
