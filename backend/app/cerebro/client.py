@@ -11,7 +11,7 @@ from app.config import DATA_DIR
 
 # ─── Configuração padrão por provedor ─────────────────────────────────────────
 DEFAULT_MODELS: dict[str, str] = {
-    "anthropic": "claude-sonnet-4-5",
+    "anthropic": "claude-sonnet-4-20250514",
     "openai": "gpt-4o-mini",
     "gemini": "gemini-2.0-flash",
     "groq": "llama-3.3-70b-versatile",

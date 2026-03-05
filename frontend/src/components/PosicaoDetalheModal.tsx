@@ -2,12 +2,12 @@
  * Modal de detalhes completos de uma posição.
  * Abas: Resumo | Transações | Análise AI
  */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   X, TrendingUp, TrendingDown, BrainCircuit, Plus, Trash2,
   CalendarDays, ArrowDownCircle, ArrowUpCircle, RotateCcw,
-  Target, ShieldAlert, BarChart2,
+  Target, ShieldAlert, BarChart2, Pencil, Check, Save,
 } from 'lucide-react'
 import api from '@/services/api'
 import AnaliseModal from '@/components/AnaliseModal'
@@ -34,6 +34,7 @@ export interface PositionDetalhe {
   data_abertura?: string | null
   data_entrada?: string | null
   tese?: string | null
+  justificativa_entrada?: string | null
   moeda?: string
   mercado?: string
 }
@@ -250,9 +251,72 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
   const [loadingTx, setLoadingTx] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [showAnalise, setShowAnalise] = useState(false)
+  const [fundamentos, setFundamentos] = useState<Record<string, any> | null>(null)
+  const [loadingFund, setLoadingFund] = useState(false)
+  const fundLoadedRef = useRef<number | null>(null)
+
+  // ── Edição inline ──
+  const [editMode, setEditMode] = useState(false)
+  const [editValues, setEditValues] = useState({
+    quantidade: '',
+    preco_medio: '',
+    stop_loss: '',
+    alvo_1: '',
+    alvo_2: '',
+    tese: '',
+    modulo: '',
+  })
+  const [saving, setSaving] = useState(false)
+
+  const enterEditMode = useCallback(() => {
+    setEditValues({
+      quantidade: position.quantidade.toString(),
+      preco_medio: position.preco_medio.toString(),
+      stop_loss: position.stop_loss?.toString() ?? '',
+      alvo_1: position.alvo_1?.toString() ?? '',
+      alvo_2: position.alvo_2?.toString() ?? '',
+      tese: position.tese ?? '',
+      modulo: position.modulo || '',
+    })
+    setEditMode(true)
+  }, [position])
+
+  const cancelEdit = useCallback(() => setEditMode(false), [])
+
+  const saveEdit = useCallback(async () => {
+    setSaving(true)
+    try {
+      const payload: Record<string, any> = {}
+      const qty = parseFloat(editValues.quantidade)
+      const pm = parseFloat(editValues.preco_medio)
+      const sl = parseFloat(editValues.stop_loss)
+      const a1 = parseFloat(editValues.alvo_1)
+      const a2 = parseFloat(editValues.alvo_2)
+
+      if (!isNaN(qty) && qty !== position.quantidade) payload.quantidade = qty
+      if (!isNaN(pm) && pm !== position.preco_medio) payload.preco_medio = pm
+      payload.stop_loss = !isNaN(sl) && sl > 0 ? sl : 0
+      payload.alvo_1 = !isNaN(a1) && a1 > 0 ? a1 : 0
+      payload.alvo_2 = !isNaN(a2) && a2 > 0 ? a2 : 0
+      if (editValues.tese !== (position.tese ?? '')) payload.tese = editValues.tese || ''
+      if (editValues.modulo !== position.modulo) payload.modulo = editValues.modulo
+
+      await api.patch(`/portfolio/posicoes/${position.id}`, payload)
+      setEditMode(false)
+      onUpdate?.()
+    } catch { /* silent */ }
+    setSaving(false)
+  }, [editValues, position, onUpdate])
 
   const plColor = position.pl_percentual > 0 ? '#00E676' : position.pl_percentual < 0 ? '#FF5252' : '#94a3b8'
   const plBg = position.pl_percentual > 0 ? 'rgba(0,230,118,0.08)' : position.pl_percentual < 0 ? 'rgba(255,82,82,0.08)' : 'rgba(148,163,184,0.08)'
+
+  // Reset fundamentos quando posição muda
+  useEffect(() => {
+    setFundamentos(null)
+    setLoadingFund(false)
+    fundLoadedRef.current = null
+  }, [position.id])
 
   const loadTransacoes = async () => {
     setLoadingTx(true)
@@ -266,6 +330,19 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
   useEffect(() => {
     if (tab === 'transacoes') loadTransacoes()
   }, [tab])
+
+  // Carrega dados fundamentalistas ao abrir Resumo (lazy, 1x por posição)
+  useEffect(() => {
+    const tiposFund = ['ACAO', 'FII', 'ETF', 'BDR']
+    if (tab === 'resumo' && tiposFund.includes(position.tipo) && fundLoadedRef.current !== position.id && !loadingFund) {
+      setLoadingFund(true)
+      fundLoadedRef.current = position.id
+      api.get(`/portfolio/posicoes/${position.id}/fundamentals`)
+        .then(res => setFundamentos(res.data?.dados ?? null))
+        .catch(() => setFundamentos(null))
+        .finally(() => setLoadingFund(false))
+    }
+  }, [tab, position.id])
 
   const deletarTransacao = async (id: number) => {
     if (!confirm('Remover esta transação? O P&L será recalculado.')) return
@@ -291,7 +368,7 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
   return (
     <>
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-        <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+        <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
 
         <motion.div
           initial={{ opacity: 0, scale: 0.96, y: 12 }}
@@ -401,76 +478,260 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
 
                   {/* Detalhes da posição */}
                   <div className="rounded-xl overflow-hidden" style={{ border: '1px solid #1e293b' }}>
-                    {[
-                      { label: 'Módulo', value: MODULO_LABEL[position.modulo] || position.modulo },
-                      { label: 'Mercado', value: position.mercado || '—' },
-                      { label: 'Quantidade', value: position.quantidade.toLocaleString('pt-BR') },
-                      { label: 'Preço Médio', value: `R$ ${formatMoney(position.preco_medio)}` },
-                      { label: 'Preço Atual', value: `R$ ${formatMoney(position.preco_atual)}` },
-                      { label: 'Valor Investido', value: `R$ ${formatMoney(position.valor_investido, 0)}` },
-                      {
-                        label: 'Data de Abertura',
-                        value: position.data_abertura
+                    {/* Header com botão editar */}
+                    <div className="flex items-center justify-between px-4 py-2" style={{ background: 'rgba(30,41,59,0.3)' }}>
+                      <span className="text-[10px] font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>Dados da Posição</span>
+                      {!editMode ? (
+                        <button onClick={enterEditMode} className="flex items-center gap-1 text-[10px] transition-all" style={{ color: '#a78bfa' }}
+                          onMouseEnter={e => (e.currentTarget.style.color = '#c4b5fd')}
+                          onMouseLeave={e => (e.currentTarget.style.color = '#a78bfa')}
+                        >
+                          <Pencil size={10} /> Editar
+                        </button>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <button onClick={cancelEdit} className="text-[10px]" style={{ color: '#64748b' }}>Cancelar</button>
+                          <button
+                            onClick={saveEdit}
+                            disabled={saving}
+                            className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md transition-all"
+                            style={{ background: 'rgba(0,230,118,0.12)', color: '#00E676', border: '1px solid rgba(0,230,118,0.25)' }}
+                          >
+                            <Save size={10} /> {saving ? 'Salvando...' : 'Salvar'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    {/* Módulo */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm" style={{ borderTop: '1px solid rgba(30,41,59,0.6)' }}>
+                      <span style={{ color: '#64748b' }}>Módulo</span>
+                      {editMode ? (
+                        <select
+                          value={editValues.modulo}
+                          onChange={e => setEditValues(v => ({ ...v, modulo: e.target.value }))}
+                          className="text-xs font-mono px-2 py-1 rounded outline-none"
+                          style={{ background: '#0a0e17', border: '1px solid #334155', color: '#f1f5f9', cursor: 'pointer' }}
+                        >
+                          {Object.entries(MODULO_LABEL).map(([k, v]) => (
+                            <option key={k} value={k} style={{ background: '#0a0e17' }}>{v}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>{MODULO_LABEL[position.modulo] || position.modulo}</span>
+                      )}
+                    </div>
+                    {/* Mercado (read-only) */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm" style={{ borderTop: '1px solid rgba(30,41,59,0.6)' }}>
+                      <span style={{ color: '#64748b' }}>Mercado</span>
+                      <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>{position.mercado || '—'}</span>
+                    </div>
+                    {/* Quantidade */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm" style={{ borderTop: '1px solid rgba(30,41,59,0.6)' }}>
+                      <span style={{ color: '#64748b' }}>Quantidade</span>
+                      {editMode ? (
+                        <input
+                          type="number" min={0} step="any"
+                          value={editValues.quantidade}
+                          onChange={e => setEditValues(v => ({ ...v, quantidade: e.target.value }))}
+                          className="text-xs font-mono text-right px-2 py-1 rounded outline-none w-28"
+                          style={{ background: '#0a0e17', border: '1px solid #334155', color: '#f1f5f9' }}
+                        />
+                      ) : (
+                        <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>{position.quantidade.toLocaleString('pt-BR')}</span>
+                      )}
+                    </div>
+                    {/* Preço Médio */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm" style={{ borderTop: '1px solid rgba(30,41,59,0.6)' }}>
+                      <span style={{ color: '#64748b' }}>Preço Médio</span>
+                      {editMode ? (
+                        <div className="flex items-center gap-1">
+                          <span className="text-[10px] font-mono" style={{ color: '#64748b' }}>R$</span>
+                          <input
+                            type="number" min={0} step="any"
+                            value={editValues.preco_medio}
+                            onChange={e => setEditValues(v => ({ ...v, preco_medio: e.target.value }))}
+                            className="text-xs font-mono text-right px-2 py-1 rounded outline-none w-24"
+                            style={{ background: '#0a0e17', border: '1px solid #334155', color: '#f1f5f9' }}
+                          />
+                        </div>
+                      ) : (
+                        <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>R$ {formatMoney(position.preco_medio)}</span>
+                      )}
+                    </div>
+                    {/* Preço Atual (read-only) */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm" style={{ borderTop: '1px solid rgba(30,41,59,0.6)' }}>
+                      <span style={{ color: '#64748b' }}>Preço Atual</span>
+                      <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>R$ {formatMoney(position.preco_atual)}</span>
+                    </div>
+                    {/* Valor Investido (read-only, calculated) */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm" style={{ borderTop: '1px solid rgba(30,41,59,0.6)' }}>
+                      <span style={{ color: '#64748b' }}>Valor Investido</span>
+                      <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>R$ {formatMoney(position.valor_investido, 0)}</span>
+                    </div>
+                    {/* Data de Abertura (read-only) */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm" style={{ borderTop: '1px solid rgba(30,41,59,0.6)' }}>
+                      <span className="flex items-center gap-1.5" style={{ color: '#64748b' }}>
+                        <CalendarDays size={12} />
+                        Data de Abertura
+                      </span>
+                      <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>
+                        {position.data_abertura
                           ? formatDate(position.data_abertura)
                           : position.data_entrada
                           ? formatDate(position.data_entrada)
-                          : '—',
-                        icon: <CalendarDays size={12} />,
-                      },
-                    ].map((row, i) => (
-                      <div
-                        key={i}
-                        className="flex items-center justify-between px-4 py-2.5 text-sm"
-                        style={{ borderTop: i > 0 ? '1px solid rgba(30,41,59,0.6)' : undefined }}
-                      >
-                        <span className="flex items-center gap-1.5" style={{ color: '#64748b' }}>
-                          {row.icon}
-                          {row.label}
-                        </span>
-                        <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>{row.value}</span>
-                      </div>
-                    ))}
+                          : '—'}
+                      </span>
+                    </div>
                   </div>
 
                   {/* Gestão de risco */}
-                  {(position.stop_loss || position.alvo_1 || position.alvo_2) && (
-                    <div className="rounded-xl p-4 space-y-2" style={{ background: '#111827', border: '1px solid #1e293b' }}>
-                      <p className="text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: '#64748b' }}>Gestão de Risco</p>
-                      <div className="grid grid-cols-3 gap-3">
-                        {position.stop_loss && (
-                          <div className="text-center">
-                            <p className="text-[10px] mb-1 flex items-center justify-center gap-1" style={{ color: '#FF5252' }}>
-                              <ShieldAlert size={10} /> Stop Loss
+                  <div className="rounded-xl p-4 space-y-2" style={{ background: '#111827', border: '1px solid #1e293b' }}>
+                    <p className="text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: '#64748b' }}>Gestão de Risco</p>
+                    <div className="grid grid-cols-3 gap-3">
+                      {/* Stop Loss */}
+                      <div className="text-center">
+                        <p className="text-[10px] mb-1 flex items-center justify-center gap-1" style={{ color: '#FF5252' }}>
+                          <ShieldAlert size={10} /> Stop Loss
+                        </p>
+                        {editMode ? (
+                          <input
+                            type="number" min={0} step="any"
+                            value={editValues.stop_loss}
+                            onChange={e => setEditValues(v => ({ ...v, stop_loss: e.target.value }))}
+                            placeholder="—"
+                            className="w-full text-center text-xs font-mono px-1 py-1 rounded outline-none"
+                            style={{ background: '#0a0e17', border: '1px solid #334155', color: '#FF5252' }}
+                          />
+                        ) : (
+                          <>
+                            <p className="font-mono text-sm font-bold" style={{ color: position.stop_loss ? '#FF5252' : '#475569' }}>
+                              {position.stop_loss ? `R$ ${formatMoney(position.stop_loss)}` : '—'}
                             </p>
-                            <p className="font-mono text-sm font-bold" style={{ color: '#FF5252' }}>R$ {formatMoney(position.stop_loss)}</p>
-                            <p className="text-[10px] font-mono mt-0.5" style={{ color: '#64748b' }}>
-                              {position.preco_atual > 0 ? (((position.stop_loss / position.preco_atual) - 1) * 100).toFixed(1) + '%' : '—'}
-                            </p>
-                          </div>
-                        )}
-                        {position.alvo_1 && (
-                          <div className="text-center">
-                            <p className="text-[10px] mb-1 flex items-center justify-center gap-1" style={{ color: '#00E676' }}>
-                              <Target size={10} /> Alvo 1
-                            </p>
-                            <p className="font-mono text-sm font-bold" style={{ color: '#00E676' }}>R$ {formatMoney(position.alvo_1)}</p>
-                            <p className="text-[10px] font-mono mt-0.5" style={{ color: '#64748b' }}>
-                              {position.preco_atual > 0 ? (((position.alvo_1 / position.preco_atual) - 1) * 100).toFixed(1) + '%' : '—'}
-                            </p>
-                          </div>
-                        )}
-                        {position.alvo_2 && (
-                          <div className="text-center">
-                            <p className="text-[10px] mb-1 flex items-center justify-center gap-1" style={{ color: '#00BCD4' }}>
-                              <Target size={10} /> Alvo 2
-                            </p>
-                            <p className="font-mono text-sm font-bold" style={{ color: '#00BCD4' }}>R$ {formatMoney(position.alvo_2)}</p>
-                            <p className="text-[10px] font-mono mt-0.5" style={{ color: '#64748b' }}>
-                              {position.preco_atual > 0 ? (((position.alvo_2 / position.preco_atual) - 1) * 100).toFixed(1) + '%' : '—'}
-                            </p>
-                          </div>
+                            {position.stop_loss && position.preco_atual > 0 && (
+                              <p className="text-[10px] font-mono mt-0.5" style={{ color: '#64748b' }}>
+                                {(((position.stop_loss / position.preco_atual) - 1) * 100).toFixed(1)}%
+                              </p>
+                            )}
+                          </>
                         )}
                       </div>
+                      {/* Alvo 1 */}
+                      <div className="text-center">
+                        <p className="text-[10px] mb-1 flex items-center justify-center gap-1" style={{ color: '#00E676' }}>
+                          <Target size={10} /> Alvo 1
+                        </p>
+                        {editMode ? (
+                          <input
+                            type="number" min={0} step="any"
+                            value={editValues.alvo_1}
+                            onChange={e => setEditValues(v => ({ ...v, alvo_1: e.target.value }))}
+                            placeholder="—"
+                            className="w-full text-center text-xs font-mono px-1 py-1 rounded outline-none"
+                            style={{ background: '#0a0e17', border: '1px solid #334155', color: '#00E676' }}
+                          />
+                        ) : (
+                          <>
+                            <p className="font-mono text-sm font-bold" style={{ color: position.alvo_1 ? '#00E676' : '#475569' }}>
+                              {position.alvo_1 ? `R$ ${formatMoney(position.alvo_1)}` : '—'}
+                            </p>
+                            {position.alvo_1 && position.preco_atual > 0 && (
+                              <p className="text-[10px] font-mono mt-0.5" style={{ color: '#64748b' }}>
+                                {(((position.alvo_1 / position.preco_atual) - 1) * 100).toFixed(1)}%
+                              </p>
+                            )}
+                          </>
+                        )}
+                      </div>
+                      {/* Alvo 2 */}
+                      <div className="text-center">
+                        <p className="text-[10px] mb-1 flex items-center justify-center gap-1" style={{ color: '#00BCD4' }}>
+                          <Target size={10} /> Alvo 2
+                        </p>
+                        {editMode ? (
+                          <input
+                            type="number" min={0} step="any"
+                            value={editValues.alvo_2}
+                            onChange={e => setEditValues(v => ({ ...v, alvo_2: e.target.value }))}
+                            placeholder="—"
+                            className="w-full text-center text-xs font-mono px-1 py-1 rounded outline-none"
+                            style={{ background: '#0a0e17', border: '1px solid #334155', color: '#00BCD4' }}
+                          />
+                        ) : (
+                          <>
+                            <p className="font-mono text-sm font-bold" style={{ color: position.alvo_2 ? '#00BCD4' : '#475569' }}>
+                              {position.alvo_2 ? `R$ ${formatMoney(position.alvo_2)}` : '—'}
+                            </p>
+                            {position.alvo_2 && position.preco_atual > 0 && (
+                              <p className="text-[10px] font-mono mt-0.5" style={{ color: '#64748b' }}>
+                                {(((position.alvo_2 / position.preco_atual) - 1) * 100).toFixed(1)}%
+                              </p>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Indicadores Fundamentalistas */}
+                  {['ACAO', 'FII', 'ETF', 'BDR'].includes(position.tipo) && (
+                    <div className="rounded-xl p-4 space-y-2" style={{ background: '#111827', border: '1px solid #1e293b' }}>
+                      <p className="text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: '#64748b' }}>
+                        📊 Indicadores Fundamentalistas
+                      </p>
+                      {loadingFund ? (
+                        <div className="flex items-center justify-center py-4">
+                          <div className="w-5 h-5 border-2 rounded-full animate-spin" style={{ borderColor: '#334155', borderTopColor: '#818cf8' }} />
+                          <span className="ml-2 text-xs" style={{ color: '#64748b' }}>Carregando...</span>
+                        </div>
+                      ) : fundamentos ? (
+                        <div className="grid grid-cols-3 gap-3">
+                          {(() => {
+                            const items: { label: string; value: string; color: string }[] = []
+                            const fmt = (v: number | undefined, suffix = '', dec = 2) =>
+                              v != null ? v.toFixed(dec) + suffix : '—'
+                            const colorRange = (v: number | undefined, green: number, yellow: number, invert = false) => {
+                              if (v == null) return '#94a3b8'
+                              if (invert) return v <= green ? '#00E676' : v <= yellow ? '#FFCA28' : '#FF5252'
+                              return v >= green ? '#00E676' : v >= yellow ? '#FFCA28' : '#FF5252'
+                            }
+
+                            if (fundamentos.priceEarnings != null)
+                              items.push({ label: 'P/L', value: fmt(fundamentos.priceEarnings, 'x', 1), color: colorRange(fundamentos.priceEarnings, 15, 25, true) })
+                            if (fundamentos.priceToBookRatio != null)
+                              items.push({ label: 'P/VP', value: fmt(fundamentos.priceToBookRatio, 'x', 2), color: colorRange(fundamentos.priceToBookRatio, 1.5, 3, true) })
+                            if (fundamentos.dividendYield != null)
+                              items.push({ label: 'Div. Yield', value: fmt(fundamentos.dividendYield * 100, '%', 1), color: colorRange(fundamentos.dividendYield * 100, 5, 3, false) })
+                            if (fundamentos.returnOnEquity != null)
+                              items.push({ label: 'ROE', value: fmt(fundamentos.returnOnEquity * 100, '%', 1), color: colorRange(fundamentos.returnOnEquity * 100, 15, 8, false) })
+                            if (fundamentos.returnOnAssets != null)
+                              items.push({ label: 'ROA', value: fmt(fundamentos.returnOnAssets * 100, '%', 1), color: colorRange(fundamentos.returnOnAssets * 100, 8, 4, false) })
+                            if (fundamentos.netMargin != null)
+                              items.push({ label: 'Margem Líq.', value: fmt(fundamentos.netMargin * 100, '%', 1), color: colorRange(fundamentos.netMargin * 100, 10, 5, false) })
+                            if (fundamentos.grossMargin != null)
+                              items.push({ label: 'Margem Bruta', value: fmt(fundamentos.grossMargin * 100, '%', 1), color: colorRange(fundamentos.grossMargin * 100, 30, 15, false) })
+                            if (fundamentos.ebitdaMargin != null)
+                              items.push({ label: 'Margem EBITDA', value: fmt(fundamentos.ebitdaMargin * 100, '%', 1), color: colorRange(fundamentos.ebitdaMargin * 100, 20, 10, false) })
+                            if (fundamentos.debtToEquity != null)
+                              items.push({ label: 'Dív/PL', value: fmt(fundamentos.debtToEquity, 'x', 2), color: colorRange(fundamentos.debtToEquity, 1, 2, true) })
+                            if (fundamentos.currentLiquidity != null)
+                              items.push({ label: 'Liq. Corrente', value: fmt(fundamentos.currentLiquidity, 'x', 2), color: colorRange(fundamentos.currentLiquidity, 1.5, 1, false) })
+                            if (fundamentos.earningsPerShare != null)
+                              items.push({ label: 'LPA', value: `R$ ${fmt(fundamentos.earningsPerShare, '', 2)}`, color: fundamentos.earningsPerShare > 0 ? '#00E676' : '#FF5252' })
+
+                            if (items.length === 0)
+                              return <p className="text-xs col-span-3 text-center" style={{ color: '#64748b' }}>Sem dados disponíveis</p>
+
+                            return items.map((item, i) => (
+                              <div key={i} className="text-center">
+                                <p className="text-[10px] mb-1" style={{ color: '#64748b' }}>{item.label}</p>
+                                <p className="font-mono text-sm font-bold" style={{ color: item.color }}>{item.value}</p>
+                              </div>
+                            ))
+                          })()}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-center py-2" style={{ color: '#475569' }}>Dados fundamentalistas indisponíveis</p>
+                      )}
                     </div>
                   )}
 
@@ -484,11 +745,30 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
                     </div>
                   )}
 
+                  {/* Justificativa de entrada */}
+                  {position.justificativa_entrada && (
+                    <div className="rounded-xl p-4" style={{ background: '#111827', border: '1px solid rgba(0,230,118,0.15)' }}>
+                      <p className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: '#00E676' }}>Por que está na carteira</p>
+                      <p className="text-sm leading-relaxed" style={{ color: '#cbd5e1' }}>{position.justificativa_entrada}</p>
+                    </div>
+                  )}
+
                   {/* Tese */}
-                  {position.tese && (
+                  {(position.tese || editMode) && (
                     <div className="rounded-xl p-4" style={{ background: '#111827', border: '1px solid rgba(167,139,250,0.2)' }}>
                       <p className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: '#a78bfa' }}>Tese de Investimento</p>
-                      <p className="text-sm leading-relaxed" style={{ color: '#94a3b8' }}>{position.tese}</p>
+                      {editMode ? (
+                        <textarea
+                          value={editValues.tese}
+                          onChange={e => setEditValues(v => ({ ...v, tese: e.target.value }))}
+                          placeholder="Descreva sua tese de investimento..."
+                          rows={3}
+                          className="w-full text-sm leading-relaxed px-3 py-2 rounded-lg outline-none resize-none"
+                          style={{ background: '#0a0e17', border: '1px solid #334155', color: '#f1f5f9' }}
+                        />
+                      ) : (
+                        <p className="text-sm leading-relaxed" style={{ color: '#94a3b8' }}>{position.tese}</p>
+                      )}
                     </div>
                   )}
                 </motion.div>

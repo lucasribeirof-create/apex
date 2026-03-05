@@ -38,11 +38,10 @@ from typing import Optional, Dict
 
 from app.cerebro.especialistas import SugestaoMotor
 from app.data.bcb_client import get_selic, get_ipca
+from app.cerebro.focus_bcb import get_focus_ipca, get_focus_selic
+from app.logger import logger
 
-# ── Constantes FALLBACK (usadas SOMENTE quando BCB offline) ──────────────────
-_SELIC_FALLBACK = 14.75   # % a.a. — atualizar periodicamente
-_IPCA_FALLBACK  = 5.5     # % acumulado 12m
-_PRE_2Y_FALLBACK = 14.5   # % taxa prefixada LTN 2 anos
+# Sem fallbacks hardcoded — se BCB offline e sem last_known, o motor retorna []
 
 # ── Cenário atual: Selic em patamar elevado, cortes previstos para 2026 ──────
 # Mix: mais SELIC por ora, IPCA como proteção, pouco PRÉ até ciclo de corte iniciar
@@ -95,14 +94,13 @@ def _justificativa_rf(ticker: str, pct: float, selic_atual: float,
         partes.append(f"instrumentos: {info['descricao']}")
 
     elif ticker == "RF-IPCA":
-        taxa = round(ipca_focus_atual + 6.5, 2)
         partes.append(
-            f"IPCA+ {taxa:.1f}%/ano = IPCA + 6.5% de spread real — "
+            f"IPCA+ indexado à inflação (IPCA projetado: {ipca_focus_atual:.1f}%) — "
             f"garante poder de compra independente da inflação"
         )
         partes.append(
-            f"com IPCA projetado em {ipca_focus_atual:.1f}% pelo Focus, a taxa real supera a Selic bruta "
-            f"em cenário de inflação acima do teto da meta"
+            f"com IPCA Focus em {ipca_focus_atual:.1f}%, o rendimento real protege o patrimônio "
+            f"contra cenários de inflação acima da meta"
         )
         partes.append(f"instrumentos: {info['descricao']}")
 
@@ -140,19 +138,39 @@ async def rodar(
     """
     if capital < 500:
         return []
-    # Busca Selic e IPCA reais do BCB (com fallback para constantes)
-    selic_live, ipca_live = await asyncio.gather(
+    selic_live, ipca_live, focus_ipca_live, focus_selic_live = await asyncio.gather(
         get_selic(),
         get_ipca(),
+        get_focus_ipca(),
+        get_focus_selic(),
         return_exceptions=True,
     )
-    selic_atual = float(selic_live) if isinstance(selic_live, (int, float)) else _SELIC_FALLBACK
-    ipca_atual  = float(ipca_live)  if isinstance(ipca_live,  (int, float)) else _IPCA_FALLBACK
-    # IPCA Focus ~= IPCA 12m com pequeno delta (sem ação de agente só no Focus)
-    # Usamos o IPCA realizado como proxy conservador do Focus
-    ipca_focus_atual = round(ipca_atual * 0.95, 2)  # 5% abaixo do realizado como estimativa do Focus
-    # PRÉ 2 anos: aprox Selic + spread de 0.5-1.0% como proxy (sem série BCB direta)
-    pre_2y = round(selic_atual + 0.5, 2) if selic_atual > 0 else _PRE_2Y_FALLBACK
+    # Selic e IPCA REAIS — se indisponíveis, motor não opera
+    if not isinstance(selic_live, (int, float)) or selic_live is None:
+        logger.error("renda_fixa: Selic BCB totalmente indisponível — motor não pode operar sem dados reais")
+        return []
+    if not isinstance(ipca_live, (int, float)) or ipca_live is None:
+        logger.error("renda_fixa: IPCA BCB totalmente indisponível — motor não pode operar sem dados reais")
+        return []
+
+    selic_atual = float(selic_live)
+    ipca_atual = float(ipca_live)
+
+    # IPCA Focus real via API Olinda (mediana Top 5 analistas)
+    if isinstance(focus_ipca_live, (int, float)) and focus_ipca_live > 0:
+        ipca_focus_atual = round(float(focus_ipca_live), 2)
+    else:
+        logger.warning("renda_fixa: Focus IPCA indisponível — usando IPCA realizado (dado real BCB)")
+        ipca_focus_atual = ipca_atual
+
+    # Taxa prefixada 2 anos: baseada em Selic Focus real (quando disponível)
+    if isinstance(focus_selic_live, (int, float)) and focus_selic_live > 0:
+        pre_2y = round(float(focus_selic_live), 2)
+        pre_2y_fonte = "Focus BCB"
+    else:
+        logger.warning("renda_fixa: Focus Selic indisponível — usando Selic real como referência para prefixado")
+        pre_2y = selic_atual
+        pre_2y_fonte = "Selic real BCB"
     alocacao = mix or dict(_MIX_BASE)
 
     # Ajuste por perfil
@@ -173,13 +191,15 @@ async def rodar(
         info     = _RF_INFO[ticker]
         valor    = round(capital * pct, 2)
 
-        # Taxa de referência com valores live do BCB
         if ticker == "RF-SELIC":
             taxa_ref = selic_atual
+            fonte_taxa = "Selic BCB"
         elif ticker == "RF-IPCA":
-            taxa_ref = round(ipca_focus_atual + 6.5, 2)
+            taxa_ref = ipca_focus_atual
+            fonte_taxa = "IPCA Focus BCB"
         else:
             taxa_ref = pre_2y
+            fonte_taxa = pre_2y_fonte
 
         saida.append(SugestaoMotor(
             modulo="renda_fixa",
@@ -193,6 +213,7 @@ async def rodar(
             score=pct * 100,
             dados_extras={
                 "taxa_referencia_aa":     taxa_ref,
+                "fonte_taxa":             fonte_taxa,
                 "peso_pct":               pct * 100,
                 "descricao":              info["descricao"],
                 "liquidez":              info["liquidez"],

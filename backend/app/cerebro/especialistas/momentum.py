@@ -58,9 +58,11 @@ _IBOV_CACHE_TTL = 300.0  # 5 minutos
 #  CÁLCULOS TÉCNICOS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _calcular_ibov_retorno_20d() -> float:
-    """Retorna o retorno do IBOV nos últimos 20 pregões. Cacheado por 5min."""
+def _calcular_ibov_retorno_20d() -> Optional[float]:
+    """Retorna o retorno do IBOV nos últimos 20 pregões. Cacheado por 5min.
+    Retorna None se não conseguir buscar — sinaliza que força relativa é incalculável."""
     import time
+    from app.logger import logger
     now = time.monotonic()
     if _ibov_cache["valor"] is not None and (now - _ibov_cache["ts"]) < _IBOV_CACHE_TTL:
         return _ibov_cache["valor"]
@@ -71,12 +73,13 @@ def _calcular_ibov_retorno_20d() -> float:
             _ibov_cache["valor"] = ret
             _ibov_cache["ts"] = now
             return ret
-    except Exception:
-        pass
-    return 0.0
+    except Exception as e:
+        logger.warning("momentum: falha ao buscar IBOV retorno 20d: %s", e)
+    logger.warning("momentum: IBOV indisponível — força relativa será desconsiderada")
+    return None
 
 
-def _analisar_momentum(ticker: str, ibov_ret_20d: float) -> Optional[dict]:
+def _analisar_momentum(ticker: str, ibov_ret_20d: Optional[float]) -> Optional[dict]:
     """
     Analisa todos os indicadores técnicos de momentum para um ticker.
     Retorna None se não houver dados suficientes ou o ativo não passar nos filtros.
@@ -156,7 +159,8 @@ def _analisar_momentum(ticker: str, ibov_ret_20d: float) -> Optional[dict]:
     atr14 = float(tr.rolling(14).mean().iloc[-1])
 
     # ── Força relativa vs IBOV ────────────────────────────────────────────────
-    forca_relativa = round(momentum_20 - ibov_ret_20d, 1)
+    # Se IBOV indisponível, força relativa = None (não penaliza nem beneficia)
+    forca_relativa = round(momentum_20 - ibov_ret_20d, 1) if ibov_ret_20d is not None else None
 
     # ── Resistência (pivot highs) ─────────────────────────────────────────────
     resistencia = None
@@ -221,10 +225,13 @@ def _analisar_momentum(ticker: str, ibov_ret_20d: float) -> Optional[dict]:
     if macd_cruzando_alta: score += 25
     elif macd_positivo:    score += 15
 
-    # Força relativa vs IBOV
-    if   forca_relativa >= 10: score += 20
-    elif forca_relativa >= 5:  score += 12
-    elif forca_relativa >= 0:  score += 5
+    # Força relativa vs IBOV (score neutro se IBOV indisponível)
+    if forca_relativa is not None:
+        if   forca_relativa >= 10: score += 20
+        elif forca_relativa >= 5:  score += 12
+        elif forca_relativa >= 0:  score += 5
+    else:
+        score += 8
 
     # Momentum recente
     if   momentum_20 >= 10: score += 15
@@ -295,10 +302,13 @@ def _justificativa(d: dict) -> str:
 
     # Força relativa
     fr = d["forca_relativa"]
-    if fr >= 5:
-        partes.append(f"ação superando IBOV em {fr:+.1f}% nos últimos 20 pregões — liderança setorial")
-    elif fr >= 0:
-        partes.append(f"força relativa neutra vs IBOV ({fr:+.1f}%)")
+    if fr is not None:
+        if fr >= 5:
+            partes.append(f"ação superando IBOV em {fr:+.1f}% nos últimos 20 pregões — liderança setorial")
+        elif fr >= 0:
+            partes.append(f"força relativa neutra vs IBOV ({fr:+.1f}%)")
+    else:
+        partes.append("força relativa vs IBOV não calculada (IBOV indisponível)")
 
     # Posição vs MM200
     partes.append(

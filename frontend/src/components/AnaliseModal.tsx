@@ -48,6 +48,13 @@ const MODULO_LABEL: Record<string, string> = {
   dividendos: 'Dividendos', renda_fixa: 'Renda Fixa',
 }
 
+// ─── Cache de análises em memória (sobrevive close/reopen, limpa no refresh) ──
+interface AnaliseCache {
+  mensagens: Mensagem[]
+  fase: 'analisando' | 'chat'
+}
+const analiseCache = new Map<number, AnaliseCache>()
+
 // ─── Componente ───────────────────────────────────────────────────────────────
 export default function AnaliseModal({
   positionId, ticker, modulo, tese, onClose, onTeseSalva,
@@ -55,11 +62,14 @@ export default function AnaliseModal({
   const { portfolioAtivo, userId } = useStore()
   const isSimulada = portfolioAtivo?.tipo === 'simulada'
   const isTese = portfolioAtivo?.tipo === 'tese'
-  const [fase, setFase] = useState<'analisando' | 'chat'>('analisando')
-  const [mensagens, setMensagens] = useState<Mensagem[]>([])
+  // Restaura do cache se disponível
+  const cached = analiseCache.get(positionId)
+  const [fase, setFase] = useState<'analisando' | 'chat'>(cached?.fase ?? 'analisando')
+  const [mensagens, setMensagens] = useState<Mensagem[]>(cached?.mensagens ?? [])
   const [input, setInput] = useState('')
   const [enviando, setEnviando] = useState(false)
   const [erro, setErro] = useState<string | null>(null)
+  const hadCache = useRef(!!cached)
 
   // Painel de tese
   const [teseAberta, setTeseAberta] = useState(false)
@@ -71,8 +81,17 @@ export default function AnaliseModal({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const cancelRef = useRef(false)
 
-  // ─── Fase 1: análise inicial ─────────────────────────────────────────────────
+  // ─── Persiste no cache sempre que mensagens mudam (não-streaming) ───────────
   useEffect(() => {
+    const hasStreaming = mensagens.some(m => m.streaming)
+    if (mensagens.length > 0 && !hasStreaming) {
+      analiseCache.set(positionId, { mensagens, fase })
+    }
+  }, [mensagens, fase, positionId])
+
+  // ─── Fase 1: análise inicial (pula se cache existe) ──────────────────────────
+  useEffect(() => {
+    if (hadCache.current) return          // já restaurou do cache
     cancelRef.current = false
     let texto = ''
     setMensagens([{ role: 'assistant', content: '', streaming: true }])
@@ -235,7 +254,7 @@ export default function AnaliseModal({
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
 
       <div
         className="relative flex flex-col rounded-xl shadow-2xl w-full"

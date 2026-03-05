@@ -55,7 +55,7 @@ _FIIS_META = {
     # Shoppings
     "XPML11": {"segmento": "shoppings",          "nome": "XP Malls",               "dy_ref": 10.2, "p_vp_ref": 0.94},
     "HSML11": {"segmento": "shoppings",          "nome": "HSI Malls",              "dy_ref": 9.8,  "p_vp_ref": 0.90},
-    "MALL11": {"segmento": "shoppings",          "nome": "Malls Brasil Plural",    "dy_ref": 9.5,  "p_vp_ref": 0.88},
+    "PMLL11": {"segmento": "shoppings",          "nome": "Patria Malls",           "dy_ref": 9.5,  "p_vp_ref": 0.88},
     "VISC11": {"segmento": "shoppings",          "nome": "Vinci Shopping Centers", "dy_ref": 10.0, "p_vp_ref": 0.93},
     "ABCP11": {"segmento": "shoppings",          "nome": "Grand Plaza Shopping",   "dy_ref": 9.0,  "p_vp_ref": 0.85},
     # Lajes Corporativas
@@ -65,7 +65,7 @@ _FIIS_META = {
     "BRCR11": {"segmento": "lajes_corporativas", "nome": "BTG Corporate Office",   "dy_ref": 8.2,  "p_vp_ref": 0.80},
     "JSRE11": {"segmento": "lajes_corporativas", "nome": "JS Real Estate",         "dy_ref": 8.6,  "p_vp_ref": 0.83},
     # FoFs
-    "BPFF11": {"segmento": "hibridos_fofs",      "nome": "Brasil Plural Abs FoF",  "dy_ref": 10.5, "p_vp_ref": 0.86},
+    "PSEC11": {"segmento": "hibridos_fofs",      "nome": "Patria Securities FII",  "dy_ref": 10.5, "p_vp_ref": 0.86},
     "HFOF11": {"segmento": "hibridos_fofs",      "nome": "Hedge Top FOFII",        "dy_ref": 10.2, "p_vp_ref": 0.88},
     "RBRF11": {"segmento": "hibridos_fofs",      "nome": "RBR Alpha Multi",        "dy_ref": 11.0, "p_vp_ref": 0.90},
 }
@@ -78,17 +78,24 @@ _PVP_MAXIMO    = 1.15
 
 
 def _fetch_preco_fii(ticker: str) -> Optional[dict]:
-    """Busca preço, DY e P/VP via prefetch cache (ou yfinance direto como fallback)."""
-    meta = _FIIS_META.get(ticker, {})
+    """Busca preço, DY e P/VP via prefetch cache (ou yfinance direto).
+    Retorna None se não conseguir dados reais — nunca usa valores inventados."""
+    from app.logger import logger
 
-    # Tenta prefetch primeiro (cache compartilhado)
     pf = _pf.get(ticker)
     if pf and pf.sucesso and pf.preco > 0:
-        dy_live = pf.dy_12m if pf.dy_12m > 0 else meta.get("dy_ref", 0)
-        pvp_live = pf.p_vp if pf.p_vp is not None else meta.get("p_vp_ref", 1.0)
-        return {"preco": pf.preco, "dy": round(dy_live, 2), "p_vp": round(pvp_live, 2)}
+        if pf.dy_12m <= 0:
+            logger.debug("fiis: %s sem DY real no prefetch — descartado", ticker)
+            return None
+        dy_live = pf.dy_12m
+        pvp_live = pf.p_vp
+        return {
+            "preco": pf.preco,
+            "dy": round(dy_live, 2),
+            "p_vp": round(pvp_live, 2) if pvp_live is not None else None,
+            "dados_reais": True,
+        }
 
-    # Fallback: busca direto
     try:
         t = yf.Ticker(ticker + ".SA")
         hist = t.history(period="1y", auto_adjust=False)
@@ -99,15 +106,17 @@ def _fetch_preco_fii(ticker: str) -> Optional[dict]:
         if preco <= 0:
             return None
 
-        # DY live
-        dy = meta.get("dy_ref", 0)
+        dy = 0.0
         if "Dividends" in hist.columns:
             divs_12m = float(hist["Dividends"].sum())
             if divs_12m > 0:
                 dy = round(divs_12m / preco * 100, 2)
 
-        # P/VP live
-        pvp = meta.get("p_vp_ref", 1.0)
+        if dy <= 0:
+            logger.debug("fiis: %s sem DY real no yfinance — descartado", ticker)
+            return None
+
+        pvp = None
         try:
             info = t.info
             bv = info.get("bookValue")
@@ -116,17 +125,19 @@ def _fetch_preco_fii(ticker: str) -> Optional[dict]:
         except Exception:
             pass
 
-        return {"preco": round(preco, 2), "dy": dy, "p_vp": pvp}
-    except Exception:
+        return {"preco": round(preco, 2), "dy": dy, "p_vp": pvp, "dados_reais": True}
+    except Exception as e:
+        logger.debug("fiis: falha ao buscar %s: %s", ticker, e)
         return None
 
 
-def _score_fii(dy: float, p_vp: float) -> float:
-    """Score baseado em DY e P/VP (dados live ou fallback)."""
-    if dy < _DY_MINIMO:   return 0.0
-    if p_vp > _PVP_MAXIMO: return 0.0
+def _score_fii(dy: float, p_vp: Optional[float]) -> float:
+    """Score baseado em DY real e P/VP real. Sem P/VP, pontua só pelo DY."""
+    if dy < _DY_MINIMO:
+        return 0.0
+    if p_vp is not None and p_vp > _PVP_MAXIMO:
+        return 0.0
 
-    # DY score (0-50 pts)
     if   dy >= 13: s_dy = 50
     elif dy >= 12: s_dy = 42
     elif dy >= 11: s_dy = 34
@@ -134,13 +145,13 @@ def _score_fii(dy: float, p_vp: float) -> float:
     elif dy >=  9: s_dy = 15
     else:          s_dy = 8
 
-    # P/VP score (0-30 pts) — desconto é bom
-    if   p_vp < 0.90: s_pvp = 30
-    elif p_vp < 0.95: s_pvp = 22
-    elif p_vp < 1.00: s_pvp = 15
-    elif p_vp < 1.05: s_pvp = 8
-    elif p_vp < 1.10: s_pvp = 3
-    else:              s_pvp = 0
+    s_pvp = 0
+    if p_vp is not None:
+        if   p_vp < 0.90: s_pvp = 30
+        elif p_vp < 0.95: s_pvp = 22
+        elif p_vp < 1.00: s_pvp = 15
+        elif p_vp < 1.05: s_pvp = 8
+        elif p_vp < 1.10: s_pvp = 3
 
     return s_dy + s_pvp
 

@@ -100,8 +100,8 @@ function ProposalCard({
   const acao = msg.acao_proposta
   const MODULE_PT: Record<string, string> = {
     etfs: 'ETFs', fiis: 'FIIs', renda_fixa: 'Renda Fixa',
-    momentum: 'Momentum', wheel: 'Wheel', alpha: 'Alpha',
-    dividendos: 'Dividendos', teses: 'Teses', caixa: 'Caixa',
+    momentum: 'Momentum · Trade Técnico', wheel: 'Wheel · Opções', alpha: 'Alpha · Valor com Stop',
+    dividendos: 'Dividendos', teses: 'Teses · Convicção DCA', caixa: 'Caixa',
   }
 
   return (

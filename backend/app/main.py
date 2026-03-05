@@ -3,7 +3,8 @@ APEX Manager — Backend FastAPI
 Fase atual: SQLite local + APScheduler (sem Docker, sem PostgreSQL, sem Redis)
 """
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -82,6 +83,16 @@ def health():
         "cache": "memória",
         "scheduler": "APScheduler",
     }
+
+
+# ─── Global exception handler — captura 500s e loga traceback ────────────────
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    import traceback
+    from app.logger import logger
+    tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    logger.error("Unhandled 500 on %s %s:\n%s", request.method, request.url.path, "".join(tb))
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
 # ─── Entrypoint ───────────────────────────────────────────────────────────────

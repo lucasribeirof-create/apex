@@ -13,8 +13,8 @@ async def get_briefing_hoje(force: bool = False, check_only: bool = False, user_
     """Retorna o briefing do dia. check_only=True só verifica sem gerar. force=True regenera sempre."""
     user = (db.query(User).filter(User.id == user_id).first() if user_id
             else db.query(User).first())
-    if not user or not user.onboarding_completo:
-        raise HTTPException(status_code=400, detail="Onboarding não concluído")
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
 
     portfolio = get_portfolio_ativo(user, db)
     if not portfolio:
@@ -106,8 +106,8 @@ async def stream_briefing_hoje(
 
     user = (db.query(User).filter(User.id == user_id).first() if user_id
             else db.query(User).first())
-    if not user or not user.onboarding_completo:
-        raise HTTPException(status_code=400, detail="Onboarding não concluído")
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
 
     portfolio = get_portfolio_ativo(user, db)
     if not portfolio:
@@ -152,15 +152,21 @@ async def stream_briefing_hoje(
             )
 
     async def generate():
+        has_data = False
         try:
             async for chunk, briefing_data in gerar_briefing_portfolio_stream(portfolio.id, db):
+                has_data = True
                 if chunk is not None:
                     yield f"data: {_json.dumps({'chunk': chunk}, ensure_ascii=False)}\n\n"
                 if briefing_data is not None:
-                    briefing_data["done"] = True
-                    yield f"data: {_json.dumps(briefing_data, ensure_ascii=False)}\n\n"
+                    # Formato igual ao send_existing: {done: true, briefing: {...}}
+                    yield f"data: {_json.dumps({'done': True, 'briefing': briefing_data}, ensure_ascii=False)}\n\n"
         except Exception as e:
-            yield f"data: {_json.dumps({'error': str(e)})}\n\n"
+            yield f"data: {_json.dumps({'error': str(e), 'done': True})}\n\n"
+            return
+        # Se o generator retornou sem produzir nada (ex: montar_contexto falhou)
+        if not has_data:
+            yield f"data: {_json.dumps({'error': 'Não foi possível gerar o briefing. Verifique se o onboarding e portfólio estão completos.', 'done': True})}\n\n"
 
     return StreamingResponse(
         generate(),

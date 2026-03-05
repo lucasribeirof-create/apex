@@ -39,14 +39,14 @@ SETOR_MAP: dict[str, str] = {
     "ITSA4": "financeiro",
     # Consumo
     "ABEV3": "consumo", "LREN3": "consumo", "BRFS3": "consumo",
-    "JBSS3": "consumo", "MGLU3": "consumo", "PCAR3": "consumo",
+    "JBSS32": "consumo", "MGLU3": "consumo", "PCAR3": "consumo",
     # Saúde
     "RDOR3": "saude", "RADL3": "saude", "HYPE3": "saude",
     "FLRY3": "saude",
     # Tecnologia / Telecom
     "TOTS3": "tecnologia", "VIVT3": "tecnologia", "TIMS3": "tecnologia",
     # Industrial
-    "WEGE3": "industrial", "EMBR3": "industrial", "RENT3": "industrial",
+    "WEGE3": "industrial", "EMBJ3": "industrial", "RENT3": "industrial",
     # Utilidades Públicas
     "EGIE3": "utilidades", "EQTL3": "utilidades", "CMIG4": "utilidades",
     "ELET3": "utilidades", "TAEE11": "utilidades", "CPFE3": "utilidades",
@@ -56,7 +56,7 @@ SETOR_MAP: dict[str, str] = {
 }
 
 # Tickers exportadores (beneficiados por alta do dólar)
-_EXPORTADORES = {"PETR4", "PETR3", "VALE3", "SUZB3", "KLBN11", "JBSS3", "EMBR3"}
+_EXPORTADORES = {"PETR4", "PETR3", "VALE3", "SUZB3", "KLBN11", "JBSS32", "EMBJ3"}
 
 # Tickers ligados a petróleo
 _PETROLEIRAS = {"PETR4", "PETR3", "PRIO3", "RECV3", "VBBR3", "CSAN3"}

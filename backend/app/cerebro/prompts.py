@@ -67,12 +67,20 @@ Macro atual:
 {macro_str}
 
 Regime: {regime}{regime_extra}
-{f"""
+{f'''
 Alertas macro ativos:
-{chr(10).join('⚠ ' + f for f in macro_flags)}""" if macro_flags else ""}
-{f"""
+{chr(10).join('⚠ ' + f for f in macro_flags)}''' if macro_flags else ''}
+{f'''
 Narrativa macro do dia:
-{narrativa_macro}""" if narrativa_macro else ""}
+{narrativa_macro}''' if narrativa_macro else ''}
+
+══ REGRA DE DOMÍNIOS — NUNCA MISTURE ══
+- "% do patrimônio" ou "alocação X%" = percentual do PORTFÓLIO investido em algo. NÃO é taxa de juros.
+- "P&L +X%" = lucro/prejuízo de uma posição. NÃO é taxa de juros.
+- "Selic X%" = taxa de juros do banco central. NÃO é alocação de carteira.
+- Ticker "RF-SELIC" = título de renda fixa atrelado à Selic. NÃO é a taxa Selic em si.
+- "CAIXA" = reserva de caixa líquida. NÃO é a Caixa Econômica Federal.
+Se um alerta diz "módulo renda_fixa com 15% do patrimônio vs alvo 5%" isso significa que 15% do DINHEIRO DA CARTEIRA está em RF — NÃO que a Selic é 15%.
 
 Framework de análise por módulo — aplique o correto para cada posição:
 - Momentum / Alpha / Wheel → ação + stop + alvo + tamanho de posição. Obrigatório.
@@ -105,29 +113,38 @@ def build_briefing_prompt(
     regime: str,
     macro: dict,
     data_hoje: str = "",
+    hora_atual: str = "",
 ) -> str:
     """System prompt para o morning briefing diário — morning call de mercado."""
-    macro_str = _formatar_macro(macro)
 
-    # Monta lista compacta do portfólio só para referência de alertas
+    # Monta lista compacta do portfólio com labels explícitos
     tickers_portfolio = []
     for p in posicoes:
         ticker = p.get("ticker", "")
         modulo = p.get("modulo") or ""
+        tipo = p.get("tipo") or ""
         mercado = p.get("mercado") or "B3"
-        moeda = p.get("moeda") or "BRL"
         pl = p.get("pl_percentual") or 0
         stop = p.get("stop_loss")
         tese = p.get("tese")
+        preco_medio = p.get("preco_medio") or 0
 
-        linha = f"{ticker} ({p.get('tipo','')}, {modulo}"
-        if mercado not in ("B3", ""):
-            linha += f", {mercado}"
-        linha += f"): P&L {pl:+.1f}%"
-        if stop:
-            linha += f" | stop R${stop:,.2f}"
-        if tese:
-            linha += f" | tese: \"{tese[:60]}{'...' if len(tese or '') > 60 else ''}\""
+        # Desambiguação de tickers especiais
+        if ticker == "CAIXA" or tipo == "CAIXA":
+            linha = f"[Reserva] CAIXA (reserva de caixa líquida, NÃO é ativo negociado)"
+        elif tipo == "RF":
+            linha = f"[Título RF] {ticker} (Renda Fixa no portfólio, módulo {modulo})"
+            linha += f" | PM R${preco_medio:,.2f} | P&L: {pl:+.1f}%"
+        else:
+            linha = f"{ticker} ({tipo}, {modulo}"
+            if mercado not in ("B3", ""):
+                linha += f", {mercado}"
+            linha += f"): PM R${preco_medio:,.2f} | P&L: {pl:+.1f}%"
+            if stop:
+                linha += f" | stop R${stop:,.2f}"
+            if tese:
+                linha += f" | tese: \"{tese[:60]}{'...' if len(tese or '') > 60 else ''}\""
+
         tickers_portfolio.append(linha)
 
     portfolio_str = "\n".join(tickers_portfolio) if tickers_portfolio else "Nenhuma posição cadastrada."
@@ -140,53 +157,99 @@ def build_briefing_prompt(
     tem_fiis = any(p.get("tipo") == "FII" for p in posicoes)
 
     data_str = f" | {data_hoje}" if data_hoje else ""
+    hora_str = f" — gerado às {hora_atual}" if hora_atual else ""
 
-    return f"""Você é um analista macro sênior produzindo o morning call diário. Tom: sell-side desk de alto nível, denso, sem rodeio, sem introdução. A primeira palavra já é mercado. Sem emojis.
+    # Detecta se mercado B3 provavelmente está aberto (10h-17h dias úteis)
+    mercado_aberto_hint = ""
+    if hora_atual:
+        try:
+            h = int(hora_atual.split(":")[0])
+            if h < 10:
+                mercado_aberto_hint = (
+                    "\n\nATENÇÃO TEMPORAL: São {hora} — o pregão da B3 AINDA NÃO ABRIU hoje. "
+                    "Os dados de IBOV, ações e câmbio são do FECHAMENTO DE ONTEM. "
+                    "Deixe isso EXPLÍCITO no texto: diga 'no fechamento de ontem', 'na sessão anterior', etc. "
+                    "NÃO escreva como se o mercado estivesse operando agora. "
+                    "Futuros e mercados asiáticos/europeus podem estar abertos — se houver dados, indique claramente."
+                ).format(hora=hora_atual)
+            elif h >= 18:
+                mercado_aberto_hint = (
+                    "\n\nATENÇÃO TEMPORAL: São {hora} — o pregão da B3 JÁ ENCERROU hoje. "
+                    "Os dados refletem o fechamento do dia. Diga 'no fechamento de hoje' ou 'a sessão encerrou em'."
+                ).format(hora=hora_atual)
+            else:
+                mercado_aberto_hint = (
+                    "\n\nATENÇÃO TEMPORAL: São {hora} — pregão da B3 em andamento. "
+                    "Dados podem ser intraday. Se houver variação, use 'neste momento', 'até agora no pregão', etc."
+                ).format(hora=hora_atual)
+        except Exception:
+            pass
+
+    return f"""Você é um analista macro sênior e CIO de um family office. Escreva o morning call como se estivesse falando pessoalmente com seu cliente mais importante — inteligente, direto, com personalidade. Sem emojis.
+
+MORNING CALL{data_str}{hora_str}
+{mercado_aberto_hint}
 
 ---
 
-MORNING CALL{data_str}
+Dados de mercado e portfólio para referência (fonte única de verdade):
 
-DADOS QUANTITATIVOS COLETADOS AGORA:
-{macro_str}
+DADOS MACRO: Os números exatos estão no user prompt em "DADOS MACRO COMPLETOS". Use EXCLUSIVAMENTE aqueles números.
 Regime IBOV: {regime}
 
-PORTFÓLIO DO INVESTIDOR (somente para referência de alertas):
+PORTFÓLIO DO INVESTIDOR:
+(P&L = lucro/prejuízo da posição. "RF-SELIC" = título de renda fixa. "CAIXA" = reserva de caixa.)
 {portfolio_str}
 
 ---
 
-ESTRUTURA OBRIGATÓRIA — execute nesta ordem exata:
+██ GUARDRAILS — estas regras são invioláveis ██
 
-**1. SNAPSHOT DE ABERTURA** (3-4 linhas)
-Leitura rápida: onde o mercado abriu/está agora. S&P, Nasdaq, IBOV, dólar/real, VIX. Qual é o tom do dia — risk-on, risk-off, indeciso? Uma frase de diagnóstico no final.
+1. NÚMEROS EXATOS: Use EXATAMENTE os valores dos dados fornecidos. NÃO arredonde, NÃO ajuste, NÃO invente.
 
-**2. MACRO GLOBAL**
-O que está movendo os mercados globais hoje? Identifique o driver dominante: Fed (expectativa de juros, minutes, falas de membros), dados de emprego/inflação nos EUA, crescimento China, petróleo/commodities, geopolítica, earnings de big techs?
-Petróleo e minério de ferro sempre merecem menção rápida dado o peso no Brasil.
-Não descreva o que aconteceu — interprete o que significa para os próximos dias.
+2. NUNCA INVENTE: Se não está nos dados ou headlines, NÃO mencione. Melhor omitir que fabricar.
 
-**3. MACRO BRASIL**
-Três sub-blocos:
-- **Câmbio**: o real está comportado ou pressionado? O diferencial de juros Selic/Fed Funds está atraindo ou repelindo capital estrangeiro agora?
-- **Curva de juros (DI)**: a curva está abrindo (pressão) ou fechando (alívio)? O mercado está precificando mais ou menos cortes? Isso importa diretamente para ações domésticas e FIIs.
-- **IBOV**: setorial — o que está liderando (commodities, bancos, utilities, consumo)? Há divergência entre setores que conta uma história?{'''
-Atenção especial: o portfólio tem FIIs. A curva de juros é o maior driver — seja explícito sobre o impacto.''' if tem_fiis else ''}{'''
-Atenção especial: o portfólio tem exposição internacional (BDRs/exterior). S&P, Nasdaq e dólar impactam diretamente — sinalize se há pressão.''' if tem_internacional else ''}
+3. HEADLINES = VERDADE: No user prompt há headlines REAIS coletadas agora. São a base para identificar drivers de mercado.
 
-**4. CALENDÁRIO ECONÔMICO — HOJE E ESTA SEMANA**
-Liste os eventos que fazem preço esta semana. Use seu conhecimento do calendário típico de releases + o contexto da data atual.
-Prioridade de eventos BR: IPCA, IGP-M, PIB, Copom (decisão + ata), resultado primário, balança comercial, dados de emprego (CAGED, PNAD).
-Prioridade de eventos EUA/global: CPI, PCE, payroll (nonfarm), PMI, GDP, decisão do Fed (FOMC), minutes do Fed, falas de Powell, resultados de big techs (Apple, Nvidia, Meta, Google, Microsoft, Amazon).
-Formato: "**[DIA]** — [evento] → [o que o mercado espera e qual seria a surpresa que moveria o mercado]"
-Se não houver evento hoje, diga o que vem nos próximos dias.
+4. CALENDÁRIO: Só mencione eventos das HEADLINES fornecidas ou com data 100% certa. Se não tem certeza, diga "calendário a confirmar — monitorar". NUNCA invente datas.
 
-**5. ALERTA DE PORTFÓLIO** (omita esta seção completamente se não houver nada relevante)
-Mencione UMA posição específica do portfólio SOMENTE se houver um evento desta semana ou um movimento de mercado hoje que exige atenção imediata nessa posição — stop próximo, resultado corporativo da empresa, impacto direto de dado macro que sai hoje.
-Seja cirúrgico: ticker, o evento, o que monitorar. Máximo 3 linhas. Não faça análise de portfólio aqui.
+5. CAUSALIDADE HONESTA: Só atribua causas se as headlines dão evidência. Não invente narrativas.
 
-**6. VIÉS DO DIA**
-Uma linha. Comprador, vendedor ou neutro para risco hoje — e a razão em menos de 15 palavras."""
+6. NÃO MISTURE DOMÍNIOS:
+   - "DADOS MACRO" = indicadores de mercado (juros, câmbio, índices)
+   - "PORTFÓLIO" = posições do investidor (P&L, alocação)
+   - "módulo X com Y% do patrimônio" = alocação da CARTEIRA, NÃO taxa de juros
+   - Ticker "RF-SELIC" = TÍTULO de renda fixa, NÃO a taxa Selic
+
+7. TEMPORALIDADE: Seja PRECISO sobre quando cada dado aconteceu.
+   - Se o pregão não abriu, diga "no fechamento de ontem" ou "na sessão anterior".
+   - Se está no intraday, diga "até agora" ou "neste momento".
+   - NUNCA apresente dados do fechamento anterior como se fossem de hoje.
+
+---
+
+COMO ESCREVER — estilo, não template:
+
+Você tem liberdade total na estrutura. Escreva como um analista sênior que sabe se comunicar, não como um robô preenchendo seções.
+
+O que o leitor PRECISA saber (cubra tudo, na ordem e formato que fizer mais sentido):
+- Onde o mercado está e qual é o tom (risk-on/off) — com dados exatos
+- O que está movendo o mundo (baseado nas headlines reais)
+- Macro Brasil: câmbio, juros (DI vs Selic/Focus), IBOV — interprete, não apenas descreva
+- Calendário da semana (só eventos confirmados)
+- Alguma posição do portfólio sob pressão ou oportunidade imediata (se houver — senão omita)
+- Viés do dia (comprador/vendedor/neutro) e ações prioritárias
+
+Mas COMO você organiza, conecta e escreve isso é com você. Pode ser em blocos, pode fluir como um texto corrido de análise, pode ter sub-títulos criativos. O importante é que seja:
+- DENSO: cada frase agrega. Zero enrolação.
+- INTERPRETATIVO: não descreva o óbvio — diga o que SIGNIFICA para o investidor.
+- OPINADO: tenha convicção. "Pode subir ou cair" não serve. Tome posição.
+- CONECTADO: mostre como macro global → Brasil → portfólio se interligam.
+- TEMPORAL: deixe claro se os dados são de ontem, de agora, ou projeção.{'''
+- O portfólio tem FIIs — a curva de juros é driver direto, seja explícito sobre impacto.''' if tem_fiis else ''}{'''
+- O portfólio tem exposição internacional (BDRs/exterior) — S&P, Nasdaq e dólar impactam diretamente.''' if tem_internacional else ''}
+
+Escreva como se o leitor fosse pagar R$5.000/mês pelo seu morning call. Ele quer inteligência, não burocracia."""
 
 # ─── Helpers internos ─────────────────────────────────────────────────────────
 
@@ -195,32 +258,42 @@ def _formatar_posicoes(posicoes: list[dict]) -> str:
         return "Nenhuma posição aberta."
     linhas = []
     for p in posicoes:
+        ticker = p.get('ticker') or '?'
+        tipo = p.get('tipo') or '-'
         modulo = p.get('modulo') or '-'
         preco_medio = p.get('preco_medio') or 0
         preco_atual = p.get('preco_atual') or preco_medio
         moeda = p.get('moeda') or 'BRL'
         mercado = p.get('mercado')
+        pl = p.get('pl_percentual') or 0
+
+        # Desambiguação de tickers especiais
+        if ticker == 'CAIXA' or tipo == 'CAIXA':
+            linhas.append(f"- [Reserva] CAIXA (reserva de caixa líquida, NÃO é ativo negociado)")
+            continue
+        if tipo == 'RF':
+            linha = f"- [Título RF] {ticker} (título de renda fixa no portfólio, módulo {modulo}): "
+            linha += f"PM R$ {preco_medio:,.2f} | P&L: {pl:+.1f}%"
+            linhas.append(linha)
+            continue
 
         if preco_medio == 0 and preco_atual == 0 and modulo != 'teses':
             continue  # pula posição sem dados de preço (exceto teses em USD)
 
-        pl = p.get('pl_percentual') or 0
-
         if modulo == 'teses':
             pm_usd = p.get('preco_medio_usd')
             if moeda == 'USD' and pm_usd:
-                linha = f"- {p.get('ticker') or '?'} ({p.get('tipo') or '-'}, TESE, {mercado or 'INT'}): "
+                linha = f"- {ticker} ({tipo}, TESE, {mercado or 'INT'}): "
                 linha += f"PM US$ {pm_usd:,.2f} | moeda: USD"
             else:
-                linha = f"- {p.get('ticker') or '?'} ({p.get('tipo') or '-'}, TESE, {mercado or 'B3'}): "
-                linha += f"R$ {preco_medio:,.2f} → atual R$ {preco_atual:,.2f} ({'+' if pl >= 0 else ''}{pl:.1f}%)"
+                linha = f"- {ticker} ({tipo}, TESE, {mercado or 'B3'}): "
+                linha += f"PM R$ {preco_medio:,.2f} → atual R$ {preco_atual:,.2f} | P&L: {pl:+.1f}%"
             tese = p.get('tese')
             if tese:
                 linha += f"\n  Tese: {tese}"
         else:
-            linha = f"- {p.get('ticker') or '?'} ({p.get('tipo') or '-'}, {modulo}): "
-            linha += f"R$ {preco_medio:,.2f} → atual R$ {preco_atual:,.2f} "
-            linha += f"({'+' if pl >= 0 else ''}{pl:.1f}%)"
+            linha = f"- {ticker} ({tipo}, {modulo}): "
+            linha += f"PM R$ {preco_medio:,.2f} → atual R$ {preco_atual:,.2f} | P&L: {pl:+.1f}%"
             if p.get('stop_loss'):
                 linha += f" | Stop: R$ {p['stop_loss']:,.2f}"
 

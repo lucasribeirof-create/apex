@@ -24,6 +24,12 @@ class StartOnboarding(BaseModel):
     name: str
 
 
+class QuickStartBody(BaseModel):
+    """Onboarding rápido: cria user + portfolio vazio sem questionário."""
+    name: str
+    tipo: str = "real"   # real | simulada
+
+
 class FinalizeOnboarding(BaseModel):
     user_id: int | None = None
     name: str | None = None        # optional, used as fallback if user not found by id
@@ -43,7 +49,6 @@ def listar_usuarios(db: Session = Depends(get_db)):
     """Lista todos os usuários com onboarding concluído (para o seletor de carteiras)."""
     users = (
         db.query(User)
-        .filter(User.onboarding_completo == True)
         .order_by(User.created_at.desc())
         .all()
     )
@@ -87,6 +92,50 @@ def start_onboarding(body: StartOnboarding, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
     return {"user_id": user.id}
+
+
+@router.post("/quick-start")
+def quick_start(body: QuickStartBody, db: Session = Depends(get_db)):
+    """
+    Onboarding rápido — cria user + portfolio vazio (sem questionário).
+    Usado quando o investidor já tem ativos e quer adicioná-los manualmente.
+    O questionário de perfil fica pendente (onboarding_completo = False) e será
+    solicitado quando o usuário tentar rebalancear.
+    """
+    user = User(name=body.name, onboarding_completo=False)
+    db.add(user)
+    db.flush()
+
+    portfolio = Portfolio(
+        user_id=user.id,
+        nome="Carteira Real" if body.tipo == "real" else "Carteira Simulada",
+        tipo=body.tipo,
+        patrimonio_total=0.0,
+        patrimonio_inicio=0.0,
+    )
+    db.add(portfolio)
+    db.flush()
+
+    user.portfolio_ativo_id = portfolio.id
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "user_id": user.id,
+        "portfolio_id": portfolio.id,
+        "tipo": body.tipo,
+        "perfil_completo": False,
+    }
+
+
+@router.get("/perfil-status")
+def perfil_status(user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Verifica se o questionário de perfil foi preenchido."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        return {"perfil_completo": False}
+    return {"perfil_completo": bool(user.onboarding_completo)}
 
 
 @router.post("/finalize")
@@ -400,36 +449,45 @@ def _get_ai_explanation(estrategia: str, score: int) -> str:
 
 def _calcular_score(respostas: dict) -> int:
     """
-    Score de classificação CORE vs ALPHA.
-    Baseado nas 7 dimensões do questionário.
+    Score de classificação CORE vs ALPHA (0-15 pts).
+    Aceita valores tanto do frontend (inglês) quanto legado (português).
     """
     score = 0
     pontos = {
-        # Volatilidade (0-3 pts)
         "volatilidade": {
-            "vende_tudo": 0, "vende_parte": 1, "mantem": 2, "compra_mais": 3
+            "sell_all": 0, "vende_tudo": 0,
+            "sell_partial": 1, "vende_parte": 1,
+            "hold": 2, "mantem": 2,
+            "buy_more": 3, "compra_mais": 3,
         },
-        # Liquidez nos próximos 12 meses (0-2 pts)
         "liquidez": {
-            "mais_30pct": 0, "10_30pct": 1, "menos_10pct": 2, "nenhuma": 2
+            "large": 0, "mais_30pct": 0,
+            "medium": 1, "10_30pct": 1,
+            "small": 2, "menos_10pct": 2,
+            "none": 2, "nenhuma": 2,
         },
-        # Fonte de renda (0-2 pts)
         "renda": {
-            "depende_portfolio": 0, "parcial": 1, "ativa": 2
+            "depends_portfolio": 0, "depende_portfolio": 0,
+            "partial": 1, "parcial": 1,
+            "active": 2, "ativa": 2,
         },
-        # Experiência (0-3 pts — multi-select)
-        # calculado separadamente
-        # Objetivo principal (0-1 pt)
         "objetivo": {
-            "preservacao": 0, "renda_passiva": 0, "equilibrio": 1, "crescimento": 1
+            "preservation": 0, "preservacao": 0,
+            "income": 0, "renda_passiva": 0,
+            "balance": 1, "equilibrio": 1,
+            "growth": 1, "crescimento": 1,
         },
-        # Horizonte temporal (0-2 pts)
         "horizonte": {
-            "ate_2anos": 0, "2_5anos": 1, "5_10anos": 2, "mais_10anos": 2
+            "2_less": 0, "ate_2anos": 0,
+            "2_5": 1, "2_5anos": 1,
+            "5_10": 2, "5_10anos": 2,
+            "10_plus": 2, "mais_10anos": 2,
         },
-        # Tempo disponível (0-2 pts)
         "tempo": {
-            "menos_1h": 0, "1_3h": 1, "3_5h": 2, "mais_5h": 2
+            "none": 0, "menos_1h": 0,
+            "few_per_week": 1, "1_3h": 1,
+            "daily": 2, "3_5h": 2,
+            "professional": 2, "mais_5h": 2,
         },
     }
 
@@ -438,15 +496,14 @@ def _calcular_score(respostas: dict) -> int:
         if valor and valor in opcoes:
             score += opcoes[valor]
 
-    # Experiência: multi-select (0-3 pts)
     experiencia = respostas.get("experiencia", [])
     if isinstance(experiencia, list):
         exp_score = 0
-        if "acoes_br" in experiencia:
+        if any(x in experiencia for x in ["acoes_br", "stocks_br"]):
             exp_score += 1
-        if "opcoes" in experiencia:
+        if any(x in experiencia for x in ["opcoes", "options"]):
             exp_score += 1
-        if any(x in experiencia for x in ["exterior", "etfs", "bdrs"]):
+        if any(x in experiencia for x in ["exterior", "international", "etfs", "bdrs"]):
             exp_score += 1
         score += min(exp_score, 3)
 

@@ -106,12 +106,22 @@ class ContextoCerebro:
             moeda = p.get("moeda") or "BRL"
             mercado = p.get("mercado") or ""
 
+            # Desambiguação de tickers especiais
+            if ticker == "CAIXA" or tipo == "CAIXA":
+                linhas.append("- [Reserva] CAIXA (reserva de caixa líquida, NÃO é ativo negociado)")
+                continue
+            if tipo == "RF":
+                linha = f"- [Título RF] {ticker} (título de renda fixa, módulo {modulo}): "
+                linha += f"PM R${preco_med:,.2f} | P&L: {pl:+.1f}%"
+                linhas.append(linha)
+                continue
+
             if moeda == "USD":
                 pm_usd = p.get("preco_medio_usd") or preco_med
                 linha = f"- {ticker} ({tipo}, {modulo}{', ' + mercado if mercado else ''}): PM US${pm_usd:,.2f}"
             else:
                 linha = (f"- {ticker} ({tipo}, {modulo}): "
-                         f"R${preco_med:,.2f} → R${preco_atual:,.2f} ({pl:+.1f}%)")
+                         f"PM R${preco_med:,.2f} → R${preco_atual:,.2f} | P&L: {pl:+.1f}%")
                 if p.get("stop_loss"):
                     linha += f" | stop R${p['stop_loss']:,.2f}"
 
@@ -153,7 +163,11 @@ class ContextoCerebro:
         for m in self.modulos_acima_alvo:
             real = self.alocacao_real.get(m, 0)
             alvo = self.alocacao_alvo.get(m, 0)
-            alertas.append(f"Módulo {m} acima do alvo: {real:.1f}% real vs {alvo:.1f}% alvo (+{real-alvo:.1f}pp)")
+            alertas.append(
+                f"ALOCAÇÃO — módulo '{m}' está com {real:.1f}% do patrimônio "
+                f"(alvo era {alvo:.1f}% do patrimônio, desvio de +{real-alvo:.1f}pp). "
+                f"Isso NÃO é taxa de juros — é % do portfólio alocado neste módulo."
+            )
         for p in self.posicoes_no_vermelho:
             alertas.append(
                 f"{p['ticker']} com perda de {p['pl_percentual']:.1f}% "
@@ -168,6 +182,7 @@ async def montar(
     db: Session,
     user_id: Optional[int] = None,
     portfolio_id: Optional[int] = None,
+    force_fresh: bool = False,
 ) -> ContextoCerebro:
     """
     Monta o ContextoCerebro completo de forma assíncrona.
@@ -241,6 +256,7 @@ async def montar(
             "moeda":           getattr(p, "moeda", "BRL") or "BRL",
             "preco_medio_usd": getattr(p, "preco_medio_usd", None),
             "apex_score":      getattr(p, "apex_score", None),
+            "justificativa_entrada": getattr(p, "justificativa_entrada", None),
             "created_at":      p.created_at.isoformat() if p.created_at else None,
             "data_entrada":    p.data_entrada.isoformat() if getattr(p, "data_entrada", None) else None,
         }
@@ -252,7 +268,7 @@ async def montar(
 
     macro_context_obj: Optional[MacroContext] = None
     try:
-        macro_context_obj = await montar_macro()
+        macro_context_obj = await montar_macro(force_fresh=force_fresh)
     except Exception as e:
         logger.warning("contexto_cerebro: MacroEngine falhou: %s", e)
 
@@ -311,12 +327,14 @@ async def montar(
     # ── Alocação real vs alvo ─────────────────────────────────────────────
     alocacao_real = _calcular_alocacao_real(posicoes, patrimonio)
     alocacao_alvo = _extrair_alocacao_alvo(portfolio)
+    _alvos_configurados = sum(alocacao_alvo.values()) > 0  # usuário definiu targets?
     desvios = {m: round(alocacao_real.get(m, 0) - alocacao_alvo.get(m, 0), 1) for m in alocacao_alvo}
 
     # ── Alertas pré-computados ────────────────────────────────────────────
     stops_proximos = _detectar_stops_proximos(posicoes, limiar_pct=5.0)
-    modulos_acima = [m for m, d in desvios.items() if d > 5.0]
-    modulos_abaixo = [m for m, d in desvios.items() if d < -5.0]
+    # Só gera alertas de alocação se o usuário configurou targets (soma > 0)
+    modulos_acima = [m for m, d in desvios.items() if d > 5.0] if _alvos_configurados else []
+    modulos_abaixo = [m for m, d in desvios.items() if d < -5.0] if _alvos_configurados else []
     posicoes_vermelho = [
         p for p in posicoes
         if p["pl_percentual"] < -10 and p["ticker"] not in ("CAIXA", "TESES")

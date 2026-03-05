@@ -83,7 +83,7 @@ _DEFAULT_UNIVERSE: list[dict] = [
     {"ticker": "PETZ3",  "nome": "Petz",                "tipo": "ACAO", "setor": "consumo"},
     {"ticker": "NTCO3",  "nome": "Grupo Natura",        "tipo": "ACAO", "setor": "consumo"},
     {"ticker": "BRFS3",  "nome": "BRF",                 "tipo": "ACAO", "setor": "consumo"},
-    {"ticker": "JBSS3",  "nome": "JBS",                 "tipo": "ACAO", "setor": "consumo"},
+    {"ticker": "JBSS32", "nome": "JBS BDR",             "tipo": "ACAO", "setor": "consumo"},
     {"ticker": "SMTO3",  "nome": "São Martinho",        "tipo": "ACAO", "setor": "agro"},
     {"ticker": "SLCE3",  "nome": "SLC Agrícola",        "tipo": "ACAO", "setor": "agro"},
 
@@ -100,7 +100,7 @@ _DEFAULT_UNIVERSE: list[dict] = [
 
     # ── Ações — Industrial / Logística ───────────────────────────────────────
     {"ticker": "WEGE3",  "nome": "WEG",                 "tipo": "ACAO", "setor": "industrial"},
-    {"ticker": "EMBR3",  "nome": "Embraer",             "tipo": "ACAO", "setor": "industrial"},
+    {"ticker": "EMBJ3",  "nome": "Embraer",             "tipo": "ACAO", "setor": "industrial"},
     {"ticker": "RAIL3",  "nome": "Rumo",                "tipo": "ACAO", "setor": "industrial"},
     {"ticker": "CCRO3",  "nome": "CCR",                 "tipo": "ACAO", "setor": "industrial"},
     {"ticker": "MULT3",  "nome": "Multiplan",           "tipo": "ACAO", "setor": "imobiliario"},
@@ -110,7 +110,7 @@ _DEFAULT_UNIVERSE: list[dict] = [
     {"ticker": "EQTL3",  "nome": "Equatorial",          "tipo": "ACAO", "setor": "utilidades"},
     {"ticker": "CMIG4",  "nome": "Cemig PN",            "tipo": "ACAO", "setor": "utilidades"},
     {"ticker": "ELET3",  "nome": "Eletrobras ON",       "tipo": "ACAO", "setor": "utilidades"},
-    {"ticker": "CPLE6",  "nome": "Copel PNB",           "tipo": "ACAO", "setor": "utilidades"},
+    {"ticker": "CPLE3",  "nome": "Copel ON",            "tipo": "ACAO", "setor": "utilidades"},
     {"ticker": "TAEE11", "nome": "Taesa UNT",           "tipo": "ACAO", "setor": "utilidades"},
     {"ticker": "SBSP3",  "nome": "Sabesp",              "tipo": "ACAO", "setor": "utilidades"},
 

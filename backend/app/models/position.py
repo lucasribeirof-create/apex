@@ -55,6 +55,9 @@ class Position(Base):
     taxa = Column(Float, nullable=True)
     duration = Column(Float, nullable=True)
 
+    # Justificativa do CEO na entrada (memória para rebalanceamento)
+    justificativa_entrada = Column(Text, nullable=True)
+
     # Status
     ativa = Column(Boolean, default=True)
     data_abertura = Column(DateTime, nullable=True)   # data da primeira compra / entrada

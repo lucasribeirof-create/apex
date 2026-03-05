@@ -59,9 +59,22 @@ _cache: dict[str, TickerData] = {}
 _cache_ts: float = 0.0
 _CACHE_TTL = 300  # 5 minutos
 
+_fail_cache: dict[str, float] = {}
+_FAIL_CACHE_TTL = 3600  # 1h — não re-busca tickers que falharam
+
 
 def _is_stale() -> bool:
     return time.time() - _cache_ts > _CACHE_TTL
+
+
+def _is_known_fail(ticker: str) -> bool:
+    ts = _fail_cache.get(ticker.upper())
+    if ts is None:
+        return False
+    if time.time() - ts > _FAIL_CACHE_TTL:
+        del _fail_cache[ticker.upper()]
+        return False
+    return True
 
 
 def get(ticker: str) -> Optional[TickerData]:
@@ -171,27 +184,34 @@ async def buscar(tickers: list[str], force: bool = False) -> dict[str, TickerDat
 
     tickers_upper = list({t.upper() for t in tickers})
 
+    # Filtra tickers com falha conhecida (não re-busca por _FAIL_CACHE_TTL)
+    skipped = [t for t in tickers_upper if _is_known_fail(t)]
+    tickers_upper = [t for t in tickers_upper if not _is_known_fail(t)]
+    if skipped:
+        logger.info("prefetch: pulando %d tickers com falha recente: %s", len(skipped), ", ".join(skipped[:5]))
+
     # Se cache está fresco e tem todos os tickers, retorna direto
     if not force and not _is_stale():
         faltam = [t for t in tickers_upper if t not in _cache]
         if not faltam:
             return _cache
-        # Busca só os que faltam
         tickers_upper = faltam
 
     logger.info("prefetch: buscando %d tickers...", len(tickers_upper))
     t0 = time.time()
 
-    # Roda em paralelo via thread pool (yfinance é sync/blocking)
     tarefas = [asyncio.to_thread(_fetch_one, t) for t in tickers_upper]
     resultados = await asyncio.gather(*tarefas, return_exceptions=True)
 
     for ticker, res in zip(tickers_upper, resultados):
         if isinstance(res, TickerData):
             _cache[ticker] = res
+            if not res.sucesso:
+                _fail_cache[ticker] = time.time()
         else:
             logger.debug("prefetch: exceção ao buscar %s: %s", ticker, res)
             _cache[ticker] = TickerData(ticker=ticker, sucesso=False)
+            _fail_cache[ticker] = time.time()
 
     _cache_ts = time.time()
     sucesso = sum(1 for r in _cache.values() if r.sucesso)
@@ -202,6 +222,7 @@ async def buscar(tickers: list[str], force: bool = False) -> dict[str, TickerDat
 
 def limpar_cache():
     """Limpa o cache de pre-fetch (útil em testes)."""
-    global _cache, _cache_ts
+    global _cache, _cache_ts, _fail_cache
     _cache = {}
     _cache_ts = 0.0
+    _fail_cache = {}

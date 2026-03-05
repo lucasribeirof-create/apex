@@ -10,7 +10,7 @@ from app.api.deps import get_db, get_user_id
 from app.models import Position
 from app.cerebro import chat_stream, build_portfolio_prompt
 from app.cerebro.contexto import montar as montar_contexto
-from app.data import get_dados_tecnicos, formatar_tecnico_para_prompt
+from app.data import get_dados_tecnicos, formatar_tecnico_para_prompt, get_fundamentals, formatar_fundamentalista_para_prompt
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -59,7 +59,7 @@ async def analisar_posicao(position_id: int, user_id: Optional[int] = Depends(ge
     if not pos_db:
         raise HTTPException(status_code=404, detail="Posição não encontrada")
 
-    mercado = getattr(pos_db, "mercado", "B3") or "B3"
+    mercado = getattr(pos_db, "mercado", None) or ("BDR" if pos_db.tipo == "BDR" else "B3")
     moeda = getattr(pos_db, "moeda", "BRL") or "BRL"
     moeda_str = "US$" if moeda == "USD" else "R$"
     modulo = (pos_db.modulo or "alpha").lower()
@@ -73,9 +73,13 @@ async def analisar_posicao(position_id: int, user_id: Optional[int] = Depends(ge
     async def gerador():
         yield f"🔍 Buscando dados ao vivo de {pos_db.ticker}...\n\n"
 
-        # Busca cotação e dados técnicos ao vivo — sem motores
-        tecnico = await get_dados_tecnicos(pos_db.ticker, mercado)
+        # Busca cotação, dados técnicos e fundamentalistas ao vivo
+        tecnico, fundamentos = await asyncio.gather(
+            get_dados_tecnicos(pos_db.ticker, mercado),
+            get_fundamentals(pos_db.ticker),
+        )
         tec_texto = formatar_tecnico_para_prompt(tecnico, moeda=moeda_str)
+        fund_texto = formatar_fundamentalista_para_prompt(fundamentos, tipo=pos_db.tipo)
 
         pm = pos_db.preco_medio or 0
         pm_usd = getattr(pos_db, "preco_medio_usd", None)
@@ -125,12 +129,13 @@ FRAMEWORK DE DIAGNÓSTICO:
   ZERAR         → fundamento deteriorado, stop rompido ou tese invalidada
 
 PRINCÍPIOS:
-1. Use os dados técnicos ao vivo como evidência — não especule.
+1. Use os dados técnicos e fundamentalistas ao vivo como evidência — não especule.
 2. Analise o stop com precisão: está próximo? foi rompido?
 3. A tese de entrada ainda é válida dado o preço atual?
 4. Selic alta = renda fixa competitiva — o retorno esperado justifica o risco?
-5. Seja específico: mostre os números. Evite respostas vagas.
-6. Retorne markdown limpo. Sem JSON, sem blocos de código."""
+5. Avalie valuation (P/L, P/VP), rentabilidade (ROE, ROIC), margens e endividamento quando disponíveis.
+6. Seja específico: mostre os números. Evite respostas vagas.
+7. Retorne markdown limpo. Sem JSON, sem blocos de código."""
 
         pm_str = f"PM: {moeda_str} {pm:,.2f}"
         if pm_usd:
@@ -149,6 +154,8 @@ P&L atual: {pl_pct:+.1f}%{stop_info}{alvo_info}
 
 DADOS TÉCNICOS AO VIVO:
 {tec_texto}
+
+{fund_texto}
 
 Diagnostique esta posição. Devo APORTAR MAIS, MANTER, REDUZIR ou ZERAR?
 Seja direto e use os dados acima como base."""
@@ -203,33 +210,60 @@ async def analisar_carteira(
         n = len(posicoes_filtradas)
         yield f"📡 Buscando cotações ao vivo de {n} posições...\n\n"
 
-        # Busca técnicos de todas as posições em paralelo — sem motores
-        tarefas = [
-            get_dados_tecnicos(p["ticker"], p.get("mercado", "B3") or "B3")
-            for p in posicoes_filtradas
-        ]
-        resultados = await asyncio.gather(*tarefas, return_exceptions=True)
+        # Tickers que NÃO são ativos negociados — não têm dados técnicos
+        _TICKERS_NOMINAIS = {"RF-SELIC", "CAIXA", "TESES"}
+
+        # Busca técnicos apenas de posições que são ativos reais de mercado
+        tarefas = []
+        indices_reais = []  # índice das posições que têm ticker real
+        for i, p in enumerate(posicoes_filtradas):
+            tk = p.get("ticker", "")
+            tipo = (p.get("tipo") or "").upper()
+            if tk in _TICKERS_NOMINAIS or tipo in ("RF", "CAIXA"):
+                continue
+            tarefas.append(get_dados_tecnicos(tk, p.get("mercado", "B3") or "B3"))
+            indices_reais.append(i)
+        resultados_reais = await asyncio.gather(*tarefas, return_exceptions=True)
+
+        # Monta mapa: índice da posição → resultado técnico
+        mapa_tec: dict[int, dict] = {}
+        for idx_pos, tec in zip(indices_reais, resultados_reais):
+            if not isinstance(tec, Exception) and isinstance(tec, dict):
+                mapa_tec[idx_pos] = tec
 
         linhas_pos = []
         stops_proximos = []
 
-        for pos, tec in zip(posicoes_filtradas, resultados):
+        for i, pos in enumerate(posicoes_filtradas):
             ticker = pos.get("ticker", "?")
             moeda = pos.get("moeda", "BRL") or "BRL"
             moeda_str = "US$" if moeda == "USD" else "R$"
             pm = pos.get("preco_medio") or 0
             stop = pos.get("stop_loss")
             modulo_pos = pos.get("modulo", "-")
+            tipo = (pos.get("tipo") or "").upper()
 
-            if isinstance(tec, Exception) or not isinstance(tec, dict):
-                preco_live = pos.get("preco_atual") or pm
-                tec_resumo = "dados técnicos indisponíveis"
-            else:
+            # Posições nominais (RF, CAIXA, TESES): não têm preço de mercado
+            if ticker in _TICKERS_NOMINAIS or tipo in ("RF", "CAIXA"):
+                val = pos.get("valor_atual") or pos.get("valor_investido") or 0
+                pl_reais = pos.get("pl_reais") or 0
+                vi = pos.get("valor_investido") or 0
+                pl_pct = (pl_reais / vi * 100) if vi > 0 else 0
+                linha = f"  • {ticker} [{modulo_pos}]: Valor {moeda_str}{val:,.0f} | P&L {pl_pct:+.1f}%"
+                linha += "\n    Posição nominal — sem dados técnicos de mercado"
+                linhas_pos.append(linha)
+                continue
+
+            tec = mapa_tec.get(i)
+            if tec:
                 preco_live = tec.get("preco_atual") or pos.get("preco_atual") or pm
                 tendencia = tec.get("tendencia", "—")
                 rsi = tec.get("rsi14")
                 dist_ma20 = tec.get("dist_ma20", "?")
                 tec_resumo = f"Tendência: {tendencia} | RSI: {rsi} | vs MA20: {dist_ma20}"
+            else:
+                preco_live = pos.get("preco_atual") or pm
+                tec_resumo = "dados técnicos indisponíveis"
 
             pl = ((preco_live - pm) / pm * 100) if pm > 0 else 0
 

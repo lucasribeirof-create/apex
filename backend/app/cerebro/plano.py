@@ -168,6 +168,7 @@ async def diagnosticar(
     if onboarding_respostas is None:
         onboarding_respostas = {}
     try:
+        logger.info("plano: iniciando diagnostico IA para %s (patrimonio=%s)", nome, patrimonio_atual)
         plano = await asyncio.wait_for(
             _raciocinar_com_ia(
                 nome=nome,
@@ -181,17 +182,18 @@ async def diagnosticar(
                 onboarding_score=onboarding_score,
                 aporte_mensal=aporte_mensal,
             ),
-            timeout=120.0,
+            timeout=240.0,
         )
+        logger.info("plano: diagnostico IA concluido com sucesso (cenarios=%d)", len(plano.cenarios))
         return plano
     except asyncio.TimeoutError:
-        logger.warning("plano: timeout IA (120s), usando fallback analítico")
+        logger.error("plano: TIMEOUT IA (240s) — caindo para fallback analitico")
         return _fallback_analitico(
             nome, patrimonio_atual, objetivo_tipo, objetivo_valor,
             objetivo_prazo, estrategia_atual, onboarding_score,
         )
     except Exception as e:
-        logger.warning("plano: IA falhou (%s), usando fallback analítico", e)
+        logger.error("plano: IA falhou — %s: %s", type(e).__name__, e, exc_info=True)
         return _fallback_analitico(
             nome, patrimonio_atual, objetivo_tipo, objetivo_valor,
             objetivo_prazo, estrategia_atual, onboarding_score,
@@ -217,25 +219,17 @@ async def _raciocinar_com_ia(
     if not is_ai_configured():
         raise RuntimeError("IA não configurada")
 
-    # ── Busca macro real para calibrar o raciocínio ───────────────────────
-    macro_real: dict = {}
+    # ── MacroEngine completo — mesma visão que o CEO Brain ────────────────
+    from app.cerebro.macro import montar_macro, MacroContext
+
+    macro_ctx: Optional[MacroContext] = None
     try:
-        from app.data.bcb_client import get_selic, get_ipca
-        from app.data.yfinance_client import get_macro_global
-        selic_val, ipca_val, macro_global = await asyncio.gather(
-            get_selic(), get_ipca(), get_macro_global(), return_exceptions=True
-        )
-        if not isinstance(selic_val, Exception) and selic_val:
-            macro_real["selic_aa"] = selic_val
-            macro_real["cdi_mensal_ref"] = round(selic_val / 12, 3)
-            macro_real["rf_rf_mensal"] = round(selic_val * 0.875 / 12, 3)
-        if not isinstance(ipca_val, Exception) and ipca_val:
-            macro_real["ipca_12m"] = ipca_val
-        if not isinstance(macro_global, Exception) and macro_global:
-            macro_real["vix"] = macro_global.get("vix")
-            macro_real["sp500"] = macro_global.get("sp500")
+        import time as _time
+        _t0 = _time.monotonic()
+        macro_ctx = await montar_macro()
+        logger.info("plano: MacroEngine OK em %.1fs", _time.monotonic() - _t0)
     except Exception as e:
-        logger.warning("plano: não conseguiu macro real: %s", e)
+        logger.warning("plano: MacroEngine falhou: %s", e)
 
     # ── Monta o brief narrativo do investidor ─────────────────────────────
     prazo_texto = _prazo_para_texto(objetivo_prazo)
@@ -243,20 +237,12 @@ async def _raciocinar_com_ia(
     perfil_texto = _perfil_para_texto(onboarding_respostas, onboarding_score)
     aporte_texto = f"Aporte mensal planejado: R$ {aporte_mensal:,.0f}" if aporte_mensal else "Aporte mensal: não declarado"
 
-    # ── Contexto macro para o prompt ─────────────────────────────────────
+    # ── Contexto macro completo para o prompt ──────────────────────────────
     macro_texto = ""
-    if macro_real:
-        linhas_macro = []
-        if macro_real.get("selic_aa"):
-            linhas_macro.append(f"Selic atual: {macro_real['selic_aa']:.2f}% a.a. (CDI ~{macro_real.get('cdi_mensal_ref', 0):.2f}%/mês)")
-        if macro_real.get("ipca_12m"):
-            linhas_macro.append(f"IPCA 12m: {macro_real['ipca_12m']:.2f}%")
-            if macro_real.get("selic_aa"):
-                juro_real = macro_real["selic_aa"] - macro_real["ipca_12m"]
-                linhas_macro.append(f"Juro real atual: {juro_real:.2f}% a.a.")
-        if macro_real.get("vix"):
-            linhas_macro.append(f"VIX: {macro_real['vix']:.1f} ({'medo elevado' if macro_real['vix'] > 25 else 'moderado' if macro_real['vix'] > 18 else 'ambiente de risco favorável'})")
-        macro_texto = "DADOS MACRO REAIS (use para calibrar retornos):\n" + "\n".join(f"  • {l}" for l in linhas_macro)
+    if macro_ctx:
+        macro_texto = macro_ctx.resumo_texto()
+    if not macro_texto:
+        macro_texto = "DADOS MACRO: indisponíveis — seja conservador nas projeções"
 
     SYSTEM = """\
 Você é o Estrategista APEX — planejador financeiro sênior brasileiro.
@@ -295,19 +281,32 @@ BENCHMARKS REAIS (nominal):
 REGRA: Não inclua TODOS os módulos em cada cenário. Escolha 2-4 módulos que FAZEM SENTIDO para aquele nível de risco e fase.
 
 AJUSTE DE ALOCAÇÃO POR MACRO REAL (OBRIGATÓRIO):
-Os dados macro que você recebe não são apenas para "calibrar retornos" — eles MUDAM os pesos ótimos de alocação:
-- Selic alta (>12% a.a.) → RF Pós-fixada e IPCA+ ficam muito atraentes. No cenário Conservador aumente peso em RF. O "custo de oportunidade" de sair da RF é alto.
-- Selic baixa (<7% a.a.) → RF não bate inflação. Force mais exposição a risco (Growth, ETFs). RF no Conservador pode ser <40%.
-- Juro real alto (Selic - IPCA > 6%) → IPCA+ longa (NTN-B) vira ativo estratégico. Inclua com peso relevante.
-- VIX > 25 (medo elevado) → Mercado em stress. No Agressivo reduza Momentum/Swing e aumente Caixa ou IPCA+. No Conservador elimine renda variável doméstica.
-- VIX < 18 (ambiente favorável) → Pode ser mais agressivo em Growth BR e ETFs Internacionais. Reduza Caixa.
-- SP500 forte (acima de médias históricas) → ETFs Internacionais podem ter retorno forward menor. Ajuste expectativa downward.
+Você recebe o MacroEngine completo. CADA dado muda pesos de alocação:
 
-EXEMPLO PRÁTICO (Selic=13,75%, IPCA=4,83%, VIX=18):
-  Juro real = 8,92% a.a. → RF Pós e IPCA+ são muito competitivos.
-  Conservador: 50% RF Pós + 30% IPCA+ + 20% Dividendos BR (não vale risco alto com juro real ~9%)
-  Recomendado: 30% IPCA+ + 40% Growth BR + 30% ETFs (busca alpha real acima do juro real)
-  Agressivo: 15% IPCA+ (proteção) + 45% Growth BR + 25% ETFs + 15% Momentum
+BRASIL:
+- Selic alta (>12% a.a.) → RF Pós e IPCA+ muito atraentes. Custo de oportunidade alto para sair da RF.
+- Selic baixa (<7% a.a.) → RF não bate inflação. Force mais risco (Growth, ETFs).
+- Juro real alto (>6%) → IPCA+ longa (NTN-B) vira ativo estratégico.
+- Selic Focus < Selic atual → ciclo de corte à vista. Prefixados e FIIs se beneficiam.
+- Selic Focus > Selic atual → juros subindo. RF pós-fixada domina.
+- Dólar forte (>5.50) → favorece exportadoras (VALE3, PETR4, SUZB3). Desfavorece importadoras.
+- Dólar fraco (<4.80) → favorece consumo interno, small caps, FIIs.
+- IBOV em queda + VIX alto → modo defensivo. Mais RF, Caixa, Dividendos defensivos.
+
+GLOBAL:
+- VIX > 25 → mercado em stress. Reduza Momentum/Swing, aumente proteção.
+- VIX < 18 → ambiente favorável. Pode ser agressivo em Growth e ETFs.
+- Treasury 10Y > 5% → custo global de capital extremo. Pressiona TODOS os ativos de risco.
+- Treasury 10Y > 4% → emergentes sob pressão. Ajuste retorno esperado de ETFs internacionais.
+- DXY acima da MM50 → dólar global forte. Pressão sobre emergentes e commodities em USD.
+- Petróleo WTI > $100 → pressão inflacionária. Bom para petroleiras, ruim para consumo.
+- Petróleo WTI < $50 → risco para PETR4/PRIO3. Reduza peso em petróleo.
+- S&P 500 acima da MM200 → tendência de alta global. ETFs internacionais favorecidos.
+- S&P 500 abaixo da MM200 → tendência de baixa. Reduza exposição internacional.
+- Ouro em alta → aversão a risco. Confirma postura defensiva.
+
+USE os dados reais do payload. Cite números concretos na justificativa de cada cenário.
+Se macro indisponível, seja conservador nas projeções e diga que dados estavam indisponíveis.
 
 CENÁRIOS: exatamente 3 — Conservador, Recomendado, Agressivo — com alocações e retornos REALMENTE DIFERENTES e ajustados ao macro atual."""
 
@@ -317,6 +316,8 @@ Patrimônio atual: R$ {patrimonio_atual:,.0f}
 Objetivo declarado: {objetivo_texto}
 Prazo declarado: {prazo_texto}
 {aporte_texto}
+
+CONTEXTO MACROECONÔMICO COMPLETO (MacroEngine — dados reais de hoje):
 {macro_texto}
 
 RESPOSTAS DO QUESTIONÁRIO DE PERFIL:
@@ -329,7 +330,7 @@ INSTRUÇÕES PARA O DIAGNÓSTICO:
 4. Para cada cenário, calcule o tempo real considerando aportes + rentabilidade composta.
 5. Se o investidor declarou que quer crescimento agressivo, o cenário Recomendado DEVE ser agressivo.
 6. NÃO recomende FIIs/Dividendos como forma de "crescimento" — esses são para fase de renda.
-7. USE OS DADOS MACRO REAIS para definir os pesos de alocação. Se a Selic está alta, diga isso como justificativa para maior peso em RF. Se VIX está elevado, justifique menos Momentum. Os pesos devem fazer sentido HOJE, não em ambiente macro genérico.
+7. USE OS DADOS MACRO REAIS COMPLETOS (acima) para definir os pesos de alocação. Cite números concretos: "Selic a X%, VIX a Y, Treasury 10Y a Z%". Os pesos devem refletir o cenário de HOJE — não um cenário genérico. Se DXY forte + Treasury alto + VIX elevado, isso muda tudo.
 
 JSON a retornar:
 {{
@@ -357,11 +358,14 @@ JSON a retornar:
   "revisao_quando": "..."
 }}"""
 
+    _t1 = _time.monotonic()
+    logger.info("plano: chamando IA (max_tokens=4000)...")
     resposta_raw = await chat(
         system=SYSTEM,
         messages=[{"role": "user", "content": USER}],
         max_tokens=4000,
     )
+    logger.info("plano: IA respondeu em %.1fs (tamanho=%d chars)", _time.monotonic() - _t1, len(resposta_raw))
 
     return _parsear_resposta(resposta_raw, patrimonio_atual=patrimonio_atual)
 
@@ -393,7 +397,8 @@ def _parsear_resposta(resposta_raw: str, patrimonio_atual: float = 0.0) -> Plano
     try:
         dados = json.loads(texto)
     except json.JSONDecodeError as e:
-        raise ValueError(f"Estrategista: JSON inválido na resposta da IA: {e}\nResposta: {texto[:300]}")
+        logger.error("plano: JSON invalido da IA: %s\nResposta (500 chars): %s", e, texto[:500])
+        raise ValueError(f"Estrategista: JSON inválido na resposta da IA: {e}")
 
     marcos = []
     for m in dados.get("marcos", []):

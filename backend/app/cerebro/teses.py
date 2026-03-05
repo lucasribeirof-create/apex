@@ -271,24 +271,24 @@ async def monitorar_teses(db, portfolio_id: int) -> dict:
 
         if tese.stop_preco and preco_atual <= tese.stop_preco:
             resumo["alertas"].append(
-                f"⚠️ {tese.ticker}: preço R${preco_atual:.2f} atingiu stop R${tese.stop_preco:.2f} — considerar saída"
+                f"[TESE] ⚠️ {tese.ticker}: preço R${preco_atual:.2f} atingiu stop R${tese.stop_preco:.2f} — considerar saída"
             )
 
         if tese.alvo_preco and preco_atual >= tese.alvo_preco:
             resumo["alertas"].append(
-                f"🎯 {tese.ticker}: preço R${preco_atual:.2f} atingiu alvo R${tese.alvo_preco:.2f} — considerar realização"
+                f"[TESE] 🎯 {tese.ticker}: preço R${preco_atual:.2f} atingiu alvo R${tese.alvo_preco:.2f} — considerar realização"
             )
 
         if tese.stop_preco and tese.alvo_preco and tese.stop_preco < tese.alvo_preco:
             distancia_stop_pct = ((preco_atual - tese.stop_preco) / preco_atual) * 100
             if 0 < distancia_stop_pct <= 5:
                 resumo["alertas"].append(
-                    f"⚡ {tese.ticker}: apenas {distancia_stop_pct:.1f}% acima do stop — atenção redobrada"
+                    f"[TESE] ⚡ {tese.ticker}: apenas {distancia_stop_pct:.1f}% acima do stop — atenção redobrada"
                 )
 
         if tese.status == "ENFRAQUECIDA":
             resumo["alertas"].append(
-                f"🔶 {tese.ticker}: tese ENFRAQUECIDA (convicção {tese.score_conviccao}/10) — revisão recomendada"
+                f"[TESE] 🔶 {tese.ticker}: tese ENFRAQUECIDA (convicção {tese.score_conviccao}/10) — revisão recomendada"
             )
 
     logger.info(

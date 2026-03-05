@@ -10,7 +10,7 @@ from app.config import DATA_DIR
 
 # ─── Configuração padrão por provedor ─────────────────────────────────────────
 DEFAULT_MODELS: dict[str, str] = {
-    "anthropic": "claude-sonnet-4-5",
+    "anthropic": "claude-sonnet-4-20250514",
     "openai": "gpt-4o-mini",
     "gemini": "gemini-2.0-flash",
     "groq": "llama-3.3-70b-versatile",
@@ -300,6 +300,11 @@ async def _chat_gemini(api_key, model, system, messages, max_tokens) -> str:
         system_instruction=system,
         max_output_tokens=max_tokens,
     )
+    # Gemini 2.5+ são "thinking models" — tokens de raciocínio consomem
+    # o budget de max_output_tokens, truncando a resposta real.
+    # Desabilitar thinking garante que todo o budget vai para a saída.
+    if "2.5" in model:
+        config.thinking_config = types.ThinkingConfig(thinking_budget=0)
     resp = await client.aio.models.generate_content(
         model=model, contents=_gemini_contents(messages), config=config
     )
@@ -315,6 +320,10 @@ async def _stream_gemini(api_key, model, system, messages, max_tokens) -> AsyncI
         system_instruction=system,
         max_output_tokens=max_tokens,
     )
+    # Gemini 2.5+ são "thinking models" — desabilitar thinking para
+    # evitar que tokens de raciocínio consumam o budget de saída.
+    if "2.5" in model:
+        config.thinking_config = types.ThinkingConfig(thinking_budget=0)
     # generate_content_stream é uma coroutine — precisa ser awaited antes de iterar
     stream = await client.aio.models.generate_content_stream(
         model=model, contents=_gemini_contents(messages), config=config

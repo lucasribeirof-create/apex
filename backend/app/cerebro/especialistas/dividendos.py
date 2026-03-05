@@ -39,7 +39,7 @@ _DIV_META = {
     "BBAS3":  {"setor": "bancário",   "dy_ref": 8.5,  "tipo": "JCP+Dividendo"},
     "TAEE11": {"setor": "elétrico",   "dy_ref": 10.0, "tipo": "Dividendo"},
     "EGIE3":  {"setor": "elétrico",   "dy_ref": 7.5,  "tipo": "Dividendo"},
-    "CPLE6":  {"setor": "elétrico",   "dy_ref": 8.0,  "tipo": "Dividendo"},
+    "CPLE3":  {"setor": "elétrico",   "dy_ref": 8.0,  "tipo": "Dividendo"},
     "CMIG4":  {"setor": "elétrico",   "dy_ref": 9.5,  "tipo": "JCP+Dividendo"},
     "TIMS3":  {"setor": "telecom",    "dy_ref": 6.5,  "tipo": "JCP+Dividendo"},
     "VIVT3":  {"setor": "telecom",    "dy_ref": 7.0,  "tipo": "JCP+Dividendo"},
@@ -62,11 +62,14 @@ def _fetch_div_data(ticker: str) -> Optional[dict]:
     """Busca preço, DY e dados de proventos via prefetch cache (ou yfinance direto)."""
     meta = _DIV_META.get(ticker, {})
 
-    # --- Tenta prefetch primeiro (cache compartilhado) ---
     pf = _pf.get(ticker)
     if pf and pf.sucesso and pf.preco > 0:
-        dy_real = pf.dy_12m if pf.dy_12m > 0.5 else meta.get("dy_ref", 0)
-        payout_pct = pf.payout_ratio  # já em %
+        if pf.dy_12m <= 0.5:
+            from app.logger import logger
+            logger.debug("dividendos: %s sem DY real no prefetch — descartado", ticker)
+            return None
+        dy_real = pf.dy_12m
+        payout_pct = pf.payout_ratio
         nome = pf.nome or meta.get("nome", ticker)
 
         # Crescimento do dividendo 2 anos — precisa do hist completo
@@ -111,9 +114,11 @@ def _fetch_div_data(ticker: str) -> Optional[dict]:
         div_12m  = float(divs_col.sum()) if divs_col is not None else 0.0
         dy_real  = (div_12m / preco * 100) if preco > 0 else 0.0
 
-        # Fallback para metadado quando yfinance não tem histórico de dividendos
-        meta = _DIV_META.get(ticker, {})
-        dy_usar = dy_real if dy_real > 0.5 else meta.get("dy_ref", 0)
+        if dy_real <= 0.5:
+            from app.logger import logger
+            logger.debug("dividendos: %s sem DY real no yfinance — descartado", ticker)
+            return None
+        dy_usar = dy_real
 
         payout     = info.get("payoutRatio")
         payout_pct = float(payout) * 100 if payout else None

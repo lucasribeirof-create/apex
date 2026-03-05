@@ -15,6 +15,7 @@ import AISetupPage from '@/pages/AISetup'
 import TesesPage from '@/pages/Teses'
 import SetupSimuladaPage from '@/pages/SetupSimulada'
 import SugestoesAlocacaoPage from '@/pages/SugestoesAlocacao'
+import PerfilInvestidorPage from '@/pages/PerfilInvestidor'
 
 type AppStatus = 'loading' | 'offline' | 'ai_missing' | 'ready'
 
@@ -156,6 +157,13 @@ function App() {
     return () => clearInterval(interval)
   }, [status, checkBackend])
 
+  // Refresh de preços 1x ao abrir o app (fire-and-forget)
+  useEffect(() => {
+    if (status === 'ready' && isOnboarded) {
+      api.post('/portfolio/refresh-prices').catch(() => {})
+    }
+  }, [status, isOnboarded])
+
   if (status === 'loading') {
     return (
       <div className="min-h-screen flex items-center justify-center" style={{ background: '#0a0e17' }}>
@@ -191,6 +199,8 @@ function App() {
           <>
             <Route path="/selecionar" element={<UserPickerPage />} />
             <Route path="/onboarding" element={<OnboardingPage />} />
+            <Route path="/perfil-investidor" element={<PerfilInvestidorPage />} />
+            <Route path="/configurar-ia" element={<AISetupPage />} />
             <Route path="*" element={<Navigate to="/selecionar" replace />} />
           </>
         ) : (
@@ -199,6 +209,7 @@ function App() {
             <Route path="/configurar-ia" element={<AISetupPage />} />
             {/* Onboarding acessível mesmo logado (ex: usuário recarrega durante a tela de escolha) */}
             <Route path="/onboarding" element={<OnboardingPage />} />
+            <Route path="/perfil-investidor" element={<PerfilInvestidorPage />} />
             <Route element={<AppLayout />}>
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/briefing" element={<BriefingPage />} />

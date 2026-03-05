@@ -15,6 +15,7 @@ Fluxo:
 import json
 import asyncio
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.cerebro.especialistas import SugestaoMotor
@@ -32,6 +33,271 @@ class ResultadoGestorGeral:
     ajustes_realizados: list[str]         # O que mudou vs. sugestão original dos motores
     score_portfolio: int                  # Score 0-100 do portfólio final
     usou_ia: bool = True                  # False = fallback algorítmico
+    plano_estrategico: Optional[dict] = None  # Gerado pelo CEO quando modo=inicial sem plano prévio
+
+
+@dataclass
+class ResultadoAnaliseEstrategica:
+    """Resultado da Fase 1 — análise estratégica SEM carteira (rápido, ~30-60s)."""
+    analise: str                          # Parágrafo executivo sobre o cenário macro + perfil
+    alertas: list[str]                    # Riscos do cenário atual
+    score_perfil_mercado: int             # 0-100: compatibilidade perfil vs. macro
+    plano_estrategico: Optional[dict] = None  # Cenários, diagnóstico, recomendação
+    regime: str = "MISTO"
+    usou_ia: bool = True
+
+
+# ─── Análise estratégica (Fase 1 — sem motores, rápida) ──────────────────────
+
+async def analisar_estrategia(
+    capital: float,
+    estrategia: str,
+    regime: str,
+    score_perfil: int,
+    contexto: Optional[Any] = None,
+    user_data: Optional[dict] = None,
+) -> ResultadoAnaliseEstrategica:
+    """
+    Fase 1 do fluxo: gera análise executiva + plano estratégico com 3 cenários.
+    NÃO roda motores, NÃO gera carteira — é rápido (~30-60s).
+    O investidor escolhe o cenário desejado, e SÓ DEPOIS a Fase 2 gera a carteira.
+    """
+    IA_TIMEOUT = 180.0
+    try:
+        logger.info("analisar_estrategia: chamando CEO Brain (capital R$%.0f, %s, %s)", capital, estrategia, regime)
+        resultado = await asyncio.wait_for(
+            _analisar_estrategia_ia(capital, estrategia, regime, score_perfil, contexto, user_data),
+            timeout=IA_TIMEOUT,
+        )
+        resultado.regime = regime
+        logger.info("analisar_estrategia: CEO Brain respondeu — cenarios=%d", len((resultado.plano_estrategico or {}).get("cenarios", [])))
+        return resultado
+    except asyncio.TimeoutError:
+        logger.error("analisar_estrategia: timeout IA (%.0fs)", IA_TIMEOUT)
+    except Exception as e:
+        logger.error("analisar_estrategia: IA falhou — %s: %s", type(e).__name__, e, exc_info=True)
+
+    # Fallback mínimo
+    return ResultadoAnaliseEstrategica(
+        analise=f"Análise estratégica temporariamente indisponível. Capital: R${capital:,.2f}, estratégia: {estrategia}, regime: {regime}.",
+        alertas=["IA não disponível — análise baseada apenas em parâmetros básicos."],
+        score_perfil_mercado=50,
+        regime=regime,
+        usou_ia=False,
+    )
+
+
+async def _analisar_estrategia_ia(
+    capital: float,
+    estrategia: str,
+    regime: str,
+    score_perfil: int,
+    contexto: Optional[Any] = None,
+    user_data: Optional[dict] = None,
+) -> ResultadoAnaliseEstrategica:
+    """Chamada IA leve: apenas análise + plano estratégico (sem candidatos de motores)."""
+    from app.cerebro.client import chat, is_ai_configured
+
+    if not is_ai_configured():
+        raise RuntimeError("IA não configurada")
+
+    # Monta dados macro
+    macro_dados: dict = {}
+    if contexto and hasattr(contexto, "macro") and contexto.macro:
+        m = contexto.macro
+        macro_dados = {
+            k: v for k, v in {
+                "selic_aa": m.get("selic"),
+                "ipca_12m": m.get("ipca"),
+                "dolar_brl": m.get("dolar"),
+                "ibov": m.get("ibov"),
+                "ibov_variacao": m.get("ibov_variacao"),
+                "sp500": m.get("sp500"),
+                "vix": m.get("vix"),
+            }.items() if v is not None
+        }
+
+    # Busca macro enriquecido
+    if not macro_dados:
+        try:
+            from app.cerebro.macro import montar_macro
+            _mc = await montar_macro()
+            macro_dados = {k: v for k, v in {
+                "selic_aa": _mc.selic,
+                "ipca_12m": _mc.ipca_12m,
+                "ipca_expectativa": _mc.ipca_expectativa,
+                "selic_expectativa": _mc.selic_expectativa,
+                "juro_real": _mc.juro_real,
+                "dolar_brl": _mc.dolar_brl,
+                "dolar_variacao_dia": _mc.dolar_var_pct,
+                "dolar_ytd_pct": _mc.dolar_ytd_pct,
+                "ibov": _mc.ibov,
+                "ibov_variacao_dia": _mc.ibov_var_pct,
+                "ibov_ytd_pct": _mc.ibov_ytd_pct,
+                "sp500": _mc.sp500,
+                "sp500_variacao_dia": _mc.sp500_var_pct,
+                "sp500_ytd_pct": _mc.sp500_ytd_pct,
+                "nasdaq": _mc.nasdaq,
+                "nasdaq_ytd_pct": _mc.nasdaq_ytd_pct,
+                "vix": _mc.vix,
+                "treasury_10y": _mc.treasury_10y,
+                "dxy": _mc.dxy,
+                "dxy_ytd_pct": _mc.dxy_ytd_pct,
+                "ouro_usd": _mc.ouro,
+                "ouro_ytd_pct": _mc.ouro_ytd_pct,
+                "petroleo_wti": _mc.petroleo_wti,
+                "petroleo_wti_ytd_pct": _mc.petroleo_wti_ytd_pct,
+                "bitcoin_usd": _mc.bitcoin,
+                "bitcoin_ytd_pct": _mc.bitcoin_ytd_pct,
+            }.items() if v is not None}
+            if _mc.flags:
+                macro_dados["alertas_macro"] = _mc.flags
+            if _mc.narrativa:
+                macro_dados["narrativa_mercado"] = _mc.narrativa
+            macro_dados["resumo_macro"] = _mc.resumo_texto()
+            # Bloco pré-formatado para a AI citar — impossível confundir dia vs YTD
+            macro_dados["DADOS_CHAVE_PARA_CITAR"] = _montar_dados_chave(_mc)
+        except Exception as _e:
+            logger.warning("analisar_estrategia: MacroEngine falhou: %s", _e)
+
+    payload = {
+        "capital_total": capital,
+        "estrategia": estrategia,
+        "regime_mercado": regime,
+        "score_perfil_risco": score_perfil,
+        "perfil_descricao": _descrever_perfil(score_perfil, estrategia),
+    }
+    if macro_dados:
+        payload["macro"] = macro_dados
+
+    # Posições existentes (resumo)
+    if contexto and hasattr(contexto, "posicoes") and contexto.tem_posicoes():
+        payload["carteira_resumo"] = contexto.resumo_carteira_texto()
+        payload["alocacao_real"] = contexto.alocacao_real
+        payload["pl_carteira_pct"] = contexto.pl_total_pct
+
+    if user_data:
+        payload["objetivo_investidor"] = {
+            "nome": user_data.get("nome"),
+            "tipo": user_data.get("objetivo_tipo"),
+            "valor": user_data.get("objetivo_valor"),
+            "descricao": user_data.get("objetivo_descricao"),
+            "prazo": user_data.get("objetivo_prazo"),
+            "aporte_mensal": user_data.get("aporte_mensal"),
+            "onboarding_respostas": user_data.get("onboarding_respostas"),
+        }
+
+    SYSTEM = """\
+Você é o Gestor Geral APEX — CIO (Chief Investment Officer) de um family office brasileiro, \
+com 20+ anos gerindo carteiras multi-estratégia.
+
+━━━ SUA MISSÃO AGORA ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Analisar o cenário macro atual + perfil do investidor e produzir:
+1. Uma ANÁLISE EXECUTIVA do momento de mercado e como ele afeta este investidor
+2. Um PLANO ESTRATÉGICO com 3 cenários (Conservador / Recomendado / Agressivo)
+3. Score de compatibilidade perfil × mercado
+
+Você NÃO está montando uma carteira agora. Você está PREPARANDO A ESTRATÉGIA \
+para que o investidor escolha o cenário, e só depois a carteira será montada.
+
+━━━ EXPERTISE MACRO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Selic alta (>12%): RF post-fixada supera ações. Ciclos de corte beneficiam RV, FIIs, prefixados.
+- IPCA >5%: IPCA+ >6% real é oportunidade em NTNB.
+- Dólar >5,80: favorece exportadoras. <4,80: favorece consumo interno.
+- VIX <15: risk-on. 15-25: atenção. >25: medo global. >30: crise.
+- IBOV <120k + queda: BEAR. >130k + força: BULL.
+- Dados YTD disponíveis: use-os para contextualizar tendências do ano (S&P, Nasdaq, IBOV, dólar, ouro, petróleo, crypto).
+- Nasdaq vs S&P: diferença indica rotação growth↔value.
+- Ouro em alta forte: sinal de busca por proteção global.
+- Bitcoin: termômetro de apetite por risco/especulação.
+- Se houver "narrativa_mercado" no payload, USE-A como âncora da análise.
+
+━━━ REGRA CRÍTICA: DIA ≠ YTD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+O payload contém DOIS tipos de variação — NÃO CONFUNDA:
+  • "*_variacao_dia" = variação de HOJE APENAS (1 pregão). Ex: ibov caiu -3% HOJE.
+  • "*_ytd_pct" = variação ACUMULADA NO ANO (desde 1/jan). Ex: ibov sobe +13% NO ANO.
+Quando disser "no ano" ou "YTD", cite APENAS campos *_ytd_pct.
+Quando disser "hoje" ou "no dia", cite APENAS campos *_variacao_dia.
+O bloco "DADOS_CHAVE_PARA_CITAR" tem os valores prontos — COPIE DE LÁ.
+
+━━━ FORMATO DE RESPOSTA ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Retorne APENAS JSON válido:
+{
+  "analise": "OBRIGATÓRIO: 4 parágrafos separados por \\n\\n, cada um com label em **NEGRITO** no início:\\n\\n**MACRO ATUAL:** Selic X%, VIX Y, dólar R$Z, IBOV (YTD%), S&P 500 (YTD%) — contexto real e impacto no perfil. Use APENAS dados do payload.\\n\\n**POR QUE [ESTRATEGIA] AGORA:** Por que esta estratégia faz sentido para este investidor neste momento macro.\\n\\n**LÓGICA DOS MÓDULOS:** Quais módulos fazem sentido e por quê (RF, ETFs, Momentum, Alpha, Wheel, FIIs) com dados concretos.\\n\\n**RISCO PRINCIPAL:** Principal risco do cenário atual e como se proteger.",
+  "alertas": ["Alerta 1 com dado concreto", "Alerta 2"],
+  "score_perfil_mercado": 72,
+  "plano_estrategico": {
+    "diagnostico": "3-5 parágrafos: analise a meta declarada, calcule viabilidade (patrimônio, aporte, retorno composto), identifique fase (crescimento/transição/colheita), justifique com macro. Use **negrito** para dados-chave.",
+    "meta_viavel": true,
+    "gap_patrimonio": 0.0,
+    "fase_atual": "crescimento|transição|colheita",
+    "fase_descricao": "1-2 frases",
+    "estrategia_recomendada": "CORE|ALPHA|RENDA",
+    "estrategia_razao": "1-2 frases",
+    "cenarios": [
+      {"nome":"Conservador","descricao":"2-3 frases","modulos":["RF","ETFs"],"alocacao_resumo":"50% RF · 30% ETFs · 20% FIIs","rentabilidade_esperada":"10-14% a.a.","tempo_meta":"~X anos","risco_principal":"1 frase"},
+      {"nome":"Recomendado","descricao":"2-3 frases","modulos":["ETFs","Momentum"],"alocacao_resumo":"...","rentabilidade_esperada":"...","tempo_meta":"...","risco_principal":"..."},
+      {"nome":"Agressivo","descricao":"2-3 frases","modulos":["Momentum","Alpha"],"alocacao_resumo":"...","rentabilidade_esperada":"...","tempo_meta":"...","risco_principal":"..."}
+    ],
+    "modulos_sugeridos": [{"nome":"ETFs","por_que":"1 frase","peso_sugerido":"~30%"}],
+    "riscos_e_tradeoffs": ["Risco 1","Risco 2","Risco 3"],
+    "marcos": [{"patrimonio":2000000,"renda_mensal_possivel":10000,"estimativa_anos":3.5,"descricao":"..."}],
+    "proximos_passos": ["Ação 1","Ação 2"],
+    "alertas": [],
+    "revisao_quando": "em 12 meses ou quando patrimônio variar ±20%"
+  }
+}
+
+USE os dados macro REAIS do payload (Selic, VIX, dólar, IBOV, S&P 500, YTDs) para calibrar cenários. \
+Cenários devem ter alocações e retornos REALMENTE DIFERENTES entre si.
+
+REGRA ABSOLUTA ANTI-ALUCINAÇÃO: Use APENAS os dados numéricos fornecidos no payload. \
+NUNCA invente, estime ou extrapole percentuais, variações YTD ou tendências que NÃO estejam \
+explicitamente nos dados. Se um dado não está no payload, NÃO mencione um número — diga \
+"dado não disponível" se necessário. Números inventados são INADMISSÍVEIS.
+
+ATENÇÃO REDOBRADA: Ao escrever "IBOV YTD" ou "S&P YTD", confirme que está usando o campo \
+*_ytd_pct e NÃO o campo *_variacao_dia. Confundir dia com YTD é erro GRAVÍSSIMO."""
+
+    USER = f"Analise o cenário e produza a estratégia com 3 cenários para este investidor:\n\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
+
+    resposta_raw = await chat(
+        system=SYSTEM,
+        messages=[{"role": "user", "content": USER}],
+        max_tokens=3000,
+    )
+
+    return _parsear_analise_estrategica(resposta_raw, capital)
+
+
+def _parsear_analise_estrategica(resposta_raw: str, capital: float) -> ResultadoAnaliseEstrategica:
+    """Parseia a resposta JSON da IA para ResultadoAnaliseEstrategica."""
+    texto = resposta_raw.strip()
+    if "```" in texto:
+        import re
+        match = re.search(r"```(?:json)?\s*([\s\S]+?)```", texto)
+        if match:
+            texto = match.group(1).strip()
+
+    try:
+        dados = json.loads(texto)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Análise estratégica: JSON inválido — {e}\nResposta: {texto[:300]}")
+
+    plano = dados.get("plano_estrategico")
+    if plano:
+        plano["usou_ia"] = True
+        from datetime import datetime, timezone
+        plano["gerado_em"] = datetime.now(timezone.utc).isoformat()
+        plano["patrimonio_na_criacao"] = capital
+
+    return ResultadoAnaliseEstrategica(
+        analise=str(dados.get("analise", "")),
+        alertas=[str(a) for a in dados.get("alertas", [])],
+        score_perfil_mercado=int(dados.get("score_perfil_mercado", 60)),
+        plano_estrategico=plano,
+        usou_ia=True,
+    )
 
 
 # ─── Entry point público ──────────────────────────────────────────────────────
@@ -44,6 +310,8 @@ async def analisar(
     score_perfil: int,
     contexto: Optional[Any] = None,
     modo: str = "inicial",
+    user_data: Optional[dict] = None,
+    cenario_escolhido: Optional[str] = None,
 ) -> ResultadoGestorGeral:
     """
     Ponto de entrada principal.
@@ -65,18 +333,26 @@ async def analisar(
 
     candidatos_prep = _marcar_duplicatas(candidatos)
 
+    # Timeout: payload grande + IA gera até ~10000 tokens quando inclui plano estratégico
+    IA_TIMEOUT = 300.0
+
     try:
+        logger.info("gestor_geral: chamando CEO Brain via IA (%d candidatos, capital R$%.0f, %s, %s)", len(candidatos_prep), capital, estrategia, regime)
         resultado = await asyncio.wait_for(
-            _analisar_com_ia(candidatos_prep, capital, estrategia, regime, score_perfil, contexto, modo),
-            timeout=60.0,
+            _analisar_com_ia(candidatos_prep, capital, estrategia, regime, score_perfil, contexto, modo, user_data, cenario_escolhido),
+            timeout=IA_TIMEOUT,
         )
+        logger.info("gestor_geral: CEO Brain respondeu com IA — %d ativos, score %d", len(resultado.sugestoes_finais), resultado.score_portfolio)
         return resultado
     except asyncio.TimeoutError:
-        logger.error("gestor_geral: timeout IA (60s) — IA não respondeu a tempo, usando fallback algorítmico")
-        return _fallback_algoritmico(candidatos_prep, capital, estrategia, regime)
+        logger.error("gestor_geral: timeout IA (%.0fs) — IA nao respondeu a tempo", IA_TIMEOUT)
     except Exception as e:
         logger.error("gestor_geral: IA falhou — %s: %s", type(e).__name__, e, exc_info=True)
-        return _fallback_algoritmico(candidatos_prep, capital, estrategia, regime)
+
+    # Fallback: NUNCA deveria chegar aqui em operacao normal.
+    # Loga warning critico para que o problema seja investigado.
+    logger.warning("gestor_geral: FALLBACK ALGORITMICO ATIVADO — portfolio sera montado sem analise da IA")
+    return _fallback_algoritmico(candidatos_prep, capital, estrategia, regime)
 
 
 # ─── Pré-processamento ────────────────────────────────────────────────────────
@@ -108,6 +384,8 @@ async def _analisar_com_ia(
     score_perfil: int,
     contexto: Optional[Any] = None,
     modo: str = "inicial",
+    user_data: Optional[dict] = None,
+    cenario_escolhido: Optional[str] = None,
 ) -> ResultadoGestorGeral:
     from app.cerebro.client import chat, is_ai_configured
 
@@ -163,6 +441,13 @@ async def _analisar_com_ia(
             macro_dados["cdi_mensal_ref"] = round(m["selic"] / 12, 3)   # CDI ~mensal
         macro_dados["macro_resumo"] = contexto.resumo_macro_texto()
 
+    # Flags de disponibilidade para o CEO saber o que está faltando
+    _has_macro = bool(macro_dados)
+    _has_macro_enrich = bool(contexto and hasattr(contexto, "macro_context") and contexto.macro_context)
+    _has_narrativa = bool(contexto and hasattr(contexto, "narrativa_macro") and contexto.narrativa_macro)
+    _has_plano = bool(contexto and hasattr(contexto, "plano_estrategico") and contexto.plano_estrategico)
+    _has_posicoes = bool(contexto and hasattr(contexto, "posicoes") and contexto.tem_posicoes())
+
     payload = {
         "capital_total": capital,
         "estrategia": estrategia,
@@ -171,35 +456,102 @@ async def _analisar_com_ia(
         "perfil_descricao": _descrever_perfil(score_perfil, estrategia),
         "candidatos": candidatos_json,
         "modulos_com_candidatos": list({c["modulo"] for c in candidatos_json}),
+        "dados_disponiveis": {
+            "macro": _has_macro,
+            "macro_enriquecido": _has_macro_enrich,
+            "narrativa_macro": _has_narrativa,
+            "plano_estrategico": _has_plano,
+            "posicoes_existentes": _has_posicoes,
+        },
     }
     if macro_dados:
         payload["macro"] = macro_dados
 
     # Injeta posições existentes se ContextoCerebro fornecido
     if contexto and hasattr(contexto, "posicoes") and contexto.tem_posicoes():
-        payload["posicoes_ja_na_carteira"] = [
-            {
-                "ticker":         p["ticker"],
-                "nome":           p.get("nome", p["ticker"]),
-                "tipo":           p.get("tipo", "-"),
-                "modulo":         p.get("modulo", "-"),
-                "preco_medio":    round(p.get("preco_medio") or 0, 2),
-                "preco_atual":    round(p.get("preco_atual") or 0, 2),
-                "pl_percentual":  round(p.get("pl_percentual") or 0, 2),
-                "valor_atual":    round(p.get("valor_atual") or 0, 2),
-                "stop_loss":      p.get("stop_loss"),
-            }
-            for p in contexto.posicoes
-            if p.get("ticker") not in ("CAIXA", "TESES")
-        ]
+        _agora = datetime.now(timezone.utc)
+        _posicoes_enriquecidas = []
+        for p in contexto.posicoes:
+            if p.get("ticker") in ("CAIXA", "TESES"):
+                continue
+            # Calcula dias na carteira
+            _data_entrada_str = p.get("data_entrada")
+            _dias_na_carteira = None
+            if _data_entrada_str:
+                try:
+                    _dt = datetime.fromisoformat(_data_entrada_str)
+                    if _dt.tzinfo is None:
+                        _dt = _dt.replace(tzinfo=timezone.utc)
+                    _dias_na_carteira = (_agora - _dt).days
+                except (ValueError, TypeError):
+                    pass
+            _posicoes_enriquecidas.append({
+                "ticker":                p["ticker"],
+                "nome":                  p.get("nome", p["ticker"]),
+                "tipo":                  p.get("tipo", "-"),
+                "modulo":                p.get("modulo", "-"),
+                "preco_medio":           round(p.get("preco_medio") or 0, 2),
+                "preco_atual":           round(p.get("preco_atual") or 0, 2),
+                "pl_percentual":         round(p.get("pl_percentual") or 0, 2),
+                "valor_atual":           round(p.get("valor_atual") or 0, 2),
+                "stop_loss":             p.get("stop_loss"),
+                "alvo_1":               p.get("alvo_1"),
+                "alvo_2":               p.get("alvo_2"),
+                "data_entrada":          _data_entrada_str,
+                "dias_na_carteira":      _dias_na_carteira,
+                "justificativa_entrada": p.get("justificativa_entrada"),
+            })
+        payload["posicoes_ja_na_carteira"] = _posicoes_enriquecidas
         payload["carteira_resumo"] = contexto.resumo_carteira_texto()
         payload["alocacao_real"] = contexto.alocacao_real
         payload["pl_carteira_pct"] = contexto.pl_total_pct
 
-    # Injeta dados de risco (correlação, concentração) se disponíveis no contexto
+    # Se não tem macro enriquecido no contexto, busca direto do MacroEngine
+    if not _has_macro_enrich:
+        try:
+            from app.cerebro.macro import montar_macro
+            _mc = await montar_macro()
+            payload["macro_enriquecido"] = {k: v for k, v in {
+                "treasury_10y": _mc.treasury_10y,
+                "vix": _mc.vix,
+                "dxy": _mc.dxy,
+                "dxy_ytd_pct": _mc.dxy_ytd_pct,
+                "petroleo_wti": _mc.petroleo_wti,
+                "petroleo_wti_ytd_pct": _mc.petroleo_wti_ytd_pct,
+                "ouro": _mc.ouro,
+                "ouro_ytd_pct": _mc.ouro_ytd_pct,
+                "juro_real": _mc.juro_real,
+                "selic_expectativa": _mc.selic_expectativa,
+                "ipca_expectativa": _mc.ipca_expectativa,
+                "selic": _mc.selic,
+                "ipca_12m": _mc.ipca_12m,
+                "dolar_brl": _mc.dolar_brl,
+                "dolar_ytd_pct": _mc.dolar_ytd_pct,
+                "ibov": _mc.ibov,
+                "ibov_ytd_pct": _mc.ibov_ytd_pct,
+                "sp500": _mc.sp500,
+                "sp500_ytd_pct": _mc.sp500_ytd_pct,
+                "nasdaq": _mc.nasdaq,
+                "nasdaq_ytd_pct": _mc.nasdaq_ytd_pct,
+                "bitcoin": _mc.bitcoin,
+                "bitcoin_ytd_pct": _mc.bitcoin_ytd_pct,
+            }.items() if v is not None}
+            if _mc.flags:
+                payload["alertas_macro"] = _mc.flags
+            if _mc.narrativa:
+                payload["narrativa_macro"] = _mc.narrativa
+            payload["macro_resumo_completo"] = _mc.resumo_texto()
+            payload["DADOS_CHAVE_PARA_CITAR"] = _montar_dados_chave(_mc)
+            _has_macro_enrich = True
+        except Exception as _macro_err:
+            logger.warning("gestor_geral: MacroEngine falhou: %s", _macro_err)
+
     if contexto and hasattr(contexto, "macro_context") and contexto.macro_context:
         mc = contexto.macro_context
-        payload["macro_enriquecido"] = {
+        # Merge campos do contexto SEM sobrescrever o dict completo
+        # (o bloco anterior já populou macro_enriquecido com todos os campos + YTD)
+        existing = payload.get("macro_enriquecido", {})
+        extra = {
             "treasury_10y": mc.treasury_10y,
             "vix": mc.vix,
             "dxy": mc.dxy,
@@ -209,6 +561,10 @@ async def _analisar_com_ia(
             "selic_expectativa": mc.selic_expectativa,
             "ipca_expectativa": mc.ipca_expectativa,
         }
+        for k, v in extra.items():
+            if v is not None and k not in existing:
+                existing[k] = v
+        payload["macro_enriquecido"] = existing
         if mc.flags:
             payload["alertas_macro"] = mc.flags
 
@@ -292,10 +648,16 @@ e tem poder decisório completo para:
 Sua missão: portfólio que supere benchmarks (IBOV / CDI) com risco proporcional ao perfil.
 
 ━━━ REGRAS OPERACIONAIS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- VERIFIQUE "dados_disponiveis" no payload. Se macro=false, avise que a análise macro não está disponível \
+  e seja mais conservador (aumente RF/Caixa). Se narrativa_macro=false, prossiga com dados quantitativos.
 - A soma de valor_final DEVE ser EXATAMENTE igual a capital_total
 - Se sobrar capital, crie posição "CAIXA" (tipo "CAIXA", módulo "caixa")
 - Cada ativo precisa de sua justificativa — curta, objetiva, baseada em DADOS DO PAYLOAD
 - NUNCA invente preços. Use preco_atual do candidato ou do campo preco_atual do payload
+- REGRA ABSOLUTA ANTI-ALUCINAÇÃO: Use APENAS dados do payload. NUNCA invente variações %, \
+  YTDs ou tendências não fornecidas. Se o dado não existe no payload, NÃO cite um número.
+- REGRA CRÍTICA DIA ≠ YTD: "*_variacao_dia" = variação de HOJE (1 dia). "*_ytd_pct" = acumulado NO ANO. \
+  NÃO CONFUNDA. Ao citar YTD use APENAS *_ytd_pct. Use "DADOS_CHAVE_PARA_CITAR" como referência.
 - Em regime BEAR: prefira RF + Caixa + Dividendos defensivos. Reduza Momentum e Alpha
 - Em regime BULL: pode ser agressivo em Momentum/Alpha se perfil permitir
 - Em regime MISTO: equilíbrio; não aposte em tendência que não foi confirmada
@@ -343,6 +705,52 @@ beta de forma eficiente sem stock picking. Regime BULL confirma entrada."
   "score_portfolio": 78
 }"""
 
+    # ── Modo inicial SEM plano: CEO também cria a análise estratégica ──────────
+    _gerar_plano = (modo == "inicial" and not _has_plano)
+    if _gerar_plano:
+        PLANO_ADDON = """
+
+━━━ ANÁLISE ESTRATÉGICA (OBRIGATÓRIA — PRIMEIRO PORTFÓLIO) ━━━━━━━━━━━━━━━
+Este é o PRIMEIRO portfólio do investidor. Além de montar a carteira, você DEVE \
+produzir a análise estratégica completa. Inclua no JSON uma chave "plano_estrategico" com:
+
+{
+  "plano_estrategico": {
+    "diagnostico": "3-5 parágrafos densos: analise a meta declarada, calcule viabilidade com números reais (patrimônio, aporte, retorno esperado composto), identifique a fase do investidor (crescimento/transição/colheita), e justifique a estratégia escolhida com base no macro atual. Use **negrito** para dados-chave.",
+    "meta_viavel": true/false,
+    "gap_patrimonio": 0.0,
+    "fase_atual": "crescimento|transição|colheita",
+    "fase_descricao": "1-2 frases explicando a fase",
+    "estrategia_recomendada": "CORE|ALPHA|RENDA",
+    "estrategia_razao": "1-2 frases",
+    "cenarios": [
+      {"nome":"Conservador","descricao":"2-3 frases","modulos":["RF","ETFs"],"alocacao_resumo":"50% RF · 30% ETFs · 20% FIIs","rentabilidade_esperada":"10-14% a.a.","tempo_meta":"~X anos","risco_principal":"1 frase"},
+      {"nome":"Recomendado","descricao":"2-3 frases","modulos":["ETFs","Momentum"],"alocacao_resumo":"...","rentabilidade_esperada":"...","tempo_meta":"...","risco_principal":"..."},
+      {"nome":"Agressivo","descricao":"2-3 frases","modulos":["Momentum","Alpha"],"alocacao_resumo":"...","rentabilidade_esperada":"...","tempo_meta":"...","risco_principal":"..."}
+    ],
+    "modulos_sugeridos": [{"nome":"ETFs","por_que":"1 frase","peso_sugerido":"~30%"}],
+    "riscos_e_tradeoffs": ["Risco 1","Risco 2","Risco 3"],
+    "marcos": [{"patrimonio":2000000,"renda_mensal_possivel":10000,"estimativa_anos":3.5,"descricao":"..."}],
+    "proximos_passos": ["Ação 1","Ação 2"],
+    "alertas": [],
+    "revisao_quando": "em 12 meses ou quando patrimônio variar ±20%"
+  }
+}
+
+USE os dados macro reais para calibrar cenários. Selic alta → retornos de RF mais altos nos cenários. \
+VIX alto → cenário Conservador com mais RF/Caixa. Os cenários devem ter alocações e retornos REALMENTE DIFERENTES."""
+        SYSTEM += PLANO_ADDON
+        if user_data:
+            payload["objetivo_investidor"] = {
+                "nome": user_data.get("nome"),
+                "tipo": user_data.get("objetivo_tipo"),
+                "valor": user_data.get("objetivo_valor"),
+                "descricao": user_data.get("objetivo_descricao"),
+                "prazo": user_data.get("objetivo_prazo"),
+                "aporte_mensal": user_data.get("aporte_mensal"),
+                "onboarding_respostas": user_data.get("onboarding_respostas"),
+            }
+
     # ── Modo rebalanceamento: instrução adicional para o CEO comparar com carteira atual ──
     if modo == "rebalanceamento":
         REBAL_ADDON = """
@@ -351,43 +759,111 @@ beta de forma eficiente sem stock picking. Regime BULL confirma entrada."
 ATENÇÃO: Esta NÃO é uma montagem do zero. O investidor JÁ TEM posições em carteira \
 (listadas em "posicoes_ja_na_carteira" no payload). Seu trabalho é REBALANCEAR.
 
-OBRIGAÇÕES EXTRAS NO REBALANCEAMENTO:
-1. Para cada ativo que MANTÉM da carteira atual → explique POR QUE continua válido \
-   (dados técnicos, fundamento, macro favorável). Na justificativa_ceo mencione: "MANTER — [razão]".
-2. Para cada ativo NOVO que entra → explique POR QUE é melhor que não tê-lo. \
-   Na justificativa_ceo mencione: "ENTRADA — [razão com dados]".
-3. Para cada ativo da carteira atual que NÃO aparece na carteira_final → ele será REMOVIDO. \
-   Isso precisa ser justificado em "ajustes_realizados" com: "SAÍDA [TICKER] — [razão: stop atingido, \
-   tese deteriorada, oportunidade melhor em X, macro desfavorável, etc.]".
-4. Para ativos com MUDANÇA DE TAMANHO (valor diferente do atual) → explique na justificativa_ceo: \
-   "AUMENTO — [razão]" ou "REDUÇÃO — [razão]".
+━━━ REGRA DE ESTABILIDADE TEMPORAL (OBRIGATÓRIA) ━━━━━━━━━━━━━━━━━━━━━━━━━━
+Cada posição tem campo "dias_na_carteira" (0 = criada hoje) e "justificativa_entrada" \
+(a razão original pela qual foi incluída na carteira).
+
+VIÉS FORTE PARA MANTER POSIÇÕES RECENTES:
+• dias_na_carteira < 7   → BENEFÍCIO DA DÚVIDA MÁXIMO. Só sugira SAÍDA se a tese \
+  estiver CLARAMENTE invalidada com dados concretos (stop atingido, fundamento quebrado, \
+  regime mudou drasticamente). "Encontrei algo melhor" NÃO é justificativa suficiente.
+• dias_na_carteira 7-30  → Benefício moderado. Mudanças precisam de evidência concreta.
+• dias_na_carteira > 30  → Avaliação normal. Pode sugerir trocas se houver dados.
+• dias_na_carteira = 0   → FOI CRIADA HOJE PELO MESMO SISTEMA (você). Manter OBRIGATÓRIO \
+  a menos que um stop loss tenha sido atingido ou um dado catastrófico tenha surgido.
+
+REGRA DE CONSISTÊNCIA:
+Compare a "justificativa_entrada" (campo no payload) com o cenário ATUAL.
+Se NADA mudou materialmente desde a entrada → MANTER é OBRIGATÓRIO.
+Citar "encontrei oportunidade melhor" ou "rebalancear para otimizar" sem evidência \
+de deterioração da posição atual é PROIBIDO.
+
+REGRA DE EVIDÊNCIA (para cada SAÍDA ou TROCA):
+Você DEVE citar o dado ESPECÍFICO que mudou desde a entrada. Exemplos aceitáveis:
+  "Stop loss em R$X atingido (preço atual R$Y)"
+  "P/L subiu de 8x para 15x — tese de valor não se sustenta mais"
+  "Regime mudou de BULL para BEAR — momentum não opera em regime BEAR"
+  "Fundamento deteriorou: receita caiu 20% no último trimestre"
+Exemplos PROIBIDOS:
+  "Há alternativa melhor no mercado" (sem evidência de deterioração)
+  "Para diversificar melhor" (sem citação de risco concreto)
+  "Otimização de carteira" (vazio — proibido)
+
+OBRIGAÇÕES NO REBALANCEAMENTO:
+1. Para cada ativo que MANTÉM → "MANTER — [razão: tese intacta + dados]".
+2. Para cada ativo NOVO → "ENTRAR — [razão com dados + por que este módulo precisa deste ativo]".
+3. Para cada ativo que SAI → em "ajustes_realizados": "SAÍDA [TICKER] — [dado concreto que mudou]".
+4. Para MUDANÇA DE TAMANHO → "AUMENTO — [razão]" ou "REDUÇÃO — [razão]".
 
 NA ANÁLISE ("analise"):
 - Comece com: "**Rebalanceamento sugerido:**" seguido de um resumo das mudanças.
-- Explique o RACIONAL GERAL das mudanças: o que mudou no cenário desde a montagem anterior \
-  que justifica esses ajustes (dados macro, regime, performance das posições).
-- Liste explicitamente: quantas posições mantidas, quantas novas, quantas removidas, quantas redimensionadas.
-- Justifique cada troca (saiu X, entrou Y) com dados comparativos concretos.
-- Termine com a visão de risco/retorno esperado da carteira rebalanceada vs. a anterior.
+- Explique o RACIONAL GERAL: o que mudou CONCRETAMENTE no cenário desde a montagem anterior.
+- Liste: quantas mantidas, novas, removidas, redimensionadas.
+- Se TODAS as posições foram mantidas: "Carteira alinhada — nenhuma mudança necessária neste momento."
+- Termine com risco/retorno esperado da carteira rebalanceada vs. anterior.
 
 NOS ALERTAS ("alertas"):
-- Inclua alertas sobre posições que performaram mal e estão sendo mantidas (se houver).
+- Alerte sobre posições com P&L negativo que estão sendo mantidas (se houver).
 - Alerte sobre concentração excessiva se o rebalanceamento aumentar exposição a uma classe.
 
-Tom: gestor explicando ao cliente POR QUE cada mudança faz sentido — transparente, detalhado, com dados."""
+Tom: gestor explicando ao cliente POR QUE cada mudança faz sentido — transparente, detalhado, com dados. \
+Se não há razão para mudar, DIGA ISSO com confiança."""
         SYSTEM += REBAL_ADDON
         payload["modo"] = "rebalanceamento"
         USER = f"Rebalanceie o portfólio existente com base nos dados a seguir. Justifique CADA mudança em relação à carteira atual:\n\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
     else:
         USER = f"Monte o portfólio final com base nos dados a seguir:\n\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
 
+    # ── Cenário escolhido pelo investidor (Fase 2 do fluxo) ─────────────────
+    if cenario_escolhido:
+        CENARIO_ADDON = f"""
+
+━━━ CENÁRIO ESCOLHIDO PELO INVESTIDOR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+O investidor analisou a estratégia e ESCOLHEU o cenário: **{cenario_escolhido}**
+
+OBRIGAÇÃO: Alinhe a composição da carteira ao perfil de risco/retorno deste cenário.
+- Se "Conservador": priorize RF, ETFs core, FIIs de renda, menos Momentum/Alpha.
+- Se "Recomendado": equilíbrio conforme estratégia base do perfil.
+- Se "Agressivo": mais Momentum, Alpha, Wheel; aceitar maior volatilidade.
+
+As alocações percentuais entre módulos devem REFLETIR a escolha do investidor."""
+        SYSTEM += CENARIO_ADDON
+        payload["cenario_escolhido"] = cenario_escolhido
+
+    # Quando precisa gerar plano, resposta é maior
+    _max_tokens = 5500 if _gerar_plano else 4500
+
     resposta_raw = await chat(
         system=SYSTEM,
         messages=[{"role": "user", "content": USER}],
-        max_tokens=6500,
+        max_tokens=_max_tokens,
     )
 
-    return _parsear_resposta_ia(resposta_raw, candidatos, capital)
+    return _parsear_resposta_ia(resposta_raw, candidatos, capital, extrair_plano=_gerar_plano)
+
+
+def _montar_dados_chave(mc) -> dict:
+    """Monta bloco pré-formatado com dados-chave que a AI deve citar literalmente.
+    Separa claramente variação DIA vs YTD para evitar confusão."""
+    def _fmt(v, suffix="%"):
+        return f"{v:+.1f}{suffix}" if v is not None else "N/D"
+
+    return {
+        "IBOV_pontos": f"{mc.ibov:,.0f}" if mc.ibov else "N/D",
+        "IBOV_variacao_HOJE": _fmt(mc.ibov_var_pct),
+        "IBOV_variacao_NO_ANO_YTD": _fmt(mc.ibov_ytd_pct),
+        "SP500_pontos": f"{mc.sp500:,.0f}" if mc.sp500 else "N/D",
+        "SP500_variacao_HOJE": _fmt(mc.sp500_var_pct),
+        "SP500_variacao_NO_ANO_YTD": _fmt(mc.sp500_ytd_pct),
+        "Nasdaq_variacao_NO_ANO_YTD": _fmt(mc.nasdaq_ytd_pct),
+        "Dolar_BRL": f"R${mc.dolar_brl:.2f}" if mc.dolar_brl else "N/D",
+        "Dolar_variacao_HOJE": _fmt(mc.dolar_var_pct),
+        "Dolar_variacao_NO_ANO_YTD": _fmt(mc.dolar_ytd_pct),
+        "Selic": f"{mc.selic:.1f}%" if mc.selic else "N/D",
+        "VIX": f"{mc.vix:.1f}" if mc.vix else "N/D",
+        "Ouro_variacao_NO_ANO_YTD": _fmt(mc.ouro_ytd_pct),
+        "Bitcoin_variacao_NO_ANO_YTD": _fmt(mc.bitcoin_ytd_pct),
+    }
 
 
 def _descrever_perfil(score: int, estrategia: str) -> str:
@@ -404,6 +880,7 @@ def _parsear_resposta_ia(
     resposta_raw: str,
     candidatos_originais: list[SugestaoMotor],
     capital: float,
+    extrair_plano: bool = False,
 ) -> ResultadoGestorGeral:
     """
     Converte o JSON retornado pela IA em ResultadoGestorGeral.
@@ -446,6 +923,7 @@ def _parsear_resposta_ia(
         valor   = float(item.get("valor_final", 0))
         preco   = float(item.get("preco_atual", 1.0))
         just    = str(item.get("justificativa_ceo", ""))
+        acao    = str(item.get("acao", "ENTRAR")).upper()  # ENTRAR|MANTER|AUMENTAR|REDUZIR
 
         if valor <= 0:
             continue
@@ -468,6 +946,9 @@ def _parsear_resposta_ia(
         # Limpa flags internas de pré-processamento
         dados_extras.pop("_duplicado", None)
         dados_extras.pop("_n_modulos", None)
+
+        # Preserva ação do CEO (ENTRAR/MANTER/AUMENTAR/REDUZIR) para o frontend
+        dados_extras["acao_ceo"] = acao
 
         # Quantidade: para RF/CAIXA é o valor nominal; para os demais é quantidade de cotas
         if tipo in ("RF", "CAIXA") or preco_real <= 1.0:
@@ -511,6 +992,15 @@ def _parsear_resposta_ia(
     sugestoes_finais = _sizing_v2_ajuste(sugestoes_finais, capital)
     sugestoes_finais = _balancear_caixa(sugestoes_finais, capital)
 
+    plano = None
+    if extrair_plano and dados.get("plano_estrategico"):
+        plano = dados["plano_estrategico"]
+        plano["usou_ia"] = True
+        from datetime import datetime, timezone
+        plano["gerado_em"] = datetime.now(timezone.utc).isoformat()
+        plano["patrimonio_na_criacao"] = capital
+        logger.info("gestor_geral: plano estrategico extraido do CEO Brain (cenarios=%d)", len(plano.get("cenarios", [])))
+
     return ResultadoGestorGeral(
         sugestoes_finais=sugestoes_finais,
         analise=str(dados.get("analise", "")),
@@ -518,6 +1008,7 @@ def _parsear_resposta_ia(
         ajustes_realizados=[str(a) for a in dados.get("ajustes_realizados", [])],
         score_portfolio=int(dados.get("score_portfolio", 70)),
         usou_ia=True,
+        plano_estrategico=plano,
     )
 
 

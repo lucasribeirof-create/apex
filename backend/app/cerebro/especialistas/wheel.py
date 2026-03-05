@@ -48,7 +48,7 @@ from app.cerebro.especialistas import prefetch as _pf
 from app.data.bcb_client import get_selic
 
 # ── Parâmetros ───────────────────────────────────────────────────────────────
-_CDI_FALLBACK          = 14.75   # % a.a. — somente quando BCB offline
+from app.logger import logger as _wheel_logger
 SCORE_MINIMO           = 1.2     # múltiplo CDI mínimo para opções VENDIDAS (era 1.5)
 PAYOFF_MINIMO          = 1.8     # múltiplo payoff/custo para opções COMPRADAS (se mover 2×ATR)
 MAX_ATIVOS             = 4
@@ -436,7 +436,7 @@ def _dias_uteis(vencimento_str: str) -> int:
         return 999
 
 
-def _score_vendida(row: pd.Series, preco: float, tipo: str, acima_mm200: bool, cdi: float = _CDI_FALLBACK) -> float:
+def _score_vendida(row: pd.Series, preco: float, tipo: str, acima_mm200: bool, cdi: float = 14.25) -> float:
     dias = _dias_uteis(row["vencimento"])
     if dias < 7 or dias > 86:
         return 0.0
@@ -489,7 +489,7 @@ def _recomendar_vendida(
     tipo: str,
     acima_mm200: bool,
     veredito: str,
-    cdi: float = _CDI_FALLBACK,
+    cdi: float = 14.25,
 ) -> Optional[pd.Series]:
     """Retorna a melhor opção vendida ou None se nenhuma atender."""
     if df is None or df.empty or "strike" not in df.columns:
@@ -775,7 +775,10 @@ async def rodar(
         return []
 
     cdi_live = await get_selic()
-    cdi      = float(cdi_live) if isinstance(cdi_live, (int, float)) else _CDI_FALLBACK
+    if not isinstance(cdi_live, (int, float)) or cdi_live is None:
+        _wheel_logger.error("wheel: Selic/CDI totalmente indisponível — motor não pode operar sem dados reais")
+        return []
+    cdi = float(cdi_live)
 
     _excluir  = set(t.upper() for t in (excluir_tickers or []))
     _carteira = set(t.upper() for t in (tickers_carteira or []))

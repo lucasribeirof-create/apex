@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
-import { Plus, X, TrendingUp, TrendingDown, Circle, Trash2, ChevronDown, ChevronUp, BrainCircuit, LayoutList, FlaskConical, Pencil, Check } from 'lucide-react'
+import { Plus, X, TrendingUp, TrendingDown, Circle, Trash2, ChevronDown, ChevronUp, BrainCircuit, LayoutList, FlaskConical, Pencil, Check, Wallet } from 'lucide-react'
 import PosicaoDetalheModal from '@/components/PosicaoDetalheModal'
+import EncerrarPosicaoModal from '@/components/EncerrarPosicaoModal'
 import CarteiraPanel from '@/components/CarteiraPanel'
 import api from '@/services/api'
 import { useStore } from '@/store/useStore'
@@ -35,16 +36,18 @@ interface FormData {
   quantidade: string
   preco_medio: string
   stop_loss: string
+  justificativa: string
 }
 
 const MODULE_LABELS: Record<string, string> = {
   etfs: 'ETFs',
   fiis: 'FIIs',
-  momentum: 'Momentum',
-  wheel: 'Wheel',
+  momentum: 'Momentum · Trade Técnico',
+  wheel: 'Wheel · Opções',
   renda_fixa: 'Renda Fixa',
-  alpha: 'Alpha',
+  alpha: 'Alpha · Valor com Stop',
   dividendos: 'Dividendos',
+  teses: 'Teses · Convicção DCA',
   caixa: 'Caixa',
 }
 
@@ -53,12 +56,30 @@ const TIPO_COLORS: Record<string, string> = {
   RF: '#FFD740', OPCAO: '#FF9800', BDR: '#64FFDA', DIVIDENDO: '#FFD740', CAIXA: '#475569',
 }
 
-const emptyForm: FormData = { ticker: '', nome: '', tipo: 'ACAO', modulo: 'momentum', quantidade: '', preco_medio: '', stop_loss: '' }
+const emptyForm: FormData = { ticker: '', nome: '', tipo: 'ACAO', modulo: 'momentum', quantidade: '', preco_medio: '', stop_loss: '', justificativa: '' }
 
 function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState<FormData>(emptyForm)
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState('')
+  const [suggestions, setSuggestions] = useState<string[]>([])
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const [searchTimer, setSearchTimer] = useState<ReturnType<typeof setTimeout> | null>(null)
+
+  const searchTicker = (query: string) => {
+    if (searchTimer) clearTimeout(searchTimer)
+    if (query.length < 2) { setSuggestions([]); setShowSuggestions(false); return }
+    const t = setTimeout(async () => {
+      try {
+        const res = await api.get('/market/search', { params: { q: query } })
+        const items = (res.data || []).map((s: any) => typeof s === 'string' ? s : s.stock || s.ticker || '')
+          .filter(Boolean).slice(0, 8)
+        setSuggestions(items)
+        setShowSuggestions(items.length > 0)
+      } catch { setSuggestions([]); setShowSuggestions(false) }
+    }, 350)
+    setSearchTimer(t)
+  }
 
   const handleSubmit = async () => {
     if (!form.ticker || !form.quantidade || !form.preco_medio) {
@@ -75,6 +96,7 @@ function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => vo
         quantidade: parseFloat(form.quantidade),
         preco_medio: parseFloat(form.preco_medio),
         stop_loss: form.stop_loss ? parseFloat(form.stop_loss) : undefined,
+        justificativa_entrada: form.justificativa || undefined,
       })
       onSaved()
     } catch (e: any) {
@@ -90,7 +112,6 @@ function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => vo
       exit={{ opacity: 0 }}
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
       style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)' }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
       <motion.div
         initial={{ opacity: 0, scale: 0.96, y: 12 }}
@@ -112,8 +133,26 @@ function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => vo
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-xs mb-1.5 block" style={{ color: '#64748b' }}>Ticker *</label>
-              <input className="apex-input" placeholder="PETR4" value={form.ticker}
-                onChange={e => setForm(f => ({ ...f, ticker: e.target.value.toUpperCase() }))} />
+              <div className="relative">
+                <input className="apex-input" placeholder="PETR4" value={form.ticker}
+                  onChange={e => { const v = e.target.value.toUpperCase(); setForm(f => ({ ...f, ticker: v })); searchTicker(v) }}
+                  onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
+                  onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+                  autoComplete="off" />
+                {showSuggestions && (
+                  <div className="absolute z-50 w-full mt-1 rounded-xl overflow-hidden border"
+                    style={{ background: '#0f172a', borderColor: '#1e293b', maxHeight: 200, overflowY: 'auto' as const }}>
+                    {suggestions.map(s => (
+                      <button key={s} type="button"
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-white/5 transition-colors"
+                        style={{ color: '#f1f5f9' }}
+                        onMouseDown={() => { setForm(f => ({ ...f, ticker: s })); setShowSuggestions(false) }}>
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
             <div>
               <label className="text-xs mb-1.5 block" style={{ color: '#64748b' }}>Nome</label>
@@ -161,6 +200,12 @@ function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => vo
               <input className="apex-input" placeholder="31.00" type="number" value={form.stop_loss}
                 onChange={e => setForm(f => ({ ...f, stop_loss: e.target.value }))} />
             </div>
+          </div>
+
+          <div>
+            <label className="text-xs mb-1.5 block" style={{ color: '#64748b' }}>Por que está na carteira?</label>
+            <input className="apex-input" placeholder="Ex: ETF diversificado para exposição ao IBOV" value={form.justificativa}
+              onChange={e => setForm(f => ({ ...f, justificativa: e.target.value }))} />
           </div>
         </div>
 
@@ -210,10 +255,11 @@ function StopBadge({ preco_atual, stop_loss }: { preco_atual: number; stop_loss:
   return null
 }
 
-function ModuleGroup({ modulo, positions, onDelete, onDetalhe }: { modulo: string; positions: Position[]; onDelete: (id: number) => void; onDetalhe: (p: Position) => void }) {
+function ModuleGroup({ modulo, positions, onDelete, onDetalhe, portfolioTotal, onEditCaixa, onDeleteCaixa }: { modulo: string; positions: Position[]; onDelete: (id: number) => void; onDetalhe: (p: Position) => void; portfolioTotal: number; onEditCaixa?: (p: Position) => void; onDeleteCaixa?: (p: Position) => void }) {
   const [open, setOpen] = useState(true)
   const totalVal = positions.reduce((a, p) => a + p.valor_atual, 0)
   const totalPL = positions.reduce((a, p) => a + p.pl_reais, 0)
+  const pctPortfolio = portfolioTotal > 0 ? (totalVal / portfolioTotal) * 100 : 0
 
   return (
     <div className="apex-card overflow-hidden">
@@ -231,6 +277,9 @@ function ModuleGroup({ modulo, positions, onDelete, onDetalhe }: { modulo: strin
           </span>
         </div>
         <div className="flex items-center gap-6 text-sm font-mono">
+          <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: 'rgba(148,163,184,0.08)', color: '#94a3b8' }}>
+            {pctPortfolio.toFixed(1)}%
+          </span>
           <span style={{ color: '#f1f5f9' }}>
             R$ {totalVal.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
           </span>
@@ -298,26 +347,53 @@ function ModuleGroup({ modulo, positions, onDelete, onDetalhe }: { modulo: strin
                     </span>
                   </div>
                   <div className="flex items-center justify-end gap-1">
-                    <button
-                      onClick={() => onDetalhe(p)}
-                      title="Ver detalhes e analisar posição"
-                      className="flex items-center justify-center w-7 h-7 rounded transition-all"
-                      style={{ color: '#a78bfa', opacity: 0.5 }}
-                      onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(139,92,246,0.12)' }}
-                      onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; e.currentTarget.style.background = 'transparent' }}
-                    >
-                      <BrainCircuit size={13} />
-                    </button>
-                    <button
-                      onClick={() => onDelete(p.id)}
-                      title="Encerrar posição"
-                      className="flex items-center justify-center w-7 h-7 rounded transition-all"
-                      style={{ color: '#FF5252', opacity: 0.35 }}
-                      onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(255,82,82,0.1)' }}
-                      onMouseLeave={e => { e.currentTarget.style.opacity = '0.35'; e.currentTarget.style.background = 'transparent' }}
-                    >
-                      <Trash2 size={13} />
-                    </button>
+                    {p.ticker === 'CAIXA' ? (
+                      <>
+                        <button
+                          onClick={() => onEditCaixa?.(p)}
+                          title="Editar saldo do caixa"
+                          className="flex items-center justify-center w-7 h-7 rounded transition-all"
+                          style={{ color: '#FFD740', opacity: 0.5 }}
+                          onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(255,215,64,0.12)' }}
+                          onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; e.currentTarget.style.background = 'transparent' }}
+                        >
+                          <Pencil size={13} />
+                        </button>
+                        <button
+                          onClick={() => onDeleteCaixa?.(p)}
+                          title="Remover caixa"
+                          className="flex items-center justify-center w-7 h-7 rounded transition-all"
+                          style={{ color: '#FF5252', opacity: 0.35 }}
+                          onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(255,82,82,0.1)' }}
+                          onMouseLeave={e => { e.currentTarget.style.opacity = '0.35'; e.currentTarget.style.background = 'transparent' }}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => onDetalhe(p)}
+                          title="Ver detalhes e analisar posição"
+                          className="flex items-center justify-center w-7 h-7 rounded transition-all"
+                          style={{ color: '#a78bfa', opacity: 0.5 }}
+                          onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(139,92,246,0.12)' }}
+                          onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; e.currentTarget.style.background = 'transparent' }}
+                        >
+                          <BrainCircuit size={13} />
+                        </button>
+                        <button
+                          onClick={() => onDelete(p.id)}
+                          title="Encerrar posição"
+                          className="flex items-center justify-center w-7 h-7 rounded transition-all"
+                          style={{ color: '#FF5252', opacity: 0.35 }}
+                          onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(255,82,82,0.1)' }}
+                          onMouseLeave={e => { e.currentTarget.style.opacity = '0.35'; e.currentTarget.style.background = 'transparent' }}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}
@@ -342,6 +418,9 @@ export default function PositionsPage() {
   const [showAdd, setShowAdd] = useState(false)
   const [showCarteira, setShowCarteira] = useState(false)
   const [analisando, setAnalisando] = useState<Position | null>(null)
+  const [encerrando, setEncerrando] = useState<Position | null>(null)
+  const [editandoCaixa, setEditandoCaixa] = useState<Position | null>(null)
+  const [caixaInput, setCaixaInput] = useState('')
 
   const loadPositions = async () => {
     setLoading(true)
@@ -390,11 +469,39 @@ export default function PositionsPage() {
     setRefreshing(false)
   }
 
-  const deletePosition = async (id: number) => {
-    if (!confirm('Encerrar esta posição?')) return
+  const deletePosition = (id: number) => {
+    const pos = positions.find(p => p.id === id)
+    if (pos) setEncerrando(pos)
+  }
+
+  const onEncerrarSuccess = (result: { venda_total: boolean; ticker: string }) => {
+    setEncerrando(null)
+    if (result.venda_total) {
+      setPositions(p => p.filter(x => x.ticker !== result.ticker))
+    }
+    loadPositions() // recarrega para pegar CAIXA atualizado
+  }
+
+  const editarCaixa = (p: Position) => {
+    setCaixaInput(p.quantidade.toLocaleString('pt-BR', { minimumFractionDigits: 2 }))
+    setEditandoCaixa(p)
+  }
+
+  const salvarCaixa = async () => {
+    const val = parseFloat(caixaInput.replace(/\./g, '').replace(',', '.'))
+    if (isNaN(val) || val < 0) return
     try {
-      await api.delete(`/portfolio/posicoes/${id}`)
-      setPositions(p => p.filter(x => x.id !== id))
+      await api.patch('/portfolio/caixa', { quantidade: val })
+      setEditandoCaixa(null)
+      loadPositions()
+    } catch { /* silent */ }
+  }
+
+  const excluirCaixa = async (p: Position) => {
+    if (!confirm(`Remover CAIXA (R$ ${p.quantidade.toLocaleString('pt-BR', { minimumFractionDigits: 2 })})?`)) return
+    try {
+      await api.delete('/portfolio/caixa')
+      loadPositions()
     } catch { /* silent */ }
   }
 
@@ -469,7 +576,16 @@ export default function PositionsPage() {
             Analisar Carteira
           </button>
           <button
-            onClick={() => navigate('/sugestoes-alocacao', { state: { portfolioId: portfolioAtivo?.id, modo: 'rebalanceamento' } })}
+            onClick={async () => {
+              try {
+                const r = await api.get('/onboarding/perfil-status')
+                if (!r.data.perfil_completo) {
+                  navigate('/perfil-investidor', { state: { returnTo: 'rebalanceamento' } })
+                  return
+                }
+              } catch { /* ignora erro e tenta rebalancear */ }
+              navigate('/sugestoes-alocacao', { state: { portfolioId: portfolioAtivo?.id, modo: 'rebalanceamento', forceRefresh: true } })
+            }}
             className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all"
             style={{ background: 'rgba(255,152,0,0.1)', color: '#FF9800', border: '1px solid rgba(255,152,0,0.25)' }}
           >
@@ -561,7 +677,16 @@ export default function PositionsPage() {
           </p>
           <div className="flex items-center justify-center gap-3 flex-wrap">
             <button
-              onClick={() => navigate('/sugestoes-alocacao', { state: { portfolioId: portfolioAtivo?.id, modo: 'inicial' } })}
+              onClick={async () => {
+                try {
+                  const r = await api.get('/onboarding/perfil-status')
+                  if (!r.data.perfil_completo) {
+                    navigate('/perfil-investidor', { state: { returnTo: 'rebalanceamento' } })
+                    return
+                  }
+                } catch { /* ignora */ }
+                navigate('/sugestoes-alocacao', { state: { portfolioId: portfolioAtivo?.id, modo: 'inicial' } })
+              }}
               className="btn-primary inline-flex items-center gap-2"
               style={{
                 background: isSimulada ? 'rgba(255,152,0,0.15)' : 'rgba(0,191,165,0.12)',
@@ -581,13 +706,72 @@ export default function PositionsPage() {
 
       {!loading && Object.entries(grouped).map(([modulo, pos]) => (
         <motion.div key={modulo} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
-          <ModuleGroup modulo={modulo} positions={pos} onDelete={deletePosition} onDetalhe={(p) => setAnalisando(p)} />
+          <ModuleGroup modulo={modulo} positions={pos} onDelete={deletePosition} onDetalhe={(p) => setAnalisando(p)} portfolioTotal={totalCurrent} onEditCaixa={editarCaixa} onDeleteCaixa={excluirCaixa} />
         </motion.div>
       ))}
 
       <AnimatePresence>
         {showAdd && (
           <AddModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); loadPositions() }} />
+        )}
+      </AnimatePresence>
+
+      {/* Modal de encerramento inteligente */}
+      <AnimatePresence>
+        {encerrando && (
+          <EncerrarPosicaoModal
+            position={encerrando}
+            onClose={() => setEncerrando(null)}
+            onSuccess={onEncerrarSuccess}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Modal editar CAIXA */}
+      <AnimatePresence>
+        {editandoCaixa && (
+          <motion.div
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center"
+            style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)' }}
+            onClick={() => setEditandoCaixa(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+              className="apex-card p-6 w-full max-w-sm space-y-4"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-bold" style={{ color: '#f1f5f9' }}>Editar Caixa</h3>
+                <button onClick={() => setEditandoCaixa(null)}><X size={18} style={{ color: '#64748b' }} /></button>
+              </div>
+              <p className="text-xs" style={{ color: '#64748b' }}>Defina o saldo da Reserva de Liquidez:</p>
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-mono" style={{ color: '#64748b' }}>R$</span>
+                <input
+                  autoFocus
+                  type="text"
+                  value={caixaInput}
+                  onChange={e => setCaixaInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') salvarCaixa(); if (e.key === 'Escape') setEditandoCaixa(null) }}
+                  className="bg-transparent border-b text-lg font-mono outline-none flex-1"
+                  style={{ borderColor: '#00E676', color: '#f1f5f9' }}
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  onClick={() => setEditandoCaixa(null)}
+                  className="px-4 py-2 rounded-xl text-sm"
+                  style={{ color: '#64748b' }}
+                >Cancelar</button>
+                <button
+                  onClick={salvarCaixa}
+                  className="px-4 py-2 rounded-xl text-sm font-semibold"
+                  style={{ background: 'rgba(0,230,118,0.15)', color: '#00E676', border: '1px solid rgba(0,230,118,0.3)' }}
+                >Salvar</button>
+              </div>
+            </motion.div>
+          </motion.div>
         )}
       </AnimatePresence>
     </div>

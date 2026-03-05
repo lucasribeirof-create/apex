@@ -64,6 +64,8 @@ def migrate_db():
         "ALTER TABLE users ADD COLUMN objetivo_descricao TEXT",
         # TeseInvestimento — tabela criada via create_tables(), migrações para colunas futuras aqui
         # TradeJournal — tabela criada via create_tables(), migrações para colunas futuras aqui
+        # Justificativa do CEO na entrada — memória para rebalanceamento
+        "ALTER TABLE positions ADD COLUMN justificativa_entrada TEXT",
     ]
     with engine.connect() as conn:
         for sql in _migrations:

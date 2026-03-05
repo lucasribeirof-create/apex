@@ -34,8 +34,8 @@ WHEEL_WATCHLIST = [
     "PRIO3",  # PetroRio ON — petróleo independente, vol elevada
     "RDOR3",  # Rede D'Or ON — saúde, opções disponíveis
     "LREN3",  # Lojas Renner ON — varejo, opções ativas
-    "EMBR3",  # Embraer ON — exportadora, boa vol
-    "CPLE6",  # Copel — elétrica, dividendos + opções
+    "EMBJ3",  # Embraer ON — exportadora, boa vol (ticker mudou de EMBR3 em nov/2025)
+    "CPLE3",  # Copel ON — elétrica, dividendos + opções (migrou de CPLE6 para Novo Mercado dez/2025)
     "EGIE3",  # Engie Brasil ON — defensiva, prêmios ok
 ]
 
@@ -45,10 +45,9 @@ MOMENTUM_WATCHLIST = WHEEL_WATCHLIST + [
     "LWSA3",   # Locaweb ON — tech, high beta
     "MELI34",  # MercadoLibre BDR — tech LA growth
     "NVDC34",  # Nvidia BDR — semicondutores
-    "AZUL4",   # Azul PN — aviação, alta vol
+    "HAPV3",   # Hapvida — saúde, alta vol (AZUL4 removido: recuperação judicial)
     "COGN3",   # Cogna — educação, vol
     "CXSE3",   # Caixa Seguridade — bancário
-    "HAPV3",   # Hapvida — saúde, alta vol
     "CYRE3",   # Cyrela — construtora, opções ativas
 ]
 
@@ -72,7 +71,7 @@ FIIS_WATCHLIST = {
     "shoppings": [
         "XPML11",  # XP Malls
         "HSML11",  # HSI Malls
-        "MALL11",  # Malls Brasil Plural
+        "PMLL11",  # Patria Malls (ex-MALL11, ticker mudou jul/2025)
         "VISC11",  # Vinci Shopping Centers
         "ABCP11",  # Grand Plaza
     ],
@@ -87,7 +86,7 @@ FIIS_WATCHLIST = {
         "IRDM11",  # Iridium Recebíveis Imobiliários
     ],
     "hibridos_fofs": [
-        "BPFF11",  # Brasil Plural Abs FoF
+        "PSEC11",  # Patria Securities FII (ex-BPFF11, incorporado ago/2025)
         "HFOF11",  # Hedge Top FOFII
         "RBRF11",  # RBR Alpha Multiestratégia
     ],
@@ -117,7 +116,7 @@ ETFS_WATCHLIST = {
     "internacional": [
         "IVVB11",  # S&P 500 via BDR — exposição dólar
         "NASD11",  # Nasdaq em BRL
-        "EURP11",  # Europa
+        "SPXI11",  # S&P 500 Itaú — alternativa internacional
     ],
     "renda_fixa_etf": [
         "FIXA11",  # ETF Renda Fixa prefixado
@@ -132,7 +131,7 @@ ETFS_WATCHLIST = {
 
 ETFS_WATCHLIST_FLAT = [
     "BOVA11", "BOVB11", "IVVB11", "SMAL11", "DIVO11",
-    "FIND11", "NASD11", "EURP11", "FIXA11", "IMAB11",
+    "FIND11", "NASD11", "SPXI11", "FIXA11", "IMAB11",
     "IRFM11", "ISUS11", "ECOO11",
 ]
 
@@ -141,7 +140,7 @@ DIVIDENDOS_WATCHLIST = [
     "BBAS3",   # Banco do Brasil — maior DY entre bancões (histórico > 8%)
     "TAEE11",  # Taesa Units — transmissão energia, DY estável ~10%
     "EGIE3",   # Engie Brasil — elétrica, dividendos crescentes
-    "CPLE6",   # Copel — elétrica privatizada, dividendos relevantes
+    "CPLE3",   # Copel ON — elétrica privatizada, dividendos relevantes (migrou de CPLE6 dez/2025)
     "CMIG4",   # Cemig PN — elétrica MG, dividendos históricos
     "TIMS3",   # TIM — telecom, payout alto
     "VIVT3",   # Telefônica/Vivo — telecom, dividendo consistente
@@ -169,11 +168,11 @@ ALPHA_WATCHLIST = [
     "AGRO3",   # BrasilAgro — terras agrícolas
     "SLCE3",   # SLC Agrícola
     "BEEF3",   # Minerva — proteína animal, exportação
-    "JBSS3",   # JBS — global, assimetria versus valor
-    "EMBR3",   # Embraer — exportadora, ciclo de aviação
+    "JBSS32",  # JBS BDR — global, assimetria versus valor (migrou de JBSS3 para BDR jun/2025)
+    "EMBJ3",   # Embraer — exportadora, ciclo de aviação (ticker mudou de EMBR3 nov/2025)
     "CYRE3",   # Cyrela — construtora, ciclo imobiliário
     "EVEN3",   # Even — construtora SP
     "ALPA4",   # Alpargatas PN — têxtil/calçados
-    "ARZZ3",   # Arezzo&Co — varejo de moda premium (absorveu Grupo Soma)
+    "AZZA3",   # Azzas 2154 — varejo de moda premium, ex-Arezzo (ARZZ3→AZZA3 ago/2024)
     "CASH3",   # Méliuz — fintech
 ]

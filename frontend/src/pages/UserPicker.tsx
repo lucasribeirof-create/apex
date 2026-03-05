@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, TrendingUp, ChevronRight, Loader2, Trash2 } from 'lucide-react'
+import { Plus, TrendingUp, ChevronRight, Loader2, Trash2, BrainCircuit, Settings } from 'lucide-react'
 import { useStore, StrategyType } from '@/store/useStore'
 import { useNavigate } from 'react-router-dom'
 import api from '@/services/api'
@@ -24,11 +24,12 @@ const fmt = (n: number | null) =>
   n == null ? '—' : `R$ ${n.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
 
 export default function UserPickerPage() {
-  const { setUser, setStrategy, userId: activeUserId } = useStore()
+  const { setUser, setStrategy, setPortfolioAtivo, setPortfolioId, setPortfolios, userId: activeUserId } = useStore()
   const navigate = useNavigate()
   const [users, setUsers] = useState<UserRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [deletingId, setDeletingId] = useState<number | null>(null)
+  const [aiInfo, setAiInfo] = useState<{ provider: string; model: string; configured: boolean } | null>(null)
 
   const load = () => {
     setLoading(true)
@@ -43,9 +44,26 @@ export default function UserPickerPage() {
 
   useEffect(() => { load() }, [navigate])
 
-  const selectUser = (user: UserRecord) => {
+  // Busca info da IA configurada
+  useEffect(() => {
+    api.get('/settings/ai')
+      .then(r => setAiInfo(r.data))
+      .catch(() => setAiInfo(null))
+  }, [])
+
+  const selectUser = async (user: UserRecord) => {
     setUser(String(user.id), user.name)
     if (user.estrategia) setStrategy(user.estrategia)
+    // Busca portfolio ativo para que o store tenha os dados corretos
+    try {
+      const rl = await api.get('/portfolio/listar', { headers: { 'x-user-id': String(user.id) } })
+      setPortfolios(rl.data)
+      const ativo = rl.data.find((p: any) => p.ativo) ?? rl.data[0]
+      if (ativo) {
+        setPortfolioAtivo(ativo)
+        setPortfolioId(String(ativo.id))
+      }
+    } catch { /* silently proceed — portfolio will be loaded later */ }
     navigate('/briefing')
   }
 
@@ -173,6 +191,35 @@ export default function UserPickerPage() {
           </AnimatePresence>
         )}
       </div>
+
+      {/* AI provider badge — bottom of screen */}
+      {aiInfo && (
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.3 }}
+          className="fixed bottom-6 left-1/2 -translate-x-1/2"
+        >
+          <button
+            onClick={() => navigate('/configurar-ia')}
+            className="flex items-center gap-2.5 px-4 py-2.5 rounded-full transition-all hover:scale-[1.02]"
+            style={{
+              background: 'rgba(15,23,42,0.85)',
+              border: `1px solid ${aiInfo.configured ? 'rgba(170,0,255,0.25)' : 'rgba(255,82,82,0.3)'}`,
+              backdropFilter: 'blur(12px)',
+            }}
+            title="Trocar provedor de IA"
+          >
+            <BrainCircuit size={14} style={{ color: aiInfo.configured ? '#AA00FF' : '#FF5252' }} />
+            <span className="text-[11px] font-mono" style={{ color: aiInfo.configured ? '#c4b5fd' : '#fca5a5' }}>
+              {aiInfo.configured
+                ? `${aiInfo.provider.toUpperCase()} · ${aiInfo.model}`
+                : 'IA não configurada'}
+            </span>
+            <Settings size={12} style={{ color: '#475569' }} />
+          </button>
+        </motion.div>
+      )}
     </div>
   )
 }

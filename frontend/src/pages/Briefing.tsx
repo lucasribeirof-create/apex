@@ -120,6 +120,7 @@ export default function BriefingPage() {
       const decoder = new TextDecoder()
       let buffer = ''
       const t0 = Date.now()
+      let receivedDone = false
 
       while (true) {
         const { done, value } = await reader.read()
@@ -132,21 +133,30 @@ export default function BriefingPage() {
         for (const part of parts) {
           const line = part.trim()
           if (!line.startsWith('data: ')) continue
+          let data: any
           try {
-            const data = JSON.parse(line.slice(6))
-            if (data.chunk !== undefined) {
-              setStreamedText(prev => prev + data.chunk)
-            }
-            if (data.done) {
-              if (data.briefing) setBriefing(data.briefing)
-              setElapsed((Date.now() - t0) / 1000)
-              setStreamedText('')
-            }
-            if (data.error) throw new Error(data.error)
-          } catch (parseErr) {
-            // ignora linha malformada
+            data = JSON.parse(line.slice(6))
+          } catch {
+            continue // ignora linha malformada
+          }
+          if (data.chunk !== undefined) {
+            setStreamedText(prev => prev + data.chunk)
+          }
+          if (data.done) {
+            receivedDone = true
+            if (data.briefing) setBriefing(data.briefing)
+            setElapsed((Date.now() - t0) / 1000)
+            setStreamedText('')
+          }
+          if (data.error) {
+            throw new Error(data.error)
           }
         }
+      }
+
+      // Stream encerrou sem evento done — algo falhou silenciosamente
+      if (!receivedDone) {
+        throw new Error('A geração foi interrompida. Tente novamente.')
       }
     } catch (e: any) {
       setError(e.message || 'Erro ao gerar briefing')
@@ -330,9 +340,9 @@ export default function BriefingPage() {
               <span className="text-xs font-mono" style={{ color: '#00E676' }}>gerando ao vivo</span>
             </div>
           </div>
-          {/* Texto streamado — sem markdown (pode estar incompleto) */}
+          {/* Texto streamado — com markdown igual ao final */}
           <div ref={streamedRef} className="text-sm leading-relaxed overflow-y-auto" style={{ color: '#f1f5f9', maxHeight: '60vh' }}>
-            {streamedText}
+            {renderText(streamedText)}
             {/* cursor piscante */}
             <span className="inline-block w-0.5 h-4 ml-0.5 align-middle animate-pulse" style={{ background: '#00E676' }} />
           </div>
@@ -362,7 +372,12 @@ export default function BriefingPage() {
                 </span>
               )}
               <span className="text-xs font-mono" style={{ color: '#64748b' }}>
-                {briefing.data ? new Date(briefing.data).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}
+                {briefing.data ? (() => {
+                  const d = new Date(briefing.data)
+                  // Se a string ISO não tem timezone info, assume UTC
+                  const utc = briefing.data.endsWith('Z') || briefing.data.includes('+') ? d : new Date(briefing.data + 'Z')
+                  return utc.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })
+                })() : ''}
               </span>
             </div>
           </div>

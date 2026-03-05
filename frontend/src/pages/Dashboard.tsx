@@ -5,15 +5,15 @@ import api from '@/services/api'
 import { useStore } from '@/store/useStore'
 
 const MODULE_LABELS: Record<string, { label: string; color: string }> = {
-  etfs:       { label: 'ETFs',       color: '#00E676' },
-  fiis:       { label: 'FIIs',       color: '#00BFA5' },
-  renda_fixa: { label: 'Renda Fixa', color: '#1DE9B6' },
-  momentum:   { label: 'Momentum',   color: '#64FFDA' },
-  wheel:      { label: 'Wheel',      color: '#00B0FF' },
-  alpha:      { label: 'Alpha',      color: '#AA00FF' },
-  dividendos: { label: 'Dividendos', color: '#FFD740' },
-  teses:      { label: 'Teses',      color: '#FF6D00' },
-  caixa:      { label: 'Caixa',      color: '#475569' },
+  etfs:       { label: 'ETFs',                        color: '#00E676' },
+  fiis:       { label: 'FIIs',                        color: '#00BFA5' },
+  renda_fixa: { label: 'Renda Fixa',                  color: '#1DE9B6' },
+  momentum:   { label: 'Momentum · Trade Técnico',   color: '#64FFDA' },
+  wheel:      { label: 'Wheel · Opções',            color: '#00B0FF' },
+  alpha:      { label: 'Alpha · Valor com Stop',      color: '#AA00FF' },
+  dividendos: { label: 'Dividendos',                  color: '#FFD740' },
+  teses:      { label: 'Teses · Convicção DCA',     color: '#FF6D00' },
+  caixa:      { label: 'Caixa',                       color: '#475569' },
 }
 
 const REGIME_COLORS: Record<string, string> = {
@@ -227,13 +227,21 @@ export default function DashboardPage() {
         >
           <h3 className="text-sm font-medium mb-5" style={{ color: '#94a3b8' }}>ALOCAÇÃO</h3>
           <div className="space-y-3">
-            {allocationData.map((item) => {
+            {allocationData.length === 0 ? (
+              <div className="text-center py-6">
+                <p className="text-xs" style={{ color: '#475569' }}>Nenhuma alocação definida.</p>
+                <p className="text-xs mt-1" style={{ color: '#334155' }}>Monte ou rebalanceie sua carteira para visualizar.</p>
+              </div>
+            ) : allocationData.map((item) => {
               const dev = getDeviation(item.target, item.current)
               const barMax = Math.max(...allocationData.map(a => Math.max(a.current, a.target)), 5)
               return (
                 <div key={item.module}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs" style={{ color: '#94a3b8' }}>{item.module}</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs" style={{ color: '#94a3b8' }}>{item.module}</span>
+                      <span className="text-[10px] font-mono" style={{ color: '#475569' }}>alvo {item.target}%</span>
+                    </div>
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-mono" style={{ color: '#f1f5f9' }}>{item.current}%</span>
                       <span
@@ -244,8 +252,18 @@ export default function DashboardPage() {
                       </span>
                     </div>
                   </div>
-                  <div className="allocation-bar">
+                  <div className="allocation-bar relative">
                     <div className="allocation-fill" style={{ width: `${Math.min((item.current / barMax) * 100, 100)}%`, background: item.color }} />
+                    {/* Target marker */}
+                    <div
+                      className="absolute top-0 h-full"
+                      style={{
+                        left: `${Math.min((item.target / barMax) * 100, 100)}%`,
+                        width: '1.5px',
+                        background: '#f1f5f9',
+                        opacity: 0.4,
+                      }}
+                    />
                   </div>
                 </div>
               )

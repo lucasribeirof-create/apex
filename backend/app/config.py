@@ -7,10 +7,12 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Carrega .env da raiz do projeto (não do CWD, que pode ser backend/)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+load_dotenv(_PROJECT_ROOT / ".env")
 
 # ─── Diretórios ───────────────────────────────────────────────────────────────
-BASE_DIR = Path(__file__).resolve().parent.parent.parent  # raiz do projeto
+BASE_DIR = _PROJECT_ROOT  # raiz do projeto
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -22,7 +24,7 @@ DATABASE_URL = _db_url if _db_url else f"sqlite:///{DATA_DIR}/apex.db"
 
 # ─── Anthropic (Claude) ───────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
 
 # ─── BRAPI (cotações brasileiras) ─────────────────────────────────────────────
 BRAPI_TOKEN = os.getenv("BRAPI_TOKEN", "")

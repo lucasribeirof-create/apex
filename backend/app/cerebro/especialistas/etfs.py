@@ -97,18 +97,17 @@ _PERFIL_ALOCACAO = {
 
 
 def _fetch_preco(ticker: str) -> Optional[float]:
-    # Tenta prefetch primeiro
     p = _pf.get_preco(ticker)
     if p is not None:
         return p
-    # Fallback direto
     try:
         t = yf.Ticker(ticker + ".SA")
         hist = t.history(period="5d", auto_adjust=True)
         if not hist.empty:
             return float(hist["Close"].iloc[-1])
-    except Exception:
-        pass
+    except Exception as e:
+        from app.logger import logger
+        logger.warning("etfs: falha ao buscar preco %s via yfinance: %s", ticker, e)
     return None
 
 

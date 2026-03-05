@@ -18,8 +18,8 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
     """Dados completos do dashboard — chamado ao abrir o app."""
     user = (db.query(User).filter(User.id == user_id).first() if user_id
             else db.query(User).first())
-    if not user or not user.onboarding_completo:
-        raise HTTPException(status_code=400, detail="Onboarding não concluído")
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
 
     portfolio = get_portfolio_ativo(user, db)
     if not portfolio:
@@ -50,13 +50,35 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
     patrimonio_atual = 0.0
     posicoes_data = []
     for p in posicoes:
-        cotacao = cotacoes.get(p.ticker, {})
-        preco_atual = cotacao.get("regularMarketPrice", p.preco_atual or p.preco_medio)
-        valor_atual = preco_atual * p.quantidade
-        pl_reais = valor_atual - p.valor_investido
-        pl_pct = (pl_reais / p.valor_investido * 100) if p.valor_investido > 0 else 0
+        # CAIXA: preço fixo 1.0, valor = quantidade — nunca buscar cotação
+        if p.ticker == "CAIXA":
+            preco_atual = 1.0
+            valor_atual = p.quantidade
+            pl_reais = 0.0
+            pl_pct = 0.0
+            # Corrige se estiver corrompido no banco
+            if p.preco_atual != 1.0 or p.valor_atual != p.quantidade:
+                p.preco_atual = 1.0
+                p.valor_atual = p.quantidade
+                p.valor_investido = p.quantidade
+                p.pl_reais = 0.0
+                p.pl_percentual = 0.0
+        else:
+            cotacao = cotacoes.get(p.ticker, {})
+            preco_atual = cotacao.get("regularMarketPrice", p.preco_atual or p.preco_medio)
+            valor_atual = preco_atual * p.quantidade
+            pl_reais = valor_atual - p.valor_investido
+            pl_pct = (pl_reais / p.valor_investido * 100) if p.valor_investido > 0 else 0
+
+            # Atualizar posição no banco com preço live
+            if preco_atual != p.preco_atual:
+                p.preco_atual = preco_atual
+                p.valor_atual = valor_atual
+                p.pl_reais = pl_reais
+                p.pl_percentual = round(pl_pct, 2)
 
         patrimonio_atual += valor_atual
+
         posicoes_data.append({
             "id": p.id,
             "ticker": p.ticker,
@@ -72,6 +94,23 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
             "stop_loss": p.stop_loss,
             "apex_score": p.apex_score,
         })
+
+    # ── Inicializar referências patrimoniais se nunca foram setadas ────────
+    _ref_changed = False
+    if (not portfolio.patrimonio_ontem or portfolio.patrimonio_ontem == 0) and patrimonio_atual > 0:
+        portfolio.patrimonio_ontem = patrimonio_atual
+        _ref_changed = True
+    if (not portfolio.patrimonio_mes_inicio or portfolio.patrimonio_mes_inicio == 0) and patrimonio_atual > 0:
+        portfolio.patrimonio_mes_inicio = patrimonio_atual
+        _ref_changed = True
+    if (not portfolio.patrimonio_inicio or portfolio.patrimonio_inicio == 0) and patrimonio_atual > 0:
+        portfolio.patrimonio_inicio = patrimonio_atual
+        _ref_changed = True
+    if patrimonio_atual > 0:
+        portfolio.patrimonio_total = patrimonio_atual
+        _ref_changed = True
+    if _ref_changed:
+        db.commit()
 
     # Alocação atual por módulo
     alocacao_atual = _calcular_alocacao_atual(posicoes_data, patrimonio_atual)
