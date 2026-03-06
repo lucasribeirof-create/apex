@@ -62,7 +62,7 @@ export default function BriefingPage() {
     'Escrevendo análise do Gestor APEX...',
   ]
 
-  // Ao montar: verifica silenciosamente se já existe briefing hoje
+  // Ao montar: verifica se existe briefing hoje; se não, gera automaticamente
   useEffect(() => {
     const checkExisting = async () => {
       try {
@@ -72,11 +72,12 @@ export default function BriefingPage() {
         ])
         setBriefing(briefingRes.data)
         if (macroRes.data) setMacro(macroRes.data)
-      } catch {
-        // 404 = nenhum briefing hoje — mostra botão de gerar
-        api.get('/market/macro').catch(() => null).then((r: any) => { if (r?.data) setMacro(r.data) })
-      } finally {
         setInitialCheck(false)
+      } catch {
+        // 404 = nenhum briefing hoje — inicia geração automática
+        api.get('/market/macro').catch(() => null).then((r: any) => { if (r?.data) setMacro(r.data) })
+        setInitialCheck(false)
+        streamBriefing(false)
       }
     }
     checkExisting()
@@ -120,6 +121,7 @@ export default function BriefingPage() {
       const decoder = new TextDecoder()
       let buffer = ''
       const t0 = Date.now()
+      let briefingFromStream: BriefingData | null = null
 
       while (true) {
         const { done, value } = await reader.read()
@@ -138,7 +140,10 @@ export default function BriefingPage() {
               setStreamedText(prev => prev + data.chunk)
             }
             if (data.done) {
-              if (data.briefing) setBriefing(data.briefing)
+              if (data.briefing) {
+                briefingFromStream = data.briefing
+                setBriefing(data.briefing)
+              }
               setElapsed((Date.now() - t0) / 1000)
               setStreamedText('')
             }
@@ -147,6 +152,15 @@ export default function BriefingPage() {
             // ignora linha malformada
           }
         }
+      }
+
+      // Garante que o briefing está setado mesmo que o evento done não tenha
+      // incluído o objeto (ex: SSE truncado ou erro de parse)
+      if (!briefingFromStream) {
+        try {
+          const res = await api.get('/briefing/hoje')
+          setBriefing(res.data)
+        } catch { /* se falhar, mostra a tela de gerar novamente */ }
       }
     } catch (e: any) {
       setError(e.message || 'Erro ao gerar briefing')
@@ -362,7 +376,12 @@ export default function BriefingPage() {
                 </span>
               )}
               <span className="text-xs font-mono" style={{ color: '#64748b' }}>
-                {briefing.data ? new Date(briefing.data).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}
+                {briefing.data ? (() => {
+                  // Força parse como UTC caso o backend não envie timezone explícito
+                  const s = briefing.data
+                  const d = new Date(s.endsWith('Z') || s.includes('+') || s.includes('-', 10) ? s : s + 'Z')
+                  return d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+                })() : ''}
               </span>
             </div>
           </div>

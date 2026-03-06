@@ -43,6 +43,12 @@ async def gerar_briefing_portfolio(portfolio_id: int, db: Session) -> str | None
     # ── Briefing 2.0: enriquecer com narrativa macro, status de teses e ações prioritárias ──
     user_prompt = "Gere o morning call de hoje."
 
+    # Calendário econômico real (ForexFactory + Copom) — injetar antes da narrativa
+    if ctx.macro_context and hasattr(ctx.macro_context, "calendario_eventos") and ctx.macro_context.calendario_eventos:
+        from app.data.calendar_client import formatar_para_prompt
+        cal_txt = formatar_para_prompt(ctx.macro_context.calendario_eventos)
+        user_prompt += f"\n\nCALENDÁRIO ECONÔMICO (DADOS REAIS — HOJE + 7 DIAS):\n{cal_txt}\nUSE EXCLUSIVAMENTE estes dados para a seção de calendário. NÃO invente datas."
+
     # Narrativa macro do dia
     if ctx.narrativa_macro:
         user_prompt += f"\n\nNARRATIVA MACRO DO DIA:\n{ctx.narrativa_macro[:1500]}"
@@ -135,6 +141,12 @@ async def gerar_briefing_portfolio_stream(portfolio_id: int, db: Session):
 
     # ── Briefing 2.0 stream: mesma lógica de enriquecimento ──
     user_prompt = "Gere o morning call de hoje."
+
+    # Calendário econômico real (ForexFactory + Copom)
+    if ctx.macro_context and hasattr(ctx.macro_context, "calendario_eventos") and ctx.macro_context.calendario_eventos:
+        from app.data.calendar_client import formatar_para_prompt
+        cal_txt = formatar_para_prompt(ctx.macro_context.calendario_eventos)
+        user_prompt += f"\n\nCALENDÁRIO ECONÔMICO (DADOS REAIS — HOJE + 7 DIAS):\n{cal_txt}\nUSE EXCLUSIVAMENTE estes dados para a seção de calendário. NÃO invente datas."
 
     if ctx.narrativa_macro:
         user_prompt += f"\n\nNARRATIVA MACRO DO DIA:\n{ctx.narrativa_macro[:1500]}"

@@ -55,6 +55,13 @@ class Position(Base):
     taxa = Column(Float, nullable=True)
     duration = Column(Float, nullable=True)
 
+    # Análise AI persistida
+    analise_ia = Column(Text, nullable=True)           # última análise gerada pela IA
+    analise_ia_at = Column(DateTime, nullable=True)    # quando a análise foi gerada
+
+    # Justificativa de entrada (gerada pelo APEX ao adicionar)
+    justificativa_entrada = Column(Text, nullable=True)
+
     # Status
     ativa = Column(Boolean, default=True)
     data_abertura = Column(DateTime, nullable=True)   # data da primeira compra / entrada

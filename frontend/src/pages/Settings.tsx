@@ -6,7 +6,7 @@ import { useNavigate } from 'react-router-dom'
 import api from '@/services/api'
 
 export default function SettingsPage() {
-  const { userId, userName, reset } = useStore()
+  const { userId, userName, portfolioAtivo, setPortfolioAtivo, setPortfolios, reset } = useStore()
   const navigate = useNavigate()
 
   // AI provider info
@@ -32,6 +32,45 @@ export default function SettingsPage() {
       setTestResult({ ok: false, msg: e?.response?.data?.detail || 'Erro ao testar.' })
     } finally {
       setTestingAI(false)
+    }
+  }
+
+  // Nome da carteira (edição) — usa Portfolio.nome, não User.name
+  const nomeCarteiraAtual = portfolioAtivo?.nome ?? ''
+  const [nameEdit, setNameEdit] = useState(nomeCarteiraAtual)
+  const [nameSaving, setNameSaving] = useState(false)
+  const [nameError, setNameError] = useState('')
+  const [nameSuccess, setNameSuccess] = useState(false)
+  useEffect(() => { setNameEdit(portfolioAtivo?.nome ?? '') }, [portfolioAtivo?.nome])
+
+  const handleSaveName = async () => {
+    const trimmed = nameEdit.trim()
+    if (!trimmed) {
+      setNameError('Nome da carteira não pode ser vazio.')
+      return
+    }
+    if (!portfolioAtivo?.id) {
+      setNameError('Nenhuma carteira ativa.')
+      return
+    }
+    if (trimmed === nomeCarteiraAtual) {
+      setNameError('')
+      return
+    }
+    setNameSaving(true)
+    setNameError('')
+    setNameSuccess(false)
+    try {
+      const r = await api.post(`/portfolio/${portfolioAtivo.id}/atualizar-nome`, { nome: trimmed })
+      const novoNome = r.data.nome ?? trimmed
+      setPortfolioAtivo(portfolioAtivo ? { ...portfolioAtivo, nome: novoNome } : null)
+      setPortfolios(useStore.getState().portfolios.map(p => p.id === portfolioAtivo.id ? { ...p, nome: novoNome } : p))
+      setNameSuccess(true)
+      setTimeout(() => setNameSuccess(false), 2500)
+    } catch (e: any) {
+      setNameError(e?.response?.data?.detail ?? 'Erro ao atualizar nome. Tente novamente.')
+    } finally {
+      setNameSaving(false)
     }
   }
 
@@ -105,12 +144,48 @@ export default function SettingsPage() {
         <h1 className="text-2xl font-bold" style={{ color: '#f1f5f9' }}>Configurações</h1>
       </div>
 
-      {/* Current portfolio info */}
+      {/* Usuário e carteira ativa */}
+      <div className="apex-card p-5 mb-6">
+        <p className="text-xs font-mono uppercase tracking-wider mb-3" style={{ color: '#64748b' }}>
+          Usuário e carteira ativa
+        </p>
+        <p className="text-sm mb-1" style={{ color: '#94a3b8' }}>
+          <span style={{ color: '#64748b' }}>Nome do usuário:</span> <span style={{ color: '#f1f5f9', fontWeight: 500 }}>{userName ?? '—'}</span>
+        </p>
+        <p className="text-sm mb-0" style={{ color: '#94a3b8' }}>
+          <span style={{ color: '#64748b' }}>Carteira ativa:</span> <span style={{ color: '#f1f5f9', fontWeight: 500 }}>{portfolioAtivo?.nome ?? '—'}</span> <span className="font-mono text-xs" style={{ color: '#64748b' }}>· ID #{portfolioAtivo?.id ?? '—'}</span>
+        </p>
+      </div>
+
+      {/* Nome da carteira (editar) — nome do portfólio, não do usuário */}
       <div className="apex-card p-5 mb-8">
         <p className="text-xs font-mono uppercase tracking-wider mb-3" style={{ color: '#64748b' }}>
-          Carteira ativa
+          Nome da carteira
         </p>
-        <p className="text-base font-semibold" style={{ color: '#f1f5f9' }}>{userName} <span style={{ color: '#475569', fontWeight: 400 }}>·</span> <span className="font-mono text-sm" style={{ color: '#64748b' }}>ID #{userId}</span></p>
+        <p className="text-sm mb-3" style={{ color: '#94a3b8' }}>
+          Esse é o nome desta carteira/portfólio (ex.: &quot;Carteira Real&quot;, &quot;Aposentadoria&quot;). Aparece na lista ao selecionar carteira. O nome do usuário ({userName ?? 'você'}) não é alterado aqui.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            value={nameEdit}
+            onChange={(e) => { setNameEdit(e.target.value); setNameError('') }}
+            onKeyDown={(e) => e.key === 'Enter' && handleSaveName()}
+            placeholder="Nome da carteira"
+            className="flex-1 min-w-[180px] px-3 py-2 rounded-lg text-sm bg-slate-900/80 border border-slate-600 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-green-500/50"
+            disabled={nameSaving}
+          />
+          <button
+            onClick={handleSaveName}
+            disabled={nameSaving || !portfolioAtivo?.id || (nameEdit.trim() === nomeCarteiraAtual)}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{ background: (nameSaving || nameEdit.trim() !== nomeCarteiraAtual) ? 'rgba(0,230,118,0.15)' : 'rgba(0,230,118,0.2)', color: '#00E676', border: '1px solid rgba(0,230,118,0.35)' }}
+          >
+            {nameSaving ? <Loader2 size={14} className="animate-spin" /> : nameSuccess ? <CheckCircle size={14} /> : null}
+            {nameSaving ? 'Salvando...' : nameSuccess ? 'Salvo' : 'Salvar'}
+          </button>
+        </div>
+        {nameError && <p className="text-sm mt-2" style={{ color: '#ef4444' }}>{nameError}</p>}
       </div>
 
       {/* AI provider */}

@@ -50,6 +50,9 @@ class MacroContext:
     sp500_mm200: Optional[float] = None        # S&P 500 MM200
     ouro: Optional[float] = None               # Ouro (USD/oz)
 
+    # Calendário econômico (dados reais via Finnhub/BCB)
+    calendario_eventos: list = field(default_factory=list)
+
     # Brasil
     selic: Optional[float] = None              # Meta Selic (% a.a.)
     ipca_12m: Optional[float] = None           # IPCA acumulado 12 meses (%)
@@ -120,6 +123,12 @@ class MacroContext:
             partes.append("\n=== ALERTAS MACRO ===")
             for flag in self.flags:
                 partes.append(f"⚠ {flag}")
+
+        if self.calendario_eventos:
+            partes.append("\n=== CALENDÁRIO ECONÔMICO (DADOS REAIS — HOJE + 7 DIAS) ===")
+            partes.append("ATENÇÃO: Estes eventos foram obtidos de API em tempo real. Use EXCLUSIVAMENTE estes dados para a seção de calendário. NÃO use seu conhecimento de treinamento para datas.")
+            from app.data.calendar_client import formatar_para_prompt
+            partes.append(formatar_para_prompt(self.calendario_eventos))
 
         return "\n".join(partes)
 
@@ -279,6 +288,18 @@ def _calcular_flags(ctx: MacroContext) -> list[str]:
     return flags
 
 
+# ─── Coleta de calendário econômico ────────────────────────────────────────
+
+async def _coletar_calendario() -> list:
+    """Busca eventos econômicos reais via calendar_client (Finnhub + BCB)."""
+    try:
+        from app.data.calendar_client import get_eventos_semana
+        return await get_eventos_semana()
+    except Exception as e:
+        logger.warning("MacroEngine._coletar_calendario falhou: %s", e)
+        return []
+
+
 # ─── Entry point público ────────────────────────────────────────────────────
 
 async def montar_macro() -> MacroContext:
@@ -292,13 +313,14 @@ async def montar_macro() -> MacroContext:
         return cached
 
     try:
-        global_data, brasil_data = await asyncio.gather(
+        global_data, brasil_data, calendario = await asyncio.gather(
             _coletar_global(),
             _coletar_brasil(),
+            _coletar_calendario(),
         )
     except Exception as e:
         logger.error("MacroEngine falhou: %s", e)
-        global_data, brasil_data = {}, {}
+        global_data, brasil_data, calendario = {}, {}, []
 
     ctx = MacroContext(
         treasury_10y=global_data.get("treasury_10y"),
@@ -321,6 +343,7 @@ async def montar_macro() -> MacroContext:
         dolar_var_pct=brasil_data.get("dolar_var_pct"),
         ibov=brasil_data.get("ibov"),
         ibov_var_pct=brasil_data.get("ibov_var_pct"),
+        calendario_eventos=calendario,
         atualizado_em=datetime.now(timezone.utc).isoformat(),
     )
     ctx.flags = _calcular_flags(ctx)

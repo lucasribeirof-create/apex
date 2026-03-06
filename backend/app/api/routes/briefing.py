@@ -20,15 +20,16 @@ async def get_briefing_hoje(force: bool = False, check_only: bool = False, user_
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfólio não encontrado")
 
-    from datetime import datetime, date
-    hoje = date.today()
+    from datetime import datetime, timezone as _tz
+    hoje_utc = datetime.now(_tz.utc).date()
+    inicio_dia_utc = datetime.combine(hoje_utc, datetime.min.time())
 
     briefing = None
     if not force:
         briefing = (
             db.query(Briefing)
             .filter(Briefing.portfolio_id == portfolio.id)
-            .filter(Briefing.data >= datetime.combine(hoje, datetime.min.time()))
+            .filter(Briefing.data >= inicio_dia_utc)
             .order_by(Briefing.created_at.desc())
             .first()
         )
@@ -113,15 +114,16 @@ async def stream_briefing_hoje(
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfólio não encontrado")
 
-    from datetime import datetime, date
-    hoje = date.today()
+    from datetime import datetime, timezone as _tz
+    hoje_utc = datetime.now(_tz.utc).date()
+    inicio_dia_utc = datetime.combine(hoje_utc, datetime.min.time())
 
     # Se já existe briefing hoje e não forçamos — retorna o existente instantaneamente
     if not force:
         existing = (
             db.query(Briefing)
             .filter(Briefing.portfolio_id == portfolio.id)
-            .filter(Briefing.data >= datetime.combine(hoje, datetime.min.time()))
+            .filter(Briefing.data >= inicio_dia_utc)
             .order_by(Briefing.created_at.desc())
             .first()
         )

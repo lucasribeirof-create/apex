@@ -1,14 +1,14 @@
 """Rota de posições — CRUD de posições do portfólio."""
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_user_id, get_portfolio_ativo
 from app.models import User, Portfolio, Position
-from app.data import get_quotes
+from app.data import get_quotes, get_fundamentals
 from app.data.cache import cache as _portfolio_cache
 from app.data.tecnico import get_dados_tecnicos
 
@@ -26,6 +26,7 @@ class NovaPosicao(BaseModel):
     quantidade: float
     preco_medio: float
     stop_loss: float | None = None
+    data_entrada: str | None = None  # ISO date string, ex: "2025-06-15"
     # Opções
     strike: float | None = None
     vencimento: str | None = None
@@ -68,6 +69,17 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
         Position.ativa == True,
     ).all()
 
+    # Limpar análises IA de dias anteriores
+    hoje = date.today()
+    analises_limpas = False
+    for p in posicoes:
+        if p.analise_ia_at and p.analise_ia_at.date() < hoje:
+            p.analise_ia = None
+            p.analise_ia_at = None
+            analises_limpas = True
+    if analises_limpas:
+        db.commit()
+
     tickers = [p.ticker for p in posicoes if p.tipo in ("ACAO", "FII", "ETF", "BDR")]
     cotacoes = await get_quotes(tickers) if tickers else {}
 
@@ -94,10 +106,18 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
             "pl_percentual": round(pl_pct, 2),
             "stop_loss": p.stop_loss,
             "alvo_1": p.alvo_1,
+            "alvo_2": p.alvo_2,
             "apex_score": p.apex_score,
             "data_entrada": p.data_entrada,
+            "data_abertura": p.data_abertura,
+            "mercado": p.mercado,
+            "moeda": p.moeda,
             # Tese
             "tese": p.tese,
+            # Análise AI
+            "analise_ia": p.analise_ia,
+            "analise_ia_at": p.analise_ia_at.isoformat() if p.analise_ia_at else None,
+            "justificativa_entrada": p.justificativa_entrada,
             # Wheel
             "strike": p.strike,
             "vencimento": p.vencimento,
@@ -132,6 +152,14 @@ def adicionar_posicao(body: NovaPosicao, user_id: Optional[int] = Depends(get_us
     valor_investido = body.quantidade * body.preco_medio
     vencimento = datetime.fromisoformat(body.vencimento) if body.vencimento else None
 
+    # Data de entrada: usa a fornecida pelo usuário ou default=agora
+    data_entrada = None
+    if body.data_entrada:
+        try:
+            data_entrada = datetime.fromisoformat(body.data_entrada)
+        except Exception:
+            data_entrada = None
+
     posicao = Position(
         portfolio_id=portfolio.id,
         ticker=body.ticker.upper(),
@@ -149,6 +177,9 @@ def adicionar_posicao(body: NovaPosicao, user_id: Optional[int] = Depends(get_us
         indexador=body.indexador,
         taxa=body.taxa,
     )
+    if data_entrada:
+        posicao.data_entrada = data_entrada
+        posicao.data_abertura = data_entrada
     db.add(posicao)
     db.commit()
     db.refresh(posicao)
@@ -184,19 +215,53 @@ def encerrar_posicao(posicao_id: int, motivo: str = "Encerrado manualmente", use
     return {"mensagem": f"Posição {posicao.ticker} encerrada."}
 
 
+@router.get("/posicoes/{posicao_id}/fundamentals")
+async def fundamentals_posicao(posicao_id: int, user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Retorna dados fundamentalistas (P/L, P/VP, DY, ROE…) de uma posição."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    posicao = db.query(Position).filter(
+        Position.id == posicao_id,
+        Position.portfolio_id == portfolio.id,
+    ).first()
+    if not posicao:
+        raise HTTPException(status_code=404, detail="Posição não encontrada")
+
+    tipos_com_fundamentos = {"ACAO", "FII", "ETF", "BDR"}
+    if posicao.tipo not in tipos_com_fundamentos:
+        return {"dados": None, "mensagem": f"Dados fundamentalistas não se aplicam a {posicao.tipo}"}
+
+    dados = await get_fundamentals(posicao.ticker)
+    if not dados:
+        return {"dados": None, "mensagem": "Dados fundamentalistas indisponíveis para este ticker"}
+
+    return {"dados": dados, "ticker": posicao.ticker}
+
+
 class AtualizarPosicao(BaseModel):
     tese: str | None = None           # Nova tese de investimento
     stop_loss: float | None = None    # Novo stop
     alvo_1: float | None = None       # Novo alvo 1
     alvo_2: float | None = None       # Novo alvo 2
     nome: str | None = None           # Renomear
+    quantidade: float | None = None   # Editar quantidade
+    preco_medio: float | None = None  # Editar preço médio
+    modulo: str | None = None         # Trocar módulo
+    analise_ia: str | None = None     # Salvar análise AI
+    data_abertura: str | None = None  # Editar data de abertura (ISO)
 
 
 @router.patch("/posicoes/{posicao_id}")
 def atualizar_posicao(posicao_id: int, body: AtualizarPosicao, user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
     """
-    Atualiza campos editáveis de uma posição: tese, stop, alvo.
-    Usado após conversa com a IA — salva o consenso alcançado.
+    Atualiza campos editáveis de uma posição: tese, stop, alvo, quantidade, PM, módulo, análise IA.
     """
     user = (db.query(User).filter(User.id == user_id).first() if user_id
             else db.query(User).first())
@@ -218,16 +283,56 @@ def atualizar_posicao(posicao_id: int, body: AtualizarPosicao, user_id: Optional
     if body.tese is not None:
         posicao.tese = body.tese.strip() or None
     if body.stop_loss is not None:
-        posicao.stop_loss = body.stop_loss
+        posicao.stop_loss = body.stop_loss if body.stop_loss != 0 else None
     if body.alvo_1 is not None:
-        posicao.alvo_1 = body.alvo_1
+        posicao.alvo_1 = body.alvo_1 if body.alvo_1 != 0 else None
     if body.alvo_2 is not None:
-        posicao.alvo_2 = body.alvo_2
+        posicao.alvo_2 = body.alvo_2 if body.alvo_2 != 0 else None
     if body.nome is not None:
         posicao.nome = body.nome.strip() or posicao.nome
+    if body.modulo is not None:
+        posicao.modulo = body.modulo
+    if body.data_abertura is not None:
+        try:
+            posicao.data_abertura = datetime.fromisoformat(body.data_abertura)
+            posicao.data_entrada = posicao.data_abertura
+        except (ValueError, TypeError):
+            pass
+    if body.analise_ia is not None:
+        posicao.analise_ia = body.analise_ia.strip() or None
+        posicao.analise_ia_at = datetime.now(timezone.utc)
+
+    # Recalcula P&L se quantidade ou preço médio mudaram
+    recalc = False
+    if body.quantidade is not None and body.quantidade > 0:
+        posicao.quantidade = body.quantidade
+        recalc = True
+    if body.preco_medio is not None and body.preco_medio > 0:
+        posicao.preco_medio = body.preco_medio
+        recalc = True
+    if recalc:
+        posicao.valor_investido = posicao.quantidade * posicao.preco_medio
+        preco_at = posicao.preco_atual or posicao.preco_medio
+        posicao.valor_atual = posicao.quantidade * preco_at
+        posicao.pl_reais = posicao.valor_atual - posicao.valor_investido
+        posicao.pl_percentual = (posicao.pl_reais / posicao.valor_investido * 100) if posicao.valor_investido > 0 else 0
 
     db.commit()
-    return {"mensagem": "Posição atualizada.", "ticker": posicao.ticker}
+    db.refresh(posicao)
+
+    return {
+        "mensagem": "Posição atualizada.",
+        "ticker": posicao.ticker,
+        "quantidade": posicao.quantidade,
+        "preco_medio": posicao.preco_medio,
+        "valor_investido": posicao.valor_investido,
+        "valor_atual": posicao.valor_atual,
+        "pl_reais": posicao.pl_reais,
+        "pl_percentual": posicao.pl_percentual,
+        "modulo": posicao.modulo,
+        "analise_ia": posicao.analise_ia,
+        "analise_ia_at": posicao.analise_ia_at.isoformat() if posicao.analise_ia_at else None,
+    }
 
 
 @router.post("/refresh-prices")
@@ -385,6 +490,54 @@ def listar_portfolios(user_id: Optional[int] = Depends(get_user_id), db: Session
         }
         for p in portfolios
     ]
+
+
+class AtualizarPortfolioNomeBody(BaseModel):
+    nome: str
+
+
+def _atualizar_nome_portfolio_impl(portfolio_id: int, body: AtualizarPortfolioNomeBody, user_id: Optional[int], db: Session):
+    """Lógica compartilhada para PATCH e POST."""
+    nome = (body.nome or "").strip()
+    if not nome:
+        raise HTTPException(status_code=400, detail="Nome da carteira não pode ser vazio.")
+    if len(nome) > 100:
+        raise HTTPException(status_code=400, detail="Nome deve ter no máximo 100 caracteres.")
+    user = (db.query(User).filter(User.id == user_id).first() if user_id else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+    portfolio = db.query(Portfolio).filter(
+        Portfolio.id == portfolio_id,
+        Portfolio.user_id == user.id,
+    ).first()
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+    portfolio.nome = nome
+    db.commit()
+    db.refresh(portfolio)
+    return {"ok": True, "nome": portfolio.nome}
+
+
+@router.patch("/{portfolio_id}/nome")
+def atualizar_nome_portfolio(
+    portfolio_id: int,
+    body: AtualizarPortfolioNomeBody,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db)
+):
+    """Atualiza o nome de um portfólio."""
+    return _atualizar_nome_portfolio_impl(portfolio_id, body, user_id, db)
+
+
+@router.post("/{portfolio_id}/atualizar-nome")
+def atualizar_nome_portfolio_post(
+    portfolio_id: int,
+    body: AtualizarPortfolioNomeBody,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db)
+):
+    """Atualiza o nome de um portfólio (alias POST para compatibilidade)."""
+    return _atualizar_nome_portfolio_impl(portfolio_id, body, user_id, db)
 
 
 @router.post("/ativar/{portfolio_id}")

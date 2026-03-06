@@ -175,11 +175,9 @@ Atenção especial: o portfólio tem FIIs. A curva de juros é o maior driver �
 Atenção especial: o portfólio tem exposição internacional (BDRs/exterior). S&P, Nasdaq e dólar impactam diretamente — sinalize se há pressão.''' if tem_internacional else ''}
 
 **4. CALENDÁRIO ECONÔMICO — HOJE E ESTA SEMANA**
-Liste os eventos que fazem preço esta semana. Use seu conhecimento do calendário típico de releases + o contexto da data atual.
-Prioridade de eventos BR: IPCA, IGP-M, PIB, Copom (decisão + ata), resultado primário, balança comercial, dados de emprego (CAGED, PNAD).
-Prioridade de eventos EUA/global: CPI, PCE, payroll (nonfarm), PMI, GDP, decisão do Fed (FOMC), minutes do Fed, falas de Powell, resultados de big techs (Apple, Nvidia, Meta, Google, Microsoft, Amazon).
-Formato: "**[DIA]** — [evento] → [o que o mercado espera e qual seria a surpresa que moveria o mercado]"
-Se não houver evento hoje, diga o que vem nos próximos dias.
+IMPORTANTE: O sistema forneceu acima uma seção "CALENDÁRIO ECONÔMICO (DADOS REAIS)" com eventos obtidos em tempo real de APIs externas. Use EXCLUSIVAMENTE esses dados. NÃO use seu conhecimento de treinamento para inferir datas de releases — essas informações podem estar desatualizadas.
+Para cada evento listado nos dados reais: indique a data, o evento, e o que o mercado espera (surpresa que moveria o mercado).
+Se nenhum dado de calendário foi fornecido, escreva apenas: "Nenhum evento de alto impacto identificado para hoje e esta semana."
 
 **5. ALERTA DE PORTFÓLIO** (omita esta seção completamente se não houver nada relevante)
 Mencione UMA posição específica do portfólio SOMENTE se houver um evento desta semana ou um movimento de mercado hoje que exige atenção imediata nessa posição — stop próximo, resultado corporativo da empresa, impacto direto de dado macro que sai hoje.

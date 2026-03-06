@@ -64,10 +64,11 @@ async def analisar_posicao(position_id: int, user_id: Optional[int] = Depends(ge
     moeda_str = "US$" if moeda == "USD" else "R$"
     modulo = (pos_db.modulo or "alpha").lower()
 
-    # Detecta se posição é recente (< 24h)
+    # Detecta se posição é recente (< 24h) — usa data_entrada real, não created_at
     pos_age_hours = None
-    if pos_db.created_at:
-        pos_age_hours = (datetime.utcnow() - pos_db.created_at).total_seconds() / 3600
+    ref_date = pos_db.data_entrada or pos_db.data_abertura or pos_db.created_at
+    if ref_date:
+        pos_age_hours = (datetime.utcnow() - ref_date).total_seconds() / 3600
     is_fresh = pos_age_hours is not None and pos_age_hours < 24
 
     async def gerador():

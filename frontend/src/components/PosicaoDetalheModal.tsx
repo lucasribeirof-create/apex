@@ -2,13 +2,14 @@
  * Modal de detalhes completos de uma posição.
  * Abas: Resumo | Transações | Análise AI
  */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   X, TrendingUp, TrendingDown, BrainCircuit, Plus, Trash2,
   CalendarDays, ArrowDownCircle, ArrowUpCircle, RotateCcw,
-  Target, ShieldAlert, BarChart2,
+  Target, ShieldAlert, BarChart2, Pencil, Save, RotateCw,
 } from 'lucide-react'
+import DOMPurify from 'dompurify'
 import api from '@/services/api'
 import AnaliseModal from '@/components/AnaliseModal'
 
@@ -36,6 +37,9 @@ export interface PositionDetalhe {
   tese?: string | null
   moeda?: string
   mercado?: string
+  analise_ia?: string | null
+  analise_ia_at?: string | null
+  justificativa_entrada?: string | null
 }
 
 interface Transacao {
@@ -98,6 +102,17 @@ function formatDate(iso?: string | null) {
 
 function formatMoney(v: number, decimals = 2) {
   return v.toLocaleString('pt-BR', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
+}
+
+function renderMarkdownSimple(text: string): string {
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/^### (.+)$/gm, '<span class="block text-green-400 font-bold text-sm mt-3">$1</span>')
+    .replace(/^## (.+)$/gm, '<span class="block text-green-400 font-bold mt-3">$1</span>')
+    .replace(/^# (.+)$/gm, '<span class="block text-green-300 font-bold text-base mt-3">$1</span>')
+    .replace(/^- (.+)$/gm, '<span class="block pl-3 before:content-[\'\u2022\'] before:text-green-400 before:mr-2">$1</span>')
+    .replace(/\n{2,}/g, '</p><p class="mt-2">')
+    .replace(/\n/g, '<br/>')
 }
 
 // ─── Nova Transação Form ──────────────────────────────────────────────────────
@@ -250,9 +265,72 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
   const [loadingTx, setLoadingTx] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [showAnalise, setShowAnalise] = useState(false)
+  const [fundamentos, setFundamentos] = useState<Record<string, any> | null>(null)
+  const [loadingFund, setLoadingFund] = useState(false)
+  const fundLoadedRef = useRef<number | null>(null)
+
+  // Edit mode
+  const [editMode, setEditMode] = useState(false)
+  const [editValues, setEditValues] = useState<Record<string, any>>({})
+  const [saving, setSaving] = useState(false)
+
+  const enterEditMode = useCallback(() => {
+    setEditValues({
+      quantidade: position.quantidade,
+      preco_medio: position.preco_medio,
+      stop_loss: position.stop_loss ?? '',
+      alvo_1: position.alvo_1 ?? '',
+      alvo_2: position.alvo_2 ?? '',
+      tese: position.tese ?? '',
+      modulo: position.modulo,
+      data_abertura: (position.data_abertura || position.data_entrada || '').slice(0, 10),
+    })
+    setEditMode(true)
+  }, [position])
+
+  const cancelEdit = useCallback(() => setEditMode(false), [])
+
+  const saveEdit = useCallback(async () => {
+    setSaving(true)
+    try {
+      await api.patch(`/portfolio/posicoes/${position.id}`, {
+        quantidade: parseFloat(editValues.quantidade) || undefined,
+        preco_medio: parseFloat(editValues.preco_medio) || undefined,
+        stop_loss: editValues.stop_loss ? parseFloat(editValues.stop_loss) : 0,
+        alvo_1: editValues.alvo_1 ? parseFloat(editValues.alvo_1) : 0,
+        alvo_2: editValues.alvo_2 ? parseFloat(editValues.alvo_2) : 0,
+        tese: editValues.tese || null,
+        modulo: editValues.modulo,
+        data_abertura: editValues.data_abertura || undefined,
+      })
+      setEditMode(false)
+      onUpdate?.()
+    } catch { /* silent */ }
+    setSaving(false)
+  }, [position.id, editValues, onUpdate])
 
   const plColor = position.pl_percentual > 0 ? '#00E676' : position.pl_percentual < 0 ? '#FF5252' : '#94a3b8'
   const plBg = position.pl_percentual > 0 ? 'rgba(0,230,118,0.08)' : position.pl_percentual < 0 ? 'rgba(255,82,82,0.08)' : 'rgba(148,163,184,0.08)'
+
+  // Reset fundamentos quando posição muda
+  useEffect(() => {
+    setFundamentos(null)
+    setLoadingFund(false)
+    fundLoadedRef.current = null
+  }, [position.id])
+
+  // Carrega dados fundamentalistas ao abrir Resumo (lazy, 1x por posição)
+  useEffect(() => {
+    const tiposFund = ['ACAO', 'FII', 'ETF', 'BDR']
+    if (tab === 'resumo' && tiposFund.includes(position.tipo) && fundLoadedRef.current !== position.id && !loadingFund) {
+      setLoadingFund(true)
+      fundLoadedRef.current = position.id
+      api.get(`/portfolio/posicoes/${position.id}/fundamentals`)
+        .then(res => setFundamentos(res.data?.dados ?? null))
+        .catch(() => setFundamentos(null))
+        .finally(() => setLoadingFund(false))
+    }
+  }, [tab, position.id])
 
   const loadTransacoes = async () => {
     setLoadingTx(true)
@@ -333,6 +411,37 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
               </div>
             </div>
             <div className="flex items-center gap-2">
+              {/* Edit toggle — only on resumo tab */}
+              {tab === 'resumo' && !editMode && (
+                <button
+                  onClick={enterEditMode}
+                  className="flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-all"
+                  style={{ color: '#64748b' }}
+                  onMouseEnter={e => { e.currentTarget.style.color = '#00E676'; e.currentTarget.style.background = 'rgba(0,230,118,0.08)' }}
+                  onMouseLeave={e => { e.currentTarget.style.color = '#64748b'; e.currentTarget.style.background = 'transparent' }}
+                >
+                  <Pencil size={12} /> Editar
+                </button>
+              )}
+              {tab === 'resumo' && editMode && (
+                <>
+                  <button
+                    onClick={cancelEdit}
+                    className="text-xs px-2 py-1 rounded-lg"
+                    style={{ color: '#64748b' }}
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={saveEdit}
+                    disabled={saving}
+                    className="flex items-center gap-1 text-xs px-3 py-1 rounded-lg font-medium"
+                    style={{ background: 'rgba(0,230,118,0.12)', color: '#00E676', border: '1px solid rgba(0,230,118,0.25)' }}
+                  >
+                    <Save size={12} /> {saving ? 'Salvando...' : 'Salvar'}
+                  </button>
+                </>
+              )}
               <span
                 className="text-sm font-mono font-bold px-2.5 py-1 rounded-lg flex items-center gap-1"
                 style={{ background: plBg, color: plColor }}
@@ -401,76 +510,225 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
 
                   {/* Detalhes da posição */}
                   <div className="rounded-xl overflow-hidden" style={{ border: '1px solid #1e293b' }}>
-                    {[
-                      { label: 'Módulo', value: MODULO_LABEL[position.modulo] || position.modulo },
-                      { label: 'Mercado', value: position.mercado || '—' },
-                      { label: 'Quantidade', value: position.quantidade.toLocaleString('pt-BR') },
-                      { label: 'Preço Médio', value: `R$ ${formatMoney(position.preco_medio)}` },
-                      { label: 'Preço Atual', value: `R$ ${formatMoney(position.preco_atual)}` },
-                      { label: 'Valor Investido', value: `R$ ${formatMoney(position.valor_investido, 0)}` },
-                      {
-                        label: 'Data de Abertura',
-                        value: position.data_abertura
-                          ? formatDate(position.data_abertura)
-                          : position.data_entrada
-                          ? formatDate(position.data_entrada)
-                          : '—',
-                        icon: <CalendarDays size={12} />,
-                      },
-                    ].map((row, i) => (
-                      <div
-                        key={i}
-                        className="flex items-center justify-between px-4 py-2.5 text-sm"
-                        style={{ borderTop: i > 0 ? '1px solid rgba(30,41,59,0.6)' : undefined }}
-                      >
-                        <span className="flex items-center gap-1.5" style={{ color: '#64748b' }}>
-                          {row.icon}
-                          {row.label}
+                    {/* Módulo */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm">
+                      <span style={{ color: '#64748b' }}>Módulo</span>
+                      {editMode ? (
+                        <select
+                          value={editValues.modulo || ''}
+                          onChange={e => setEditValues(v => ({ ...v, modulo: e.target.value }))}
+                          className="bg-transparent text-xs font-mono outline-none text-right px-2 py-1 rounded"
+                          style={{ border: '1px solid #334155', color: '#f1f5f9', maxWidth: 160 }}
+                        >
+                          {Object.entries(MODULO_LABEL).map(([k, v]) => (
+                            <option key={k} value={k} style={{ background: '#0a0e17' }}>{v}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>{MODULO_LABEL[position.modulo] || position.modulo}</span>
+                      )}
+                    </div>
+                    {/* Mercado (read-only) */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm" style={{ borderTop: '1px solid rgba(30,41,59,0.6)' }}>
+                      <span style={{ color: '#64748b' }}>Mercado</span>
+                      <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>{position.mercado || '—'}</span>
+                    </div>
+                    {/* Quantidade */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm" style={{ borderTop: '1px solid rgba(30,41,59,0.6)' }}>
+                      <span style={{ color: '#64748b' }}>Quantidade</span>
+                      {editMode ? (
+                        <input
+                          type="number" min={0} step="any"
+                          value={editValues.quantidade}
+                          onChange={e => setEditValues(v => ({ ...v, quantidade: e.target.value }))}
+                          className="bg-transparent text-xs font-mono outline-none text-right w-24 px-2 py-1 rounded"
+                          style={{ border: '1px solid #334155', color: '#f1f5f9' }}
+                        />
+                      ) : (
+                        <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>{position.quantidade.toLocaleString('pt-BR')}</span>
+                      )}
+                    </div>
+                    {/* Preço Médio */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm" style={{ borderTop: '1px solid rgba(30,41,59,0.6)' }}>
+                      <span style={{ color: '#64748b' }}>Preço Médio</span>
+                      {editMode ? (
+                        <input
+                          type="number" min={0} step="any"
+                          value={editValues.preco_medio}
+                          onChange={e => setEditValues(v => ({ ...v, preco_medio: e.target.value }))}
+                          className="bg-transparent text-xs font-mono outline-none text-right w-24 px-2 py-1 rounded"
+                          style={{ border: '1px solid #334155', color: '#f1f5f9' }}
+                        />
+                      ) : (
+                        <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>R$ {formatMoney(position.preco_medio)}</span>
+                      )}
+                    </div>
+                    {/* Preço Atual (read-only) */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm" style={{ borderTop: '1px solid rgba(30,41,59,0.6)' }}>
+                      <span style={{ color: '#64748b' }}>Preço Atual</span>
+                      <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>R$ {formatMoney(position.preco_atual)}</span>
+                    </div>
+                    {/* Valor Investido (read-only) */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm" style={{ borderTop: '1px solid rgba(30,41,59,0.6)' }}>
+                      <span style={{ color: '#64748b' }}>Valor Investido</span>
+                      <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>R$ {formatMoney(position.valor_investido, 0)}</span>
+                    </div>
+                    {/* Data de Abertura / Entrada */}
+                    <div className="flex items-center justify-between px-4 py-2.5 text-sm" style={{ borderTop: '1px solid rgba(30,41,59,0.6)' }}>
+                      <span className="flex items-center gap-1.5" style={{ color: '#64748b' }}>
+                        <CalendarDays size={12} />
+                        Data de Abertura
+                      </span>
+                      {editMode ? (
+                        <input
+                          type="date"
+                          value={editValues.data_abertura || ''}
+                          onChange={e => setEditValues(v => ({ ...v, data_abertura: e.target.value }))}
+                          className="bg-transparent text-xs font-mono outline-none px-2 py-1 rounded text-right"
+                          style={{ border: '1px solid #334155', color: '#f1f5f9', colorScheme: 'dark' }}
+                        />
+                      ) : (
+                        <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>
+                          {position.data_abertura ? formatDate(position.data_abertura) : position.data_entrada ? formatDate(position.data_entrada) : '—'}
                         </span>
-                        <span className="font-mono text-xs" style={{ color: '#f1f5f9' }}>{row.value}</span>
-                      </div>
-                    ))}
+                      )}
+                    </div>
                   </div>
 
-                  {/* Gestão de risco */}
-                  {(position.stop_loss || position.alvo_1 || position.alvo_2) && (
+                  {/* Gestão de risco — always visible in edit mode */}
+                  {(editMode || position.stop_loss || position.alvo_1 || position.alvo_2) && (
                     <div className="rounded-xl p-4 space-y-2" style={{ background: '#111827', border: '1px solid #1e293b' }}>
                       <p className="text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: '#64748b' }}>Gestão de Risco</p>
-                      <div className="grid grid-cols-3 gap-3">
-                        {position.stop_loss && (
-                          <div className="text-center">
-                            <p className="text-[10px] mb-1 flex items-center justify-center gap-1" style={{ color: '#FF5252' }}>
-                              <ShieldAlert size={10} /> Stop Loss
-                            </p>
-                            <p className="font-mono text-sm font-bold" style={{ color: '#FF5252' }}>R$ {formatMoney(position.stop_loss)}</p>
-                            <p className="text-[10px] font-mono mt-0.5" style={{ color: '#64748b' }}>
-                              {position.preco_atual > 0 ? (((position.stop_loss / position.preco_atual) - 1) * 100).toFixed(1) + '%' : '—'}
-                            </p>
+                      {editMode ? (
+                        <div className="grid grid-cols-3 gap-3">
+                          <div>
+                            <label className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: '#FF5252' }}>Stop Loss</label>
+                            <input type="number" step="any" value={editValues.stop_loss}
+                              onChange={e => setEditValues(v => ({ ...v, stop_loss: e.target.value }))}
+                              placeholder="0.00"
+                              className="w-full bg-transparent text-xs font-mono outline-none px-2 py-1.5 rounded"
+                              style={{ border: '1px solid #334155', color: '#f1f5f9' }}
+                            />
                           </div>
-                        )}
-                        {position.alvo_1 && (
-                          <div className="text-center">
-                            <p className="text-[10px] mb-1 flex items-center justify-center gap-1" style={{ color: '#00E676' }}>
-                              <Target size={10} /> Alvo 1
-                            </p>
-                            <p className="font-mono text-sm font-bold" style={{ color: '#00E676' }}>R$ {formatMoney(position.alvo_1)}</p>
-                            <p className="text-[10px] font-mono mt-0.5" style={{ color: '#64748b' }}>
-                              {position.preco_atual > 0 ? (((position.alvo_1 / position.preco_atual) - 1) * 100).toFixed(1) + '%' : '—'}
-                            </p>
+                          <div>
+                            <label className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: '#00E676' }}>Alvo 1</label>
+                            <input type="number" step="any" value={editValues.alvo_1}
+                              onChange={e => setEditValues(v => ({ ...v, alvo_1: e.target.value }))}
+                              placeholder="0.00"
+                              className="w-full bg-transparent text-xs font-mono outline-none px-2 py-1.5 rounded"
+                              style={{ border: '1px solid #334155', color: '#f1f5f9' }}
+                            />
                           </div>
-                        )}
-                        {position.alvo_2 && (
-                          <div className="text-center">
-                            <p className="text-[10px] mb-1 flex items-center justify-center gap-1" style={{ color: '#00BCD4' }}>
-                              <Target size={10} /> Alvo 2
-                            </p>
-                            <p className="font-mono text-sm font-bold" style={{ color: '#00BCD4' }}>R$ {formatMoney(position.alvo_2)}</p>
-                            <p className="text-[10px] font-mono mt-0.5" style={{ color: '#64748b' }}>
-                              {position.preco_atual > 0 ? (((position.alvo_2 / position.preco_atual) - 1) * 100).toFixed(1) + '%' : '—'}
-                            </p>
+                          <div>
+                            <label className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: '#00BCD4' }}>Alvo 2</label>
+                            <input type="number" step="any" value={editValues.alvo_2}
+                              onChange={e => setEditValues(v => ({ ...v, alvo_2: e.target.value }))}
+                              placeholder="0.00"
+                              className="w-full bg-transparent text-xs font-mono outline-none px-2 py-1.5 rounded"
+                              style={{ border: '1px solid #334155', color: '#f1f5f9' }}
+                            />
                           </div>
-                        )}
-                      </div>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-3 gap-3">
+                          {position.stop_loss && (
+                            <div className="text-center">
+                              <p className="text-[10px] mb-1 flex items-center justify-center gap-1" style={{ color: '#FF5252' }}>
+                                <ShieldAlert size={10} /> Stop Loss
+                              </p>
+                              <p className="font-mono text-sm font-bold" style={{ color: '#FF5252' }}>R$ {formatMoney(position.stop_loss)}</p>
+                              <p className="text-[10px] font-mono mt-0.5" style={{ color: '#64748b' }}>
+                                {position.preco_atual > 0 ? (((position.stop_loss / position.preco_atual) - 1) * 100).toFixed(1) + '%' : '—'}
+                              </p>
+                            </div>
+                          )}
+                          {position.alvo_1 && (
+                            <div className="text-center">
+                              <p className="text-[10px] mb-1 flex items-center justify-center gap-1" style={{ color: '#00E676' }}>
+                                <Target size={10} /> Alvo 1
+                              </p>
+                              <p className="font-mono text-sm font-bold" style={{ color: '#00E676' }}>R$ {formatMoney(position.alvo_1)}</p>
+                              <p className="text-[10px] font-mono mt-0.5" style={{ color: '#64748b' }}>
+                                {position.preco_atual > 0 ? (((position.alvo_1 / position.preco_atual) - 1) * 100).toFixed(1) + '%' : '—'}
+                              </p>
+                            </div>
+                          )}
+                          {position.alvo_2 && (
+                            <div className="text-center">
+                              <p className="text-[10px] mb-1 flex items-center justify-center gap-1" style={{ color: '#00BCD4' }}>
+                                <Target size={10} /> Alvo 2
+                              </p>
+                              <p className="font-mono text-sm font-bold" style={{ color: '#00BCD4' }}>R$ {formatMoney(position.alvo_2)}</p>
+                              <p className="text-[10px] font-mono mt-0.5" style={{ color: '#64748b' }}>
+                                {position.preco_atual > 0 ? (((position.alvo_2 / position.preco_atual) - 1) * 100).toFixed(1) + '%' : '—'}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Indicadores Fundamentalistas */}
+                  {['ACAO', 'FII', 'ETF', 'BDR'].includes(position.tipo) && (
+                    <div className="rounded-xl p-4 space-y-2" style={{ background: '#111827', border: '1px solid #1e293b' }}>
+                      <p className="text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: '#64748b' }}>
+                        📈 Indicadores Fundamentalistas
+                      </p>
+                      {loadingFund ? (
+                        <div className="flex items-center justify-center py-4">
+                          <div className="w-5 h-5 border-2 rounded-full animate-spin" style={{ borderColor: '#334155', borderTopColor: '#818cf8' }} />
+                          <span className="ml-2 text-xs" style={{ color: '#64748b' }}>Carregando...</span>
+                        </div>
+                      ) : fundamentos ? (
+                        <div className="grid grid-cols-3 gap-3">
+                          {(() => {
+                            const items: { label: string; value: string; color: string }[] = []
+                            const fmt = (v: number | undefined, suffix = '', dec = 2) =>
+                              v != null ? v.toFixed(dec) + suffix : '—'
+                            const colorRange = (v: number | undefined, green: number, yellow: number, invert = false) => {
+                              if (v == null) return '#94a3b8'
+                              if (invert) return v <= green ? '#00E676' : v <= yellow ? '#FFCA28' : '#FF5252'
+                              return v >= green ? '#00E676' : v >= yellow ? '#FFCA28' : '#FF5252'
+                            }
+
+                            if (fundamentos.priceEarnings != null)
+                              items.push({ label: 'P/L', value: fmt(fundamentos.priceEarnings, 'x', 1), color: colorRange(fundamentos.priceEarnings, 15, 25, true) })
+                            if (fundamentos.priceToBookRatio != null)
+                              items.push({ label: 'P/VP', value: fmt(fundamentos.priceToBookRatio, 'x', 2), color: colorRange(fundamentos.priceToBookRatio, 1.5, 3, true) })
+                            if (fundamentos.dividendYield != null)
+                              items.push({ label: 'Div. Yield', value: fmt(fundamentos.dividendYield * 100, '%', 1), color: colorRange(fundamentos.dividendYield * 100, 5, 3, false) })
+                            if (fundamentos.returnOnEquity != null)
+                              items.push({ label: 'ROE', value: fmt(fundamentos.returnOnEquity * 100, '%', 1), color: colorRange(fundamentos.returnOnEquity * 100, 15, 8, false) })
+                            if (fundamentos.returnOnAssets != null)
+                              items.push({ label: 'ROA', value: fmt(fundamentos.returnOnAssets * 100, '%', 1), color: colorRange(fundamentos.returnOnAssets * 100, 8, 4, false) })
+                            if (fundamentos.netMargin != null)
+                              items.push({ label: 'Margem Líq.', value: fmt(fundamentos.netMargin * 100, '%', 1), color: colorRange(fundamentos.netMargin * 100, 10, 5, false) })
+                            if (fundamentos.grossMargin != null)
+                              items.push({ label: 'Margem Bruta', value: fmt(fundamentos.grossMargin * 100, '%', 1), color: colorRange(fundamentos.grossMargin * 100, 30, 15, false) })
+                            if (fundamentos.ebitdaMargin != null)
+                              items.push({ label: 'Margem EBITDA', value: fmt(fundamentos.ebitdaMargin * 100, '%', 1), color: colorRange(fundamentos.ebitdaMargin * 100, 20, 10, false) })
+                            if (fundamentos.debtToEquity != null)
+                              items.push({ label: 'Dív/PL', value: fmt(fundamentos.debtToEquity, 'x', 2), color: colorRange(fundamentos.debtToEquity, 1, 2, true) })
+                            if (fundamentos.currentLiquidity != null)
+                              items.push({ label: 'Liq. Corrente', value: fmt(fundamentos.currentLiquidity, 'x', 2), color: colorRange(fundamentos.currentLiquidity, 1.5, 1, false) })
+                            if (fundamentos.earningsPerShare != null)
+                              items.push({ label: 'LPA', value: `R$ ${fmt(fundamentos.earningsPerShare, '', 2)}`, color: fundamentos.earningsPerShare > 0 ? '#00E676' : '#FF5252' })
+
+                            if (items.length === 0)
+                              return <p className="text-xs col-span-3 text-center" style={{ color: '#64748b' }}>Sem dados disponíveis</p>
+
+                            return items.map((item, i) => (
+                              <div key={i} className="text-center">
+                                <p className="text-[10px] mb-1" style={{ color: '#64748b' }}>{item.label}</p>
+                                <p className="font-mono text-sm font-bold" style={{ color: item.color }}>{item.value}</p>
+                              </div>
+                            ))
+                          })()}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-center py-2" style={{ color: '#475569' }}>Dados fundamentalistas indisponíveis</p>
+                      )}
                     </div>
                   )}
 
@@ -484,11 +742,30 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
                     </div>
                   )}
 
-                  {/* Tese */}
-                  {position.tese && (
+                  {/* Justificativa de entrada */}
+                  {position.justificativa_entrada && (
+                    <div className="rounded-xl p-4" style={{ background: '#111827', border: '1px solid rgba(0,230,118,0.15)' }}>
+                      <p className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: '#00E676' }}>Por que está na carteira</p>
+                      <p className="text-sm leading-relaxed" style={{ color: '#cbd5e1' }}>{position.justificativa_entrada}</p>
+                    </div>
+                  )}
+
+                  {/* Tese — editable or read-only */}
+                  {(editMode || position.tese) && (
                     <div className="rounded-xl p-4" style={{ background: '#111827', border: '1px solid rgba(167,139,250,0.2)' }}>
                       <p className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: '#a78bfa' }}>Tese de Investimento</p>
-                      <p className="text-sm leading-relaxed" style={{ color: '#94a3b8' }}>{position.tese}</p>
+                      {editMode ? (
+                        <textarea
+                          value={editValues.tese}
+                          onChange={e => setEditValues(v => ({ ...v, tese: e.target.value }))}
+                          rows={3}
+                          placeholder="Descreva sua tese de investimento..."
+                          className="w-full bg-transparent text-sm outline-none resize-none rounded p-2"
+                          style={{ border: '1px solid #334155', color: '#94a3b8' }}
+                        />
+                      ) : (
+                        <p className="text-sm leading-relaxed" style={{ color: '#94a3b8' }}>{position.tese}</p>
+                      )}
                     </div>
                   )}
                 </motion.div>
@@ -623,32 +900,65 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  className="p-5 flex flex-col items-center justify-center h-full min-h-[300px] space-y-4"
+                  className="p-5 space-y-4"
                 >
-                  <div
-                    className="w-14 h-14 rounded-2xl flex items-center justify-center"
-                    style={{ background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.2)' }}
-                  >
-                    <BrainCircuit size={24} style={{ color: '#a78bfa' }} />
-                  </div>
-                  <div className="text-center">
-                    <p className="font-medium" style={{ color: '#f1f5f9' }}>Análise com APEX Manager</p>
-                    <p className="text-sm mt-1.5" style={{ color: '#64748b' }}>
-                      O gestor vai analisar {position.ticker} em tempo real usando dados técnicos e de mercado.
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setShowAnalise(true)}
-                    className="px-6 py-3 rounded-xl text-sm font-medium flex items-center gap-2 transition-all"
-                    style={{ background: 'rgba(167,139,250,0.12)', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.3)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(167,139,250,0.18)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'rgba(167,139,250,0.12)')}
-                  >
-                    <BrainCircuit size={15} /> Abrir Análise AI
-                  </button>
-                  <p className="text-xs text-center" style={{ color: '#334155' }}>
-                    Analisa RSI, MACD, médias móveis, suporte/resistência e tese de investimento.
-                  </p>
+                  {position.analise_ia ? (
+                    <>
+                      {/* Saved analysis */}
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <BrainCircuit size={16} style={{ color: '#a78bfa' }} />
+                          <span className="text-xs font-medium" style={{ color: '#a78bfa' }}>Última Análise AI</span>
+                          {position.analise_ia_at && (
+                            <span className="text-[10px] font-mono" style={{ color: '#475569' }}>
+                              {new Date(position.analise_ia_at).toLocaleDateString('pt-BR')} às {new Date(position.analise_ia_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => setShowAnalise(true)}
+                          className="flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-all"
+                          style={{ color: '#a78bfa', background: 'rgba(167,139,250,0.08)', border: '1px solid rgba(167,139,250,0.2)' }}
+                          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(167,139,250,0.15)')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'rgba(167,139,250,0.08)')}
+                        >
+                          <RotateCw size={11} /> Refazer
+                        </button>
+                      </div>
+                      <div
+                        className="rounded-xl p-4 text-sm leading-relaxed overflow-y-auto"
+                        style={{ background: '#111827', border: '1px solid #1e293b', color: '#94a3b8', maxHeight: '500px' }}
+                        dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(renderMarkdownSimple(position.analise_ia)) }}
+                      />
+                    </>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center min-h-[300px] space-y-4">
+                      <div
+                        className="w-14 h-14 rounded-2xl flex items-center justify-center"
+                        style={{ background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.2)' }}
+                      >
+                        <BrainCircuit size={24} style={{ color: '#a78bfa' }} />
+                      </div>
+                      <div className="text-center">
+                        <p className="font-medium" style={{ color: '#f1f5f9' }}>Análise com APEX Manager</p>
+                        <p className="text-sm mt-1.5" style={{ color: '#64748b' }}>
+                          O gestor vai analisar {position.ticker} em tempo real usando dados técnicos e de mercado.
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => setShowAnalise(true)}
+                        className="px-6 py-3 rounded-xl text-sm font-medium flex items-center gap-2 transition-all"
+                        style={{ background: 'rgba(167,139,250,0.12)', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.3)' }}
+                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(167,139,250,0.18)')}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'rgba(167,139,250,0.12)')}
+                      >
+                        <BrainCircuit size={15} /> Abrir Análise AI
+                      </button>
+                      <p className="text-xs text-center" style={{ color: '#334155' }}>
+                        Analisa RSI, MACD, médias móveis, suporte/resistência e tese de investimento.
+                      </p>
+                    </div>
+                  )}
                 </motion.div>
               )}
 
@@ -666,7 +976,7 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
               ticker={position.ticker}
               modulo={position.modulo}
               tese={position.tese}
-              onClose={() => setShowAnalise(false)}
+              onClose={() => { setShowAnalise(false); onUpdate?.() }}
               onTeseSalva={t => {
                 setShowAnalise(false)
                 onUpdate?.()

@@ -36,6 +36,10 @@ class PlanoRequest(BaseModel):
     user_id: int
 
 
+class UpdateUsuarioName(BaseModel):
+    name: str
+
+
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/usuarios")
@@ -47,16 +51,19 @@ def listar_usuarios(db: Session = Depends(get_db)):
         .order_by(User.created_at.desc())
         .all()
     )
-    return [
-        {
+    result = []
+    for u in users:
+        portfolio = db.query(Portfolio).filter(Portfolio.user_id == u.id).order_by(Portfolio.id).first()
+        nome_carteira = (portfolio.nome or "Carteira Real") if portfolio else "Carteira Real"
+        result.append({
             "id": u.id,
             "name": u.name,
+            "nome_carteira": nome_carteira,
             "estrategia": u.estrategia,
             "patrimonio": u.patrimonio_total,
             "created_at": u.created_at,
-        }
-        for u in users
-    ]
+        })
+    return result
 
 
 @router.delete("/usuarios/{user_id}")
@@ -77,6 +84,30 @@ def deletar_usuario(user_id: int, db: Session = Depends(get_db)):
     db.delete(user)
     db.commit()
     return {"ok": True}
+
+
+@router.patch("/usuarios/{user_id}")
+def atualizar_nome_usuario(
+    user_id: int,
+    body: UpdateUsuarioName,
+    db: Session = Depends(get_db),
+    current_user_id: Optional[int] = Depends(get_user_id),
+):
+    """Atualiza o nome da carteira (User.name). Só o próprio usuário pode alterar."""
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Nome não pode ser vazio.")
+    if len(name) > 100:
+        raise HTTPException(status_code=400, detail="Nome deve ter no máximo 100 caracteres.")
+    if current_user_id is not None and current_user_id != user_id:
+        raise HTTPException(status_code=403, detail="Só é possível alterar o nome da própria carteira.")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Carteira não encontrada.")
+    user.name = name
+    db.commit()
+    db.refresh(user)
+    return {"ok": True, "name": user.name}
 
 
 @router.post("/start")
@@ -156,10 +187,11 @@ def finalize_onboarding(body: FinalizeOnboarding, db: Session = Depends(get_db))
         db.flush()
 
     portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
+    nome_carteira = (body.name or "").strip() or "Carteira Real"
     if not portfolio:
         portfolio = Portfolio(
             user_id=user.id,
-            nome="Carteira Real",
+            nome=nome_carteira[:100],
             tipo="real",
             patrimonio_total=body.total_patrimony,
             patrimonio_inicio=body.total_patrimony,
@@ -167,6 +199,7 @@ def finalize_onboarding(body: FinalizeOnboarding, db: Session = Depends(get_db))
         )
         db.add(portfolio)
     else:
+        portfolio.nome = nome_carteira[:100]
         portfolio.patrimonio_total = body.total_patrimony
         for k, v in alocacao.items():
             setattr(portfolio, f"alvo_{k}", v)
@@ -328,10 +361,11 @@ def salvar_onboarding(body: OnboardingRespostas, db: Session = Depends(get_db)):
 
     # Criar ou atualizar portfólio
     portfolio = db.query(Portfolio).filter(Portfolio.user_id == user.id).first()
+    nome_carteira = (body.nome or "").strip() or "Carteira Real"
     if not portfolio:
         portfolio = Portfolio(
             user_id=user.id,
-            nome="Carteira Real",
+            nome=nome_carteira[:100],
             tipo="real",
             patrimonio_total=body.patrimonio_total,
             patrimonio_inicio=body.patrimonio_total,
@@ -339,6 +373,7 @@ def salvar_onboarding(body: OnboardingRespostas, db: Session = Depends(get_db)):
         )
         db.add(portfolio)
     else:
+        portfolio.nome = nome_carteira[:100]
         for k, v in alocacao.items():
             setattr(portfolio, f"alvo_{k}", v)
 

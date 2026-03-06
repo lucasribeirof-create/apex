@@ -248,7 +248,7 @@ export default function OnboardingPage() {
     }
 
     if (step === 'name') {
-      if (!state.name.trim()) return setError('Por favor, informe seu nome.')
+      if (!state.name.trim()) return setError('Por favor, informe o nome da carteira.')
       setError('')
       setStep('patrimony')
       return
@@ -444,16 +444,16 @@ export default function OnboardingPage() {
                   </div>
                 )}
 
-                {/* ── Name ─────────────────────────────────────────────────── */}
+                {/* ── Name (nome da carteira) ───────────────────────────────── */}
                 {step === 'name' && (
                   <div>
                     <AIMessage
-                      text="Olá. Antes de tudo, como você se chama? Vou usar seu nome durante toda a nossa interação."
+                      text="Como quer chamar esta carteira? Esse nome aparecerá na lista ao selecionar carteira."
                       typing
                     />
                     <input
                       className="apex-input mb-2"
-                      placeholder="Seu nome..."
+                      placeholder="Nome da carteira"
                       value={state.name}
                       onChange={(e) => setState({ ...state, name: e.target.value })}
                       onKeyDown={(e) => e.key === 'Enter' && handleNext()}

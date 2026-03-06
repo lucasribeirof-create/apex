@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
-import { Plus, X, TrendingUp, TrendingDown, Circle, Trash2, ChevronDown, ChevronUp, BrainCircuit, LayoutList, FlaskConical, Pencil, Check } from 'lucide-react'
+import { Plus, X, TrendingUp, TrendingDown, Circle, Trash2, ChevronDown, ChevronUp, BrainCircuit, LayoutList, FlaskConical } from 'lucide-react'
 import PosicaoDetalheModal from '@/components/PosicaoDetalheModal'
 import CarteiraPanel from '@/components/CarteiraPanel'
 import api from '@/services/api'
@@ -22,9 +22,15 @@ interface Position {
   pl_percentual: number
   stop_loss: number | null
   alvo_1: number | null
+  alvo_2: number | null
   apex_score: number | null
   data_entrada: string | null
+  data_abertura: string | null
   tese?: string | null
+  mercado?: string
+  moeda?: string
+  analise_ia?: string | null
+  analise_ia_at?: string | null
 }
 
 interface FormData {
@@ -35,6 +41,7 @@ interface FormData {
   quantidade: string
   preco_medio: string
   stop_loss: string
+  data_entrada: string
 }
 
 const MODULE_LABELS: Record<string, string> = {
@@ -53,7 +60,7 @@ const TIPO_COLORS: Record<string, string> = {
   RF: '#FFD740', OPCAO: '#FF9800', BDR: '#64FFDA', DIVIDENDO: '#FFD740', CAIXA: '#475569',
 }
 
-const emptyForm: FormData = { ticker: '', nome: '', tipo: 'ACAO', modulo: 'momentum', quantidade: '', preco_medio: '', stop_loss: '' }
+const emptyForm: FormData = { ticker: '', nome: '', tipo: 'ACAO', modulo: 'momentum', quantidade: '', preco_medio: '', stop_loss: '', data_entrada: new Date().toISOString().slice(0, 10) }
 
 function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState<FormData>(emptyForm)
@@ -75,6 +82,7 @@ function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => vo
         quantidade: parseFloat(form.quantidade),
         preco_medio: parseFloat(form.preco_medio),
         stop_loss: form.stop_loss ? parseFloat(form.stop_loss) : undefined,
+        data_entrada: form.data_entrada || undefined,
       })
       onSaved()
     } catch (e: any) {
@@ -161,6 +169,13 @@ function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => vo
               <input className="apex-input" placeholder="31.00" type="number" value={form.stop_loss}
                 onChange={e => setForm(f => ({ ...f, stop_loss: e.target.value }))} />
             </div>
+          </div>
+
+          <div>
+            <label className="text-xs mb-1.5 block" style={{ color: '#64748b' }}>Data de Entrada</label>
+            <input className="apex-input" type="date" value={form.data_entrada}
+              onChange={e => setForm(f => ({ ...f, data_entrada: e.target.value }))}
+              style={{ colorScheme: 'dark' }} />
           </div>
         </div>
 
@@ -334,9 +349,6 @@ export default function PositionsPage() {
   const { portfolioAtivo } = useStore()
   const isSimulada = portfolioAtivo?.tipo === 'simulada'
   const [positions, setPositions] = useState<Position[]>([])
-  const [capitalDeclarado, setCapitalDeclarado] = useState<number | null>(null)
-  const [editandoCapital, setEditandoCapital] = useState(false)
-  const [capitalInput, setCapitalInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [showAdd, setShowAdd] = useState(false)
@@ -353,32 +365,9 @@ export default function PositionsPage() {
         setPositions(data) // fallback para resposta antiga
       } else {
         setPositions(data.posicoes || [])
-        setCapitalDeclarado(data.capital_declarado ?? null)
       }
     } catch { /* silent */ }
     setLoading(false)
-  }
-
-  const formatCapitalInput = (raw: string) => {
-    // Strip everything except digits and comma
-    const digits = raw.replace(/[^\d]/g, '')
-    if (!digits) return ''
-    const num = parseInt(digits, 10)
-    // Format as pt-BR integer (dots as thousand separators, no decimals while typing)
-    return num.toLocaleString('pt-BR')
-  }
-
-  const parseCapitalInput = (formatted: string) =>
-    parseFloat(formatted.replace(/\./g, '').replace(',', '.'))
-
-  const salvarCapital = async () => {
-    const val = parseCapitalInput(capitalInput)
-    if (isNaN(val) || val <= 0) return
-    try {
-      await api.patch('/portfolio/capital', { capital_declarado: val })
-      setCapitalDeclarado(val)
-    } catch { /* silent */ }
-    setEditandoCapital(false)
   }
 
   const refreshPrices = async () => {
@@ -418,8 +407,6 @@ export default function PositionsPage() {
   const totalCurrent = positions.reduce((a, p) => a + p.valor_atual, 0)
   const totalPL = totalCurrent - totalInvested
   const totalPLPct = totalInvested > 0 ? (totalPL / totalInvested) * 100 : 0
-  const caixaDisponivel = capitalDeclarado !== null ? capitalDeclarado - totalCurrent : null
-  const caixaPct = capitalDeclarado && capitalDeclarado > 0 ? (caixaDisponivel! / capitalDeclarado) * 100 : null
 
   return (
     <div className="p-8 space-y-6">
@@ -495,48 +482,7 @@ export default function PositionsPage() {
               <p className="text-lg font-bold font-mono mt-1" style={{ color: s.color }}>{s.value}</p>
             </div>
           ))}
-          {/* Card de caixa disponível — clicável para declarar/editar capital */}
-          <div className="apex-card p-4" style={{ border: caixaDisponivel !== null && caixaDisponivel < 0 ? '1px solid rgba(255,82,82,0.35)' : '1px solid rgba(0,230,118,0.15)' }}>
-            <div className="flex items-center justify-between">
-              <p className="text-xs font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>Caixa Disponível</p>
-              {!editandoCapital && (
-                <button onClick={() => { setCapitalInput(capitalDeclarado !== null ? capitalDeclarado.toLocaleString('pt-BR') : ''); setEditandoCapital(true) }} title="Definir capital total">
-                  <Pencil size={11} style={{ color: '#475569' }} />
-                </button>
-              )}
-            </div>
-            {editandoCapital ? (
-              <div className="flex items-center gap-1 mt-2">
-                <span className="text-xs font-mono" style={{ color: '#64748b' }}>R$</span>
-                <input
-                  autoFocus
-                  type="text"
-                  value={capitalInput}
-                  onChange={e => setCapitalInput(formatCapitalInput(e.target.value))}
-                  onKeyDown={e => { if (e.key === 'Enter') salvarCapital(); if (e.key === 'Escape') setEditandoCapital(false) }}
-                  placeholder="1.000.000"
-                  className="bg-transparent border-b text-sm font-mono outline-none flex-1 min-w-0"
-                  style={{ borderColor: '#00E676', color: '#f1f5f9' }}
-                />
-                <button onClick={salvarCapital} style={{ color: '#00E676' }}><Check size={13} /></button>
-                <button onClick={() => setEditandoCapital(false)} style={{ color: '#64748b' }}><X size={13} /></button>
-              </div>
-            ) : capitalDeclarado !== null ? (
-              <>
-                <p className="text-lg font-bold font-mono mt-1" style={{ color: caixaDisponivel !== null && caixaDisponivel < 0 ? '#FF5252' : '#00E676' }}>
-                  R$ {caixaDisponivel !== null ? caixaDisponivel.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}
-                  {caixaPct !== null && <span className="text-xs font-normal ml-1" style={{ color: '#64748b' }}>{caixaPct.toFixed(1)}%</span>}
-                </p>
-                <p className="text-xs font-mono mt-0.5" style={{ color: '#475569' }}>
-                  de R$ {capitalDeclarado.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </p>
-              </>
-            ) : (
-              <p className="text-xs mt-2 cursor-pointer" style={{ color: '#475569' }} onClick={() => { setCapitalInput(''); setEditandoCapital(true) }}>
-                Clique no lápis para declarar o capital total
-              </p>
-            )}
-          </div>
+
         </motion.div>
       )}
 

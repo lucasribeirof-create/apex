@@ -103,6 +103,13 @@ export default function AnaliseModal({
           setMensagens([{ role: 'assistant', content: texto, streaming: false }])
           setFase('chat')
           setTimeout(() => inputRef.current?.focus(), 100)
+
+          // Persiste a análise no banco
+          try {
+            const _saveHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+            if (userId) _saveHeaders['x-user-id'] = String(userId)
+            await api.patch(`/portfolio/posicoes/${positionId}`, { analise_ia: texto })
+          } catch { /* silent — análise já está visível no chat */ }
         }
       } catch (e: any) {
         if (!cancelRef.current) {
