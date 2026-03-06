@@ -86,6 +86,9 @@ class ContextoCerebro:
     fase_selic: str = "TRANSICAO"         # ALTA / PICO / TRANSICAO / QUEDA / VALE
     guardrails: dict = field(default_factory=dict)  # equity_max_pct, rf_min_pct, caixa_min_pct
 
+    # ── Ranking setorial (Fase 2 Cérebro Híbrido) ────────────────────────
+    ranking_setorial: Optional[object] = field(default=None)  # RankingSetorial de setor.py
+
     # ── Metadados ─────────────────────────────────────────────────────────
     gerado_em: str = ""            # ISO timestamp de quando o contexto foi montado
     modulos_ativos: list[str] = field(default_factory=list)  # módulos configurados com alvo > 0
@@ -380,6 +383,15 @@ async def montar(
         _fase_selic = getattr(macro_context_obj, "fase_selic", "TRANSICAO")
         _guardrails = getattr(macro_context_obj, "guardrails", {})
 
+    # ── Ranking setorial (Fase 2 — depende de MacroContext) ─────────────
+    _ranking_setorial = None
+    if macro_context_obj:
+        try:
+            from app.cerebro.setor import montar_ranking
+            _ranking_setorial = await montar_ranking(macro_context_obj)
+        except Exception as e:
+            logger.warning("contexto_cerebro: ranking setorial falhou: %s", e)
+
     return ContextoCerebro(
         # Perfil
         user_id=user.id,
@@ -405,6 +417,8 @@ async def montar(
         confianca_macro=_confianca,
         fase_selic=_fase_selic,
         guardrails=_guardrails,
+        # Ranking setorial (Fase 2)
+        ranking_setorial=_ranking_setorial,
         # Carteira
         portfolio_id=portfolio.id,
         patrimonio_total=patrimonio,

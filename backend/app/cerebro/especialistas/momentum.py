@@ -325,6 +325,7 @@ async def rodar(
     watchlist: Optional[list[str]] = None,
     n_ativos: int = 4,
     excluir_tickers: list[str] | None = None,
+    ranking_setorial: object | None = None,
 ) -> list[SugestaoMotor]:
     """
     Roda o motor Momentum: varre a watchlist, filtra por critérios técnicos e
@@ -345,6 +346,12 @@ async def rodar(
     resultados = await asyncio.gather(*tarefas, return_exceptions=True)
 
     candidatos = [r for r in resultados if isinstance(r, dict) and r is not None]
+
+    # Ajuste setorial
+    if ranking_setorial:
+        for c in candidatos:
+            c["score"] = _aplicar_ajuste_setor(c["ticker"], c["score"], ranking_setorial)
+
     candidatos.sort(key=lambda x: x["score"], reverse=True)
     selecionados = candidatos[:n_ativos]
 
@@ -386,7 +393,27 @@ async def rodar(
                 "resistencia":       d["resistencia"],
                 "upside_pct":        round((d["alvo"] / preco - 1) * 100, 1),
                 "downside_pct":      round((d["stop"] / preco - 1) * 100, 1),
+                "setor":             _get_setor_ticker(d["ticker"]),
             },
         ))
 
     return saida
+
+
+def _aplicar_ajuste_setor(ticker: str, score: float, ranking_setorial) -> float:
+    """Aplica bonus/penalty ao score baseado no ranking setorial."""
+    from app.core.universe import get_ticker_info
+    info = get_ticker_info(ticker)
+    setor = info.get("setor", "outro") if info else "outro"
+    if setor in getattr(ranking_setorial, "favorecidos", []):
+        score += 12
+    elif setor in getattr(ranking_setorial, "evitar", []):
+        score -= 15
+    return max(score, 0.0)
+
+
+def _get_setor_ticker(ticker: str) -> str:
+    """Retorna o setor canônico de um ticker."""
+    from app.core.universe import get_ticker_info
+    info = get_ticker_info(ticker)
+    return info.get("setor", "outro") if info else "outro"

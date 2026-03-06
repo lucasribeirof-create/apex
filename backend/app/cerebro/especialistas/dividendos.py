@@ -247,15 +247,17 @@ async def rodar(
     watchlist: Optional[list[str]] = None,
     n_ativos: int = 4,
     excluir_tickers: list[str] | None = None,
+    ranking_setorial: object | None = None,
 ) -> list[SugestaoMotor]:
     """
     Seleciona as melhores ações pagadoras de dividendos para o capital disponível.
 
     Args:
-        capital:          Capital em R$ disponível para o módulo Dividendos.
-        watchlist:        Lista de tickers candidatos (default: DIVIDENDOS_WATCHLIST).
-        n_ativos:         Número de posições (máx 6 para diversificação setorial).
-        excluir_tickers:  Tickers já na carteira — não serão sugeridos.
+        capital:            Capital em R$ disponível para o módulo Dividendos.
+        watchlist:          Lista de tickers candidatos (default: DIVIDENDOS_WATCHLIST).
+        n_ativos:           Número de posições (máx 6 para diversificação setorial).
+        excluir_tickers:    Tickers já na carteira — não serão sugeridos.
+        ranking_setorial:   RankingSetorial (setor.py) — bonus/penalty por setor.
 
     Returns:
         Lista de SugestaoMotor com as melhores pagadoras selecionadas.
@@ -276,17 +278,19 @@ async def rodar(
             continue
         score = _score_div(r)
         if score > 0:
+            # Ajuste setorial: bonus +12 se favorecido, penalty -15 se evitar
+            score = _aplicar_ajuste_setor_div(r.get("setor", "outro"), score, ranking_setorial)
             candidatos.append({**r, "score": score})
 
     candidatos.sort(key=lambda x: x["score"], reverse=True)
 
-    # Seleciona com diversificação setorial (max 2 por setor)
+    # Seleciona com diversificação setorial (max 2 por setor — usando nomes canônicos)
     selecionados = []
     setores_usados: dict[str, int] = {}
     for cand in candidatos:
         if len(selecionados) >= n_ativos:
             break
-        setor = cand.get("setor", "outros")
+        setor = _harmonizar_setor(cand.get("setor", "outro"))
         if setores_usados.get(setor, 0) >= _MAX_SETOR:
             continue
         selecionados.append(cand)
@@ -321,10 +325,28 @@ async def rodar(
                 "payout_ratio":         d.get("payout"),
                 "dividendo_crescendo":  d.get("div_crescendo"),
                 "tipo_provento":        d.get("tipo_prov", "Dividendo"),
-                "setor":                d.get("setor"),
+                "setor":                _harmonizar_setor(d.get("setor", "outro")),
                 "renda_mensal_estimada": renda_mensal,
                 "renda_anual_estimada":  round(renda_mensal * 12, 2),
             },
         ))
 
     return saida
+
+
+def _harmonizar_setor(setor_raw: str) -> str:
+    """Converte nomes de setor do _DIV_META para a taxonomia canônica de universe.py."""
+    from app.cerebro.setor import harmonizar_setor
+    return harmonizar_setor(setor_raw)
+
+
+def _aplicar_ajuste_setor_div(setor_raw: str, score: float, ranking_setorial) -> float:
+    """Aplica bonus/penalty ao score baseado no ranking setorial."""
+    if not ranking_setorial:
+        return score
+    setor = _harmonizar_setor(setor_raw)
+    if setor in getattr(ranking_setorial, "favorecidos", []):
+        score += 12
+    elif setor in getattr(ranking_setorial, "evitar", []):
+        score -= 15
+    return max(score, 0.0)

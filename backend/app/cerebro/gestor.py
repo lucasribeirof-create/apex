@@ -226,6 +226,18 @@ async def _analisar_com_ia(
         if contexto.guardrails:
             payload["guardrails_macro"] = contexto.guardrails
 
+    # ── Ranking setorial (Fase 2 Cérebro Híbrido) ─────────────────────────
+    if contexto and hasattr(contexto, "ranking_setorial") and contexto.ranking_setorial:
+        rs = contexto.ranking_setorial
+        payload["ranking_setorial"] = {
+            "favorecidos": rs.favorecidos,
+            "evitar": rs.evitar,
+            "setores": [
+                {"setor": s.setor, "score": s.score_total, "motivos": s.motivos[:2]}
+                for s in rs.setores
+            ],
+        }
+
     if contexto and hasattr(contexto, "narrativa_macro") and contexto.narrativa_macro:
         payload["narrativa_macro"] = contexto.narrativa_macro[:2000]
 
@@ -335,6 +347,15 @@ O campo "regime_macro_4state" indica o regime determinístico (não o regime té
   - RISK_ON_MODERADO: bom com ressalvas, equity moderado
   - NEUTRO: cenário indefinido, postura conservadora
   - RISK_OFF: cenário hostil, preservação de capital é PRIORIDADE
+
+━━━ RANKING SETORIAL (VIÉS TOP-DOWN) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Se "ranking_setorial" estiver no payload, use como VIÉS (não filtro eliminatório):
+  - "favorecidos": setores beneficiados pelo cenário macro atual → PREFIRA candidatos destes setores
+  - "evitar": setores prejudicados pelo cenário macro → EVITE ou reduza exposição
+  - Cada setor tem score 0-100 e motivos explicando o alinhamento macro
+Se 2 candidatos empatarem em qualidade, ESCOLHA o do setor favorecido.
+Se um candidato excelente estiver em setor a evitar, PODE incluir mas com posição menor e justificativa.
+Mencione o viés setorial na "analise" quando relevante.
 
 ━━━ FRAMEWORK DE DECISÃO (OBRIGATÓRIO para cada ativo) ━━━━━━━━━━━━━━━━━━━━
 Para CADA ativo na carteira_final, a justificativa_ceo DEVE começar com uma das ações:

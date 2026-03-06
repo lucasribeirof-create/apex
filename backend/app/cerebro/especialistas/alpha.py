@@ -37,6 +37,22 @@ from app.cerebro.especialistas import SugestaoMotor
 from app.cerebro.especialistas.watchlist import ALPHA_WATCHLIST
 from app.cerebro.especialistas import prefetch as _pf
 
+
+# ── Ajuste setorial ──────────────────────────────────────────────────────────
+
+def _aplicar_ajuste_setor(ticker: str, score: float, ranking_setorial) -> float:
+    """Aplica bonus/penalty ao score baseado no ranking setorial."""
+    if not ranking_setorial:
+        return score
+    from app.core.universe import get_ticker_info
+    info = get_ticker_info(ticker)
+    setor = info.get("setor", "outro") if info else "outro"
+    if setor in getattr(ranking_setorial, "favorecidos", []):
+        score += 12
+    elif setor in getattr(ranking_setorial, "evitar", []):
+        score -= 15
+    return max(score, 0.0)
+
 # ── Parâmetros de filtro fundamental ─────────────────────────────────────────
 PL_MAXIMO         = 25.0
 PVP_MAXIMO        = 4.0
@@ -239,15 +255,17 @@ async def rodar(
     watchlist: Optional[list[str]] = None,
     n_ativos: int = 3,
     excluir_tickers: list[str] | None = None,
+    ranking_setorial: object | None = None,
 ) -> list[SugestaoMotor]:
     """
     Seleciona ações com maior potencial de assimetria na watchlist Alpha.
 
     Args:
-        capital:          Capital em R$ disponível para o módulo Alpha.
-        watchlist:        Lista de tickers candidatos (default: ALPHA_WATCHLIST).
-        n_ativos:         Número de posições (concentração = convicção).
-        excluir_tickers:  Tickers já na carteira — não serão sugeridos.
+        capital:            Capital em R$ disponível para o módulo Alpha.
+        watchlist:          Lista de tickers candidatos (default: ALPHA_WATCHLIST).
+        n_ativos:           Número de posições (concentração = convicção).
+        excluir_tickers:    Tickers já na carteira — não serão sugeridos.
+        ranking_setorial:   RankingSetorial (setor.py) — bonus/penalty por setor.
 
     Returns:
         Lista de SugestaoMotor com as melhores teses de alpha.
@@ -269,6 +287,8 @@ async def rodar(
             continue
         score = _score_alpha(r)
         if score > 0:
+            # Ajuste setorial: bonus +12 se favorecido, penalty -15 se evitar
+            score = _aplicar_ajuste_setor(r["ticker"], score, ranking_setorial)
             candidatos.append({**r, "score": score})
 
     candidatos.sort(key=lambda x: x["score"], reverse=True)
@@ -310,7 +330,15 @@ async def rodar(
                 "momentum_6m":      d.get("momentum_6m"),
                 "upside_estimado_pct": upside_est,
                 "acima_mm200":      d.get("acima_mm200"),
+                "setor":            _get_setor_ticker(d["ticker"]),
             },
         ))
 
     return saida
+
+
+def _get_setor_ticker(ticker: str) -> str:
+    """Retorna o setor canônico de um ticker."""
+    from app.core.universe import get_ticker_info
+    info = get_ticker_info(ticker)
+    return info.get("setor", "outro") if info else "outro"

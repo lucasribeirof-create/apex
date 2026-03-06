@@ -6,6 +6,7 @@ Coleta dados reais via yFinance + BCB e executa toda a pipeline:
   3. Classifica fase do ciclo Selic
   4. Define guardrails de composição
   5. Gera flags/alertas automáticos
+  6. Ranking setorial top-down (Fase 2)
 """
 
 import asyncio
@@ -291,8 +292,64 @@ async def simular():
             break
         print(f"  {l}")
 
+    # ── RANKING SETORIAL (Fase 2) ──────────────────────────────────────
+    print(f"\n{'=' * 70}")
+    print("  📊 RANKING SETORIAL (Fase 2 — Cérebro Híbrido)")
+    print("=" * 70)
+
+    print("\n  ⏳ Calculando ranking setorial...")
+    from app.cerebro.setor import montar_ranking
+    ranking = await montar_ranking(ctx)
+    print("  ✅ Ranking calculado!\n")
+
+    # Tabela de setores
+    print(f"  {'Setor':<14} {'Score':>6} {'Macro':>6} {'Mom':>6} {'Val':>6} {'Proxy':<8} {'Ret63d':>8} {'P/L':>6}")
+    print(f"  {'─' * 14} {'─' * 6} {'─' * 6} {'─' * 6} {'─' * 6} {'─' * 8} {'─' * 8} {'─' * 6}")
+    for s in ranking.setores:
+        tag = "⭐" if s.setor in ranking.favorecidos else ("⛔" if s.setor in ranking.evitar else "  ")
+        ret = f"{s.retorno_63d_pct:+.1f}%" if s.retorno_63d_pct is not None else "   N/A"
+        pl = f"{s.pl_proxy:.1f}" if s.pl_proxy is not None else "  N/A"
+        print(f"  {tag}{s.setor:<12} {s.score_total:>5} {s.score_macro:>6} {s.score_momentum:>6} {s.score_valuation:>6} {s.ticker_proxy:<8} {ret:>8} {pl:>6}")
+
+    print(f"\n  Favorecidos: {', '.join(ranking.favorecidos) or 'nenhum'}")
+    print(f"  Evitar:      {', '.join(ranking.evitar) or 'nenhum'}")
+
+    # Motivos dos top 3
+    print(f"\n  📋 Motivos (top 3 favorecidos):")
+    for s in ranking.setores[:3]:
+        if s.motivos:
+            print(f"    {s.setor}:")
+            for m in s.motivos:
+                print(f"      → {m}")
+
+    # Motivos dos evitar
+    if ranking.evitar:
+        print(f"\n  📋 Motivos (evitar):")
+        for s in ranking.setores:
+            if s.setor in ranking.evitar and s.motivos:
+                print(f"    {s.setor}:")
+                for m in s.motivos:
+                    print(f"      → {m}")
+
+    # Texto para IA
+    print(f"\n  💬 Texto injetado na IA (ranking.resumo_texto()):")
+    for l in ranking.resumo_texto().split("\n"):
+        print(f"  {l}")
+
+    # Harmonização dividendos
+    print(f"\n  🔄 Harmonização de setores (dividendos motor):")
+    from app.cerebro.setor import harmonizar_setor
+    test_map = [("bancário", "financeiro"), ("petróleo", "energia"), ("mineração", "mineracao"),
+                ("elétrico", "utilidades"), ("telecom", "tecnologia"), ("seguros", "financeiro")]
+    for raw, esperado in test_map:
+        resultado = harmonizar_setor(raw)
+        ok = "✅" if resultado == esperado else "❌"
+        print(f"    {ok} '{raw}' → '{resultado}' (esperado: '{esperado}')")
+
     print(f"\n{'=' * 70}")
     print("  ✅ SIMULAÇÃO COMPLETA — TODAS AS FUNÇÕES DO CÉREBRO OK")
+    print("    Fase 1: Macro Engine ✅")
+    print("    Fase 2: Ranking Setorial ✅")
     print("=" * 70)
 
 

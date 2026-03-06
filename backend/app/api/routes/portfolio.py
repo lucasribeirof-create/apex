@@ -1155,6 +1155,16 @@ async def sugerir_portfolio(
     tarefas: list = []
     labels:  list = []
 
+    # ── Ranking setorial (Fase 2 — bonus/penalty nos motores equity) ──────
+    _ranking_setorial = None
+    try:
+        from app.cerebro.setor import montar_ranking
+        from app.cerebro.macro import montar_macro
+        _macro_ctx = await montar_macro()
+        _ranking_setorial = await montar_ranking(_macro_ctx)
+    except Exception as _rs_err:
+        logger.warning("sugerir-portfolio: ranking setorial falhou (%s) — motores sem ajuste", _rs_err)
+
     if cap_etfs > 0:
         tarefas.append(motor_etfs.rodar(cap_etfs, estrategia=estrategia))
         labels.append("etfs")
@@ -1165,16 +1175,16 @@ async def sugerir_portfolio(
         tarefas.append(motor_renda_fixa.rodar(cap_rf, estrategia=estrategia))
         labels.append("renda_fixa")
     if cap_momentum > 0:
-        tarefas.append(motor_momentum.rodar(cap_momentum, excluir_tickers=_excluir_tickers))
+        tarefas.append(motor_momentum.rodar(cap_momentum, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial))
         labels.append("momentum")
     if cap_wheel > 0:
         tarefas.append(motor_wheel.rodar(cap_wheel, excluir_tickers=_excluir_tickers, tickers_carteira=_excluir_tickers))
         labels.append("wheel")
     if cap_alpha > 0:
-        tarefas.append(motor_alpha.rodar(cap_alpha, excluir_tickers=_excluir_tickers))
+        tarefas.append(motor_alpha.rodar(cap_alpha, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial))
         labels.append("alpha")
     if cap_dividendos > 0:
-        tarefas.append(motor_dividendos.rodar(cap_dividendos, excluir_tickers=_excluir_tickers))
+        tarefas.append(motor_dividendos.rodar(cap_dividendos, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial))
         labels.append("dividendos")
 
     # Teses: módulo de convicção manual — capital é reservado e exibido para entrada manual
