@@ -70,6 +70,9 @@ async def analisar(
             _analisar_com_ia(candidatos_prep, capital, estrategia, regime, score_perfil, contexto, modo),
             timeout=60.0,
         )
+        # Validação hard de guardrails pós-IA
+        if contexto and hasattr(contexto, "guardrails") and contexto.guardrails:
+            resultado = _validar_guardrails(resultado, contexto.guardrails, capital)
         return resultado
     except asyncio.TimeoutError:
         logger.error("gestor_geral: timeout IA (60s) — IA não respondeu a tempo, usando fallback algorítmico")
@@ -201,6 +204,8 @@ async def _analisar_com_ia(
         mc = contexto.macro_context
         payload["macro_enriquecido"] = {
             "treasury_10y": mc.treasury_10y,
+            "treasury_2y": mc.treasury_2y,
+            "yield_spread": mc.yield_spread,
             "vix": mc.vix,
             "dxy": mc.dxy,
             "petroleo_wti": mc.petroleo_wti,
@@ -211,6 +216,15 @@ async def _analisar_com_ia(
         }
         if mc.flags:
             payload["alertas_macro"] = mc.flags
+
+    # ── Regime macro 4-estados + guardrails (Fase 1 Cérebro Híbrido) ──────
+    if contexto and hasattr(contexto, "regime_macro"):
+        payload["regime_macro_4state"] = contexto.regime_macro
+        payload["regime_score"] = contexto.regime_score
+        payload["confianca_macro"] = contexto.confianca_macro
+        payload["fase_selic"] = contexto.fase_selic
+        if contexto.guardrails:
+            payload["guardrails_macro"] = contexto.guardrails
 
     if contexto and hasattr(contexto, "narrativa_macro") and contexto.narrativa_macro:
         payload["narrativa_macro"] = contexto.narrativa_macro[:2000]
@@ -308,6 +322,19 @@ Sua missão: portfólio que supere benchmarks (IBOV / CDI) com risco proporciona
   * fase "colheita" → FIIs/Dividendos/RF dominam. Alpha só se muito assimétrico.
   * meta_viavel=false → NÃO monte estratégia RENDA ainda. Foco total em acumulação.
   * estrategia_recomendada no plano tem PRIORIDADE sobre parâmetro estrategia.
+
+━━━ GUARDRAILS (LIMITES HARD POR REGIME MACRO) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Se "guardrails_macro" estiver no payload, estes limites são INVIOLÁVEIS:
+  - equity_max_pct: teto MÁXIMO para soma de ações + ETFs + FIIs + Momentum + Alpha + Dividendos + Wheel
+  - rf_min_pct: MÍNIMO de alocação em Renda Fixa
+  - caixa_min_pct: MÍNIMO de caixa (liquidez imediata)
+Se violar qualquer guardrail, REDUZA equity e AUMENTE RF/caixa até cumprir.
+Justifique na "analise" o regime macro e os limites aplicados.
+O campo "regime_macro_4state" indica o regime determinístico (não o regime técnico de 3 estados).
+  - RISK_ON_FORTE: ambiente favorável, equity pode ir até o máximo
+  - RISK_ON_MODERADO: bom com ressalvas, equity moderado
+  - NEUTRO: cenário indefinido, postura conservadora
+  - RISK_OFF: cenário hostil, preservação de capital é PRIORIDADE
 
 ━━━ FRAMEWORK DE DECISÃO (OBRIGATÓRIO para cada ativo) ━━━━━━━━━━━━━━━━━━━━
 Para CADA ativo na carteira_final, a justificativa_ceo DEVE começar com uma das ações:
@@ -596,6 +623,90 @@ def _sizing_v2_ajuste(sugestoes: list[SugestaoMotor], capital: float) -> list[Su
             s.valor_total = novo_valor
 
     return sugestoes
+
+
+# ─── Validação hard de guardrails pós-IA ──────────────────────────────────────
+
+def _validar_guardrails(
+    resultado: ResultadoGestorGeral,
+    guardrails: dict,
+    capital: float,
+) -> ResultadoGestorGeral:
+    """
+    Valida e ajusta a carteira final para respeitar os guardrails do regime macro.
+    Se a IA alocou equity acima do limite, reduz proporcionalmente e move para caixa.
+    """
+    equity_max_pct = guardrails.get("equity_max_pct")
+    rf_min_pct = guardrails.get("rf_min_pct")
+    caixa_min_pct = guardrails.get("caixa_min_pct")
+
+    if not equity_max_pct and not rf_min_pct and not caixa_min_pct:
+        return resultado
+
+    sugestoes = resultado.sugestoes_finais
+    if not sugestoes or capital <= 0:
+        return resultado
+
+    # Classifica posições
+    _equity_tipos = {"ACAO", "ETF", "FII", "OPCAO"}
+    equity = [s for s in sugestoes if s.tipo.upper() in _equity_tipos]
+    rf = [s for s in sugestoes if s.tipo.upper() == "RF"]
+    caixa = [s for s in sugestoes if s.tipo.upper() == "CAIXA"]
+    outros = [s for s in sugestoes if s not in equity and s not in rf and s not in caixa]
+
+    equity_total = sum(s.valor_total for s in equity)
+    rf_total = sum(s.valor_total for s in rf)
+    caixa_total = sum(s.valor_total for s in caixa)
+
+    equity_pct = (equity_total / capital) * 100
+    rf_pct = (rf_total / capital) * 100
+    caixa_pct = (caixa_total / capital) * 100
+
+    ajustes = []
+    excesso_equity = 0
+
+    # Check equity max
+    if equity_max_pct and equity_pct > equity_max_pct:
+        max_equity = capital * equity_max_pct / 100
+        excesso_equity = equity_total - max_equity
+        # Reduz proporcionalmente todas as posições equity
+        fator = max_equity / equity_total if equity_total > 0 else 1
+        for s in equity:
+            s.valor_total = round(s.valor_total * fator, 2)
+            if s.preco_atual > 1.0:
+                s.quantidade = max(1, round(s.valor_total / s.preco_atual))
+                s.valor_total = round(s.quantidade * s.preco_atual, 2)
+        ajustes.append(
+            f"GUARDRAIL: equity reduzido de {equity_pct:.0f}% para {equity_max_pct}% "
+            f"(excesso R${excesso_equity:,.0f} movido para caixa)"
+        )
+
+    # Check RF min
+    if rf_min_pct and rf_pct < rf_min_pct:
+        ajustes.append(
+            f"GUARDRAIL: RF em {rf_pct:.0f}% (mínimo {rf_min_pct}%) — ajuste recomendado"
+        )
+
+    # Check caixa min
+    if caixa_min_pct:
+        min_caixa = capital * caixa_min_pct / 100
+        if caixa_total < min_caixa:
+            ajustes.append(
+                f"GUARDRAIL: caixa em {caixa_pct:.0f}% (mínimo {caixa_min_pct}%) — excesso movido para caixa"
+            )
+
+    if ajustes:
+        # Recalcula e rebalanceia caixa
+        resultado.sugestoes_finais = _balancear_caixa(
+            equity + rf + caixa + outros, capital
+        )
+        resultado.ajustes_realizados.extend(ajustes)
+        resultado.alertas.append(
+            f"Guardrails aplicados: regime macro limitou equity a {equity_max_pct}%"
+        )
+        logger.info("gestor_geral: guardrails aplicados — %s", "; ".join(ajustes))
+
+    return resultado
 
 
 # ─── CEO Brain em modo AVALIAÇÃO (carteira existente vs mercado hoje) ─────────

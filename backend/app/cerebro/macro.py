@@ -33,12 +33,63 @@ CACHE_TTL_MACRO_BR = 600        # 10 min
 
 # ─── Dataclass principal ────────────────────────────────────────────────────
 
+# ─── Regime 4-estados ──────────────────────────────────────────────────────
+
+class RegimeMacro:
+    """Regime macro em 4 estados com score numérico."""
+    RISK_ON_FORTE = "RISK_ON_FORTE"
+    RISK_ON_MODERADO = "RISK_ON_MODERADO"
+    NEUTRO = "NEUTRO"
+    RISK_OFF = "RISK_OFF"
+
+
+class FaseSelic:
+    """Fase do ciclo de juros doméstico."""
+    ALTA = "ALTA"               # Selic subindo
+    PICO = "PICO"               # Última alta, pausa
+    TRANSICAO = "TRANSICAO"     # Pausa prolongada, mercado espera corte
+    QUEDA = "QUEDA"             # Selic caindo
+    VALE = "VALE"               # Última queda, Selic estável no fundo
+
+
+# ─── Guardrails por regime ──────────────────────────────────────────────────
+
+GUARDRAILS_POR_REGIME: dict[str, dict] = {
+    RegimeMacro.RISK_ON_FORTE: {
+        "equity_max_pct": 60,
+        "rf_min_pct": 10,
+        "caixa_min_pct": 5,
+        "descricao": "Cenário favorável — máxima exposição a risco permitida",
+    },
+    RegimeMacro.RISK_ON_MODERADO: {
+        "equity_max_pct": 45,
+        "rf_min_pct": 20,
+        "caixa_min_pct": 10,
+        "descricao": "Cenário positivo com ressalvas — exposição moderada",
+    },
+    RegimeMacro.NEUTRO: {
+        "equity_max_pct": 30,
+        "rf_min_pct": 25,
+        "caixa_min_pct": 15,
+        "descricao": "Cenário indefinido — postura conservadora",
+    },
+    RegimeMacro.RISK_OFF: {
+        "equity_max_pct": 15,
+        "rf_min_pct": 30,
+        "caixa_min_pct": 40,
+        "descricao": "Cenário hostil — preservação de capital",
+    },
+}
+
+
 @dataclass
 class MacroContext:
-    """Snapshot macro completo — global + Brasil."""
+    """Snapshot macro completo — global + Brasil + regime + confiança."""
 
     # Global
     treasury_10y: Optional[float] = None       # US Treasury 10Y yield (%)
+    treasury_2y: Optional[float] = None        # US Treasury 2Y yield (%)
+    yield_spread: Optional[float] = None       # 10Y - 2Y (negativo = curva invertida)
     vix: Optional[float] = None                # Índice de volatilidade
     dxy: Optional[float] = None                # Dollar Index
     dxy_mm50: Optional[float] = None           # DXY MM50 (para flag "dólar forte")
@@ -50,7 +101,7 @@ class MacroContext:
     sp500_mm200: Optional[float] = None        # S&P 500 MM200
     ouro: Optional[float] = None               # Ouro (USD/oz)
 
-    # Calendário econômico (dados reais via Finnhub/BCB)
+    # Calendário econômico (dados reais)
     calendario_eventos: list = field(default_factory=list)
 
     # Brasil
@@ -63,6 +114,13 @@ class MacroContext:
     dolar_var_pct: Optional[float] = None      # USD/BRL variação dia (%)
     ibov: Optional[float] = None               # IBOVESPA pontos
     ibov_var_pct: Optional[float] = None       # IBOVESPA variação dia (%)
+
+    # ── Regime & inteligência macro (NOVO — Fase 1 Cérebro Híbrido) ──────
+    regime_macro: str = RegimeMacro.NEUTRO     # 4-estados: RISK_ON_FORTE / MOD / NEUTRO / OFF
+    regime_score: int = 50                     # 0-100 (> 70 = risk-on forte, < 25 = risk-off)
+    confianca: int = 50                        # 0-100 — quanto os indicadores concordam
+    fase_selic: str = FaseSelic.TRANSICAO      # Fase do ciclo de juros BR
+    guardrails: dict = field(default_factory=dict)  # equity_max, rf_min, caixa_min
 
     # Metadata
     atualizado_em: Optional[str] = None
@@ -118,6 +176,16 @@ class MacroContext:
             if self.ibov_var_pct is not None:
                 txt += f" ({self.ibov_var_pct:+.2f}%)"
             partes.append(txt)
+
+        # Regime & Confiança
+        partes.append("\n=== REGIME MACRO ===")
+        partes.append(f"Regime: {self.regime_macro} (score {self.regime_score}/100, confiança {self.confianca}/100)")
+        partes.append(f"Fase Selic: {self.fase_selic}")
+        if self.yield_spread is not None:
+            estado = "INVERTIDA ⚠" if self.yield_spread < 0 else "normal"
+            partes.append(f"Curva de Juros EUA (10Y-2Y): {self.yield_spread:+.2f}pp ({estado})")
+        if self.guardrails:
+            partes.append(f"Guardrails: equity max {self.guardrails.get('equity_max_pct')}% | RF min {self.guardrails.get('rf_min_pct')}% | caixa min {self.guardrails.get('caixa_min_pct')}%")
 
         if self.flags:
             partes.append("\n=== ALERTAS MACRO ===")
@@ -182,10 +250,11 @@ async def _coletar_global() -> dict:
         return cached
 
     (
-        treasury, vix, dxy, wti, brent, (sp500, sp500_var), ouro,
+        treasury, treasury_2y, vix, dxy, wti, brent, (sp500, sp500_var), ouro,
         dxy_mm50, sp500_mm50, sp500_mm200,
     ) = await asyncio.gather(
         _get_yf_price("^TNX"),
+        _get_yf_price("^IRX"),     # Treasury 2Y (13-week proxy via ^IRX)
         _get_yf_price("^VIX"),
         _get_yf_price("DX-Y.NYB"),
         _get_yf_price("CL=F"),
@@ -197,8 +266,15 @@ async def _coletar_global() -> dict:
         _get_yf_mm("^GSPC", 200),
     )
 
+    # Yield spread (curva de juros) — negativo = invertida = sinal de recessão
+    yield_spread = None
+    if treasury is not None and treasury_2y is not None:
+        yield_spread = round(treasury - treasury_2y, 3)
+
     result = {
         "treasury_10y": treasury,
+        "treasury_2y": treasury_2y,
+        "yield_spread": yield_spread,
         "vix": vix,
         "dxy": dxy,
         "dxy_mm50": dxy_mm50,
@@ -254,6 +330,146 @@ async def _coletar_brasil() -> dict:
     }
     cache.set(key, result, ttl=CACHE_TTL_MACRO_BR)
     return result
+
+
+# ─── Regime macro 4-estados (scoring) ────────────────────────────────────────
+
+def _calcular_regime_macro(ctx: MacroContext) -> tuple[str, int, int]:
+    """
+    Calcula regime macro baseado em pontuação de indicadores.
+    Retorna (regime_4state, score 0-100, confiança 0-100).
+
+    Cada indicador contribui com pontos positivos (risk-on) ou negativos (risk-off).
+    Score final é normalizado para 0-100.
+    Confiança mede o quanto os sinais concordam entre si.
+    """
+    sinais: list[int] = []  # +1 = risk-on, -1 = risk-off, 0 = neutro
+
+    pontos = 50  # base neutra
+
+    # --- VIX ---
+    if ctx.vix is not None:
+        if ctx.vix < 15:
+            pontos += 15; sinais.append(1)
+        elif ctx.vix < 20:
+            pontos += 5; sinais.append(1)
+        elif ctx.vix < 25:
+            sinais.append(0)
+        elif ctx.vix < 30:
+            pontos -= 10; sinais.append(-1)
+        else:
+            pontos -= 20; sinais.append(-1)
+
+    # --- DXY vs MM50 ---
+    if ctx.dxy is not None and ctx.dxy_mm50 is not None:
+        if ctx.dxy < ctx.dxy_mm50:
+            pontos += 10; sinais.append(1)   # dólar fraco = bom p/ emergentes
+        else:
+            pontos -= 10; sinais.append(-1)
+
+    # --- Juro real BR ---
+    if ctx.juro_real is not None:
+        if ctx.juro_real < 4:
+            pontos += 10; sinais.append(1)
+        elif ctx.juro_real < 6:
+            sinais.append(0)
+        else:
+            pontos -= 15; sinais.append(-1)
+
+    # --- Treasury 10Y ---
+    if ctx.treasury_10y is not None:
+        if ctx.treasury_10y < 4:
+            pontos += 10; sinais.append(1)
+        elif ctx.treasury_10y < 5:
+            sinais.append(0)
+        else:
+            pontos -= 10; sinais.append(-1)
+
+    # --- Yield spread (curva de juros) ---
+    if ctx.yield_spread is not None:
+        if ctx.yield_spread > 0:
+            pontos += 10; sinais.append(1)
+        else:
+            pontos -= 15; sinais.append(-1)  # curva invertida
+
+    # --- S&P 500 vs MM200 ---
+    if ctx.sp500 is not None and ctx.sp500_mm200 is not None:
+        if ctx.sp500 > ctx.sp500_mm200:
+            pontos += 10; sinais.append(1)
+        else:
+            pontos -= 10; sinais.append(-1)
+
+    # --- IBOV direction ---
+    if ctx.ibov_var_pct is not None:
+        if ctx.ibov_var_pct > 0:
+            pontos += 5; sinais.append(1)
+        elif ctx.ibov_var_pct < -1:
+            pontos -= 5; sinais.append(-1)
+        else:
+            sinais.append(0)
+
+    # --- Petróleo ---
+    if ctx.petroleo_wti is not None:
+        if 60 <= ctx.petroleo_wti <= 90:
+            pontos += 5; sinais.append(1)
+        elif ctx.petroleo_wti > 100:
+            pontos -= 5; sinais.append(-1)
+        else:
+            sinais.append(0)
+
+    # Clamp score entre 0 e 100
+    score = max(0, min(100, pontos))
+
+    # Confiança: mede concordância dos sinais
+    if sinais:
+        positivos = sum(1 for s in sinais if s > 0)
+        negativos = sum(1 for s in sinais if s < 0)
+        total = len(sinais)
+        maioria = max(positivos, negativos)
+        confianca = int((maioria / total) * 100)
+    else:
+        confianca = 0
+
+    # Classificar regime
+    if score >= 70:
+        regime = RegimeMacro.RISK_ON_FORTE
+    elif score >= 45:
+        regime = RegimeMacro.RISK_ON_MODERADO
+    elif score >= 25:
+        regime = RegimeMacro.NEUTRO
+    else:
+        regime = RegimeMacro.RISK_OFF
+
+    return regime, score, confianca
+
+
+def _classificar_fase_selic(selic: Optional[float], selic_exp: Optional[float]) -> str:
+    """
+    Classifica a fase do ciclo Selic com base na taxa atual vs expectativa Focus.
+
+    - ALTA:      mercado espera Selic subir (exp > atual + 0.5)
+    - PICO:      Selic alta (~12%+) e estável (exp ≈ atual)
+    - TRANSICAO: indefinido ou dados insuficientes
+    - QUEDA:     mercado espera Selic cair (exp < atual - 0.5)
+    - VALE:      Selic baixa (~8%-) e estável (exp ≈ atual)
+    """
+    if selic is None or selic_exp is None:
+        return FaseSelic.TRANSICAO
+
+    diff = selic_exp - selic
+
+    if diff >= 0.5:
+        return FaseSelic.ALTA
+    elif diff <= -0.5:
+        return FaseSelic.QUEDA
+    else:
+        # Selic e expectativa próximas — estável
+        if selic >= 12:
+            return FaseSelic.PICO
+        elif selic <= 8:
+            return FaseSelic.VALE
+        else:
+            return FaseSelic.TRANSICAO
 
 
 # ─── Flags macro automáticas ────────────────────────────────────────────────
@@ -324,6 +540,8 @@ async def montar_macro() -> MacroContext:
 
     ctx = MacroContext(
         treasury_10y=global_data.get("treasury_10y"),
+        treasury_2y=global_data.get("treasury_2y"),
+        yield_spread=global_data.get("yield_spread"),
         vix=global_data.get("vix"),
         dxy=global_data.get("dxy"),
         dxy_mm50=global_data.get("dxy_mm50"),
@@ -346,6 +564,15 @@ async def montar_macro() -> MacroContext:
         calendario_eventos=calendario,
         atualizado_em=datetime.now(timezone.utc).isoformat(),
     )
+
+    # ── Regime macro 4-estados + fase Selic + guardrails ──
+    regime, score, confianca = _calcular_regime_macro(ctx)
+    ctx.regime_macro = regime
+    ctx.regime_score = score
+    ctx.confianca = confianca
+    ctx.fase_selic = _classificar_fase_selic(ctx.selic, ctx.selic_expectativa)
+    ctx.guardrails = GUARDRAILS_POR_REGIME.get(regime, GUARDRAILS_POR_REGIME[RegimeMacro.NEUTRO])
+
     ctx.flags = _calcular_flags(ctx)
 
     cache.set(key, ctx, ttl=CACHE_TTL_MACRO_BR)

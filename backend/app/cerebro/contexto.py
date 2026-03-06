@@ -79,6 +79,13 @@ class ContextoCerebro:
     regime_info: Optional[object] = field(default=None)     # RegimeInfo com sinais e flags
     narrativa_macro: str = ""                               # Narrativa diária gerada pela IA
 
+    # ── Regime macro 4-estados (Fase 1 Cérebro Híbrido) ──────────────────
+    regime_macro: str = "NEUTRO"          # RISK_ON_FORTE / MOD / NEUTRO / RISK_OFF
+    regime_score: int = 50                # 0-100
+    confianca_macro: int = 50             # 0-100
+    fase_selic: str = "TRANSICAO"         # ALTA / PICO / TRANSICAO / QUEDA / VALE
+    guardrails: dict = field(default_factory=dict)  # equity_max_pct, rf_min_pct, caixa_min_pct
+
     # ── Metadados ─────────────────────────────────────────────────────────
     gerado_em: str = ""            # ISO timestamp de quando o contexto foi montado
     modulos_ativos: list[str] = field(default_factory=list)  # módulos configurados com alvo > 0
@@ -360,6 +367,19 @@ async def montar(
     except ImportError:
         pass
 
+    # ── Regime macro 4-estados (do MacroContext) ─────────────────────────
+    _regime_macro = "NEUTRO"
+    _regime_score = 50
+    _confianca = 50
+    _fase_selic = "TRANSICAO"
+    _guardrails = {}
+    if macro_context_obj:
+        _regime_macro = getattr(macro_context_obj, "regime_macro", "NEUTRO")
+        _regime_score = getattr(macro_context_obj, "regime_score", 50)
+        _confianca = getattr(macro_context_obj, "confianca", 50)
+        _fase_selic = getattr(macro_context_obj, "fase_selic", "TRANSICAO")
+        _guardrails = getattr(macro_context_obj, "guardrails", {})
+
     return ContextoCerebro(
         # Perfil
         user_id=user.id,
@@ -379,6 +399,12 @@ async def montar(
         macro_context=macro_context_obj,
         regime_info=regime_info_obj,
         narrativa_macro=narrativa or "",
+        # Regime macro 4-estados
+        regime_macro=_regime_macro,
+        regime_score=_regime_score,
+        confianca_macro=_confianca,
+        fase_selic=_fase_selic,
+        guardrails=_guardrails,
         # Carteira
         portfolio_id=portfolio.id,
         patrimonio_total=patrimonio,
