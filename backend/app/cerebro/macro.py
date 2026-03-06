@@ -206,8 +206,8 @@ class MacroContext:
 async def _get_yf_price(symbol: str) -> Optional[float]:
     """Busca last_price de um ticker yFinance."""
     try:
-        ticker = await _run_sync(lambda: yf.Ticker(symbol))
-        info = await _run_sync(lambda: ticker.fast_info)
+        ticker = await _run_sync(lambda s=symbol: yf.Ticker(s))
+        info = await _run_sync(lambda t=ticker: t.fast_info)
         return float(info.last_price)
     except Exception as e:
         logger.debug("macro._get_yf_price(%s) falhou: %s", symbol, e)
@@ -217,8 +217,8 @@ async def _get_yf_price(symbol: str) -> Optional[float]:
 async def _get_yf_price_and_change(symbol: str) -> tuple[Optional[float], Optional[float]]:
     """Busca last_price e variação % de um ticker yFinance."""
     try:
-        ticker = await _run_sync(lambda: yf.Ticker(symbol))
-        info = await _run_sync(lambda: ticker.fast_info)
+        ticker = await _run_sync(lambda s=symbol: yf.Ticker(s))
+        info = await _run_sync(lambda t=ticker: t.fast_info)
         price = float(info.last_price)
         prev = float(info.previous_close)
         change = (price - prev) / prev * 100 if prev else None
@@ -231,8 +231,9 @@ async def _get_yf_price_and_change(symbol: str) -> tuple[Optional[float], Option
 async def _get_yf_mm(symbol: str, period: int = 50) -> Optional[float]:
     """Calcula MM de N períodos para um ticker yFinance."""
     try:
+        # period="1y" garante ~252 pregões (suficiente para MM200)
         df = await _run_sync(
-            lambda: yf.download(symbol, period="6mo", interval="1d", progress=False)
+            lambda s=symbol: yf.download(s, period="1y", interval="1d", progress=False)
         )
         if df.empty or len(df) < period:
             return None
@@ -240,6 +241,29 @@ async def _get_yf_mm(symbol: str, period: int = 50) -> Optional[float]:
         return float(sum(closes[-period:]) / period)
     except Exception:
         return None
+
+
+def _calcular_mms_batch() -> dict:
+    """
+    Calcula todas as MMs necessárias de forma SEQUENCIAL em um único thread.
+    yf.download NÃO é thread-safe — chamadas paralelas misturam dados.
+    """
+    resultado = {}
+    for symbol, period, key in [
+        ("DX-Y.NYB", 50, "dxy_mm50"),
+        ("^GSPC", 50, "sp500_mm50"),
+        ("^GSPC", 200, "sp500_mm200"),
+    ]:
+        try:
+            df = yf.download(symbol, period="1y", interval="1d", progress=False)
+            if df.empty or len(df) < period:
+                resultado[key] = None
+                continue
+            closes = df["Close"].values.flatten()
+            resultado[key] = float(sum(closes[-period:]) / period)
+        except Exception:
+            resultado[key] = None
+    return resultado
 
 
 async def _coletar_global() -> dict:
@@ -251,7 +275,7 @@ async def _coletar_global() -> dict:
 
     (
         treasury, treasury_2y, vix, dxy, wti, brent, (sp500, sp500_var), ouro,
-        dxy_mm50, sp500_mm50, sp500_mm200,
+        mms,
     ) = await asyncio.gather(
         _get_yf_price("^TNX"),
         _get_yf_price("^IRX"),     # Treasury 2Y (13-week proxy via ^IRX)
@@ -261,10 +285,12 @@ async def _coletar_global() -> dict:
         _get_yf_price("BZ=F"),
         _get_yf_price_and_change("^GSPC"),
         _get_yf_price("GC=F"),
-        _get_yf_mm("DX-Y.NYB", 50),
-        _get_yf_mm("^GSPC", 50),
-        _get_yf_mm("^GSPC", 200),
+        _run_sync(_calcular_mms_batch),  # MMs sequenciais em 1 thread (thread-safe)
     )
+
+    dxy_mm50 = mms.get("dxy_mm50")
+    sp500_mm50 = mms.get("sp500_mm50")
+    sp500_mm200 = mms.get("sp500_mm200")
 
     # Yield spread (curva de juros) — negativo = invertida = sinal de recessão
     yield_spread = None
