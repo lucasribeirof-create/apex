@@ -39,6 +39,8 @@ import yfinance as yf
 from app.cerebro.especialistas import SugestaoMotor
 from app.cerebro.especialistas.watchlist import MOMENTUM_WATCHLIST
 from app.cerebro.especialistas import prefetch as _pf
+from app.cerebro.especialistas.candles import detectar_padroes, resumo_padroes
+from app.cerebro.especialistas.fibonacci import calcular_fibonacci
 
 # ── Parâmetros do motor ──────────────────────────────────────────────────────
 MIN_RR           = 2.0    # risco/retorno mínimo para incluir
@@ -52,6 +54,87 @@ CAPITAL_MIN      = 1_000  # mínimo por posição
 _IBOV_HIST: Optional[pd.Series] = None  # cache IBOV para força relativa
 _ibov_cache: dict = {"valor": None, "ts": 0.0}  # cache de retorno IBOV 20d
 _IBOV_CACHE_TTL = 300.0  # 5 minutos
+
+# Cache semanal por ticker (TTL 5min, mesma janela do prefetch)
+_weekly_cache: dict[str, dict] = {}
+_weekly_cache_ts: float = 0.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ANÁLISE SEMANAL (Multi-Timeframe)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _verificar_tendencia_semanal(ticker: str) -> dict:
+    """
+    Verifica a tendência semanal do ticker.
+    Regra: NUNCA comprar no diário se o semanal está em tendência de baixa.
+
+    Returns:
+        dict com:
+          - semanal_ok: True se tendência semanal é compatível com compra
+          - mm40w: float — MM40 semanal (≈ MM200 diária)
+          - mm10w: float — MM10 semanal (≈ MM50 diária)
+          - acima_mm40w: bool
+          - tendencia_semanal: "alta" | "baixa" | "neutra"
+    """
+    import time
+    now = time.monotonic()
+    cache_key = ticker.upper()
+
+    # Cache check
+    if cache_key in _weekly_cache and (now - _weekly_cache_ts) < _IBOV_CACHE_TTL:
+        return _weekly_cache[cache_key]
+
+    resultado = {
+        "semanal_ok": True,
+        "mm40w": 0.0,
+        "mm10w": 0.0,
+        "acima_mm40w": True,
+        "tendencia_semanal": "neutra",
+    }
+
+    try:
+        yf_ticker = ticker.upper()
+        if not yf_ticker.endswith(".SA"):
+            yf_ticker += ".SA"
+
+        t = yf.Ticker(yf_ticker)
+        weekly = t.history(period="2y", interval="1wk", auto_adjust=True)
+        if weekly is None or len(weekly) < 40:
+            return resultado  # dados insuficientes → não bloqueia
+
+        close_w = weekly["Close"]
+        preco_w = float(close_w.iloc[-1])
+
+        mm40w = float(close_w.rolling(40, min_periods=20).mean().iloc[-1])
+        mm10w = float(close_w.rolling(10, min_periods=5).mean().iloc[-1])
+
+        acima_mm40w = preco_w > mm40w
+        acima_mm10w = preco_w > mm10w
+
+        if acima_mm40w and acima_mm10w:
+            tendencia = "alta"
+            semanal_ok = True
+        elif acima_mm40w:
+            tendencia = "neutra"
+            semanal_ok = True  # pullback dentro da tendência → ok
+        else:
+            tendencia = "baixa"
+            semanal_ok = False  # abaixo da MM40 semanal → NÃO comprar
+
+        resultado = {
+            "semanal_ok": semanal_ok,
+            "mm40w": round(mm40w, 2),
+            "mm10w": round(mm10w, 2),
+            "acima_mm40w": acima_mm40w,
+            "tendencia_semanal": tendencia,
+        }
+
+    except Exception:
+        pass  # falha silenciosa → não bloqueia a análise
+
+    _weekly_cache[cache_key] = resultado
+    return resultado
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -80,7 +163,13 @@ def _analisar_momentum(ticker: str, ibov_ret_20d: float) -> Optional[dict]:
     """
     Analisa todos os indicadores técnicos de momentum para um ticker.
     Retorna None se não houver dados suficientes ou o ativo não passar nos filtros.
+    Fase 6: inclui filtro semanal, Fibonacci e padrões de candle.
     """
+    # ── FILTRO SEMANAL (Multi-Timeframe — Fase 6) ─────────────────────────
+    weekly = _verificar_tendencia_semanal(ticker)
+    if not weekly["semanal_ok"]:
+        return None  # tendência semanal de baixa → NÃO comprar
+
     hist = None
     # Tenta prefetch primeiro
     pf = _pf.get(ticker)
@@ -199,6 +288,20 @@ def _analisar_momentum(ticker: str, ibov_ret_20d: float) -> Optional[dict]:
     retorno = alvo - preco
     rr      = round(retorno / risco, 2) if risco > 0 else 0.0
 
+    # ── Fibonacci Retracements (Fase 6) ───────────────────────────────────
+    fib = calcular_fibonacci(
+        hist, preco, suporte=suporte, mm20=mm20, mm50=mm50,
+        lookback=60, tolerancia=0.02,
+    )
+    fib_score = fib.score_fib if fib else 0
+
+    # ── Padrões de Candle (Fase 6) ────────────────────────────────────────
+    candle_padroes = detectar_padroes(
+        hist, suporte=suporte, resistencia=resistencia, mm20=mm20, n_ultimas=5,
+    )
+    candle_resumo = resumo_padroes(candle_padroes)
+    candle_score = max(min(candle_resumo["score_candles"], 15), -15)  # cap ±15
+
     # ── Filtros eliminatórios ─────────────────────────────────────────────────
     if not golden_cross:         return None   # sem tendência estrutural
     if rsi < RSI_MIN:            return None   # sem força compradora
@@ -239,6 +342,16 @@ def _analisar_momentum(ticker: str, ibov_ret_20d: float) -> Optional[dict]:
     elif rr >= 2.5: score += 6
     else:           score += 2
 
+    # Fibonacci (Fase 6) — 0 a 15 pontos
+    score += fib_score
+
+    # Candle patterns (Fase 6) — -15 a +15 pontos
+    score += candle_score
+
+    # Tendência semanal bonus (Fase 6) — semanal em alta = +5
+    if weekly.get("tendencia_semanal") == "alta":
+        score += 5
+
     return {
         "ticker":          ticker,
         "preco":           round(preco, 2),
@@ -263,6 +376,19 @@ def _analisar_momentum(ticker: str, ibov_ret_20d: float) -> Optional[dict]:
         "resistencia":     resistencia,
         "suporte":         suporte,
         "score":           round(score, 1),
+        # Phase 6 — Multi-Timeframe
+        "tendencia_semanal": weekly.get("tendencia_semanal", "neutra"),
+        "mm40w":             weekly.get("mm40w", 0.0),
+        "mm10w":             weekly.get("mm10w", 0.0),
+        # Phase 6 — Fibonacci
+        "fib_zona":          fib.zona_atual if fib else None,
+        "fib_confluencia":   fib.confluencia_desc if fib and fib.confluencia else None,
+        "fib_score":         fib_score,
+        "fib_niveis":        {"38.2": fib.nivel_382, "50": fib.nivel_500, "61.8": fib.nivel_618} if fib else None,
+        # Phase 6 — Candle Patterns
+        "candle_padroes_alta":  candle_resumo["padroes_alta"],
+        "candle_padroes_baixa": candle_resumo["padroes_baixa"],
+        "candle_score":         candle_score,
     }
 
 
@@ -284,6 +410,13 @@ def _justificativa(d: dict) -> str:
         f"Golden Cross ativo (MM50 > MM200) — tendência estrutural de alta confirmada"
     )
 
+    # Tendência semanal (Fase 6)
+    tend_w = d.get("tendencia_semanal", "neutra")
+    if tend_w == "alta":
+        partes.append("tendência semanal em alta (acima MM40w e MM10w) — confluência multi-timeframe")
+    elif tend_w == "neutra":
+        partes.append("semanal neutro (pullback acima MM40w) — aceitável para entrada")
+
     # RSI
     rsi = d["rsi"]
     if 55 <= rsi <= 68:
@@ -299,6 +432,17 @@ def _justificativa(d: dict) -> str:
         partes.append(f"ação superando IBOV em {fr:+.1f}% nos últimos 20 pregões — liderança setorial")
     elif fr >= 0:
         partes.append(f"força relativa neutra vs IBOV ({fr:+.1f}%)")
+
+    # Fibonacci (Fase 6)
+    if d.get("fib_confluencia"):
+        partes.append(d["fib_confluencia"])
+    elif d.get("fib_zona"):
+        partes.append(f"preço em zona Fibonacci {d['fib_zona']}% — retração saudável")
+
+    # Candle patterns (Fase 6)
+    candle_alta = d.get("candle_padroes_alta", [])
+    if candle_alta:
+        partes.append(f"padrão(ões) altista(s): {', '.join(candle_alta[:2])}")
 
     # Posição vs MM200
     partes.append(
@@ -413,6 +557,18 @@ async def rodar(
                 # Sizing (Phase 4)
                 "risco_pct_patrimonio": sz.risco_pct_patrimonio if sz else None,
                 "sizing_method":       "ATR" if (sz and sz.atr14 > 0) else "equal_weight",
+                # Multi-Timeframe (Phase 6)
+                "tendencia_semanal":   d.get("tendencia_semanal", "neutra"),
+                "mm40w":               d.get("mm40w", 0.0),
+                # Fibonacci (Phase 6)
+                "fib_zona":            d.get("fib_zona"),
+                "fib_confluencia":     d.get("fib_confluencia"),
+                "fib_score":           d.get("fib_score", 0),
+                "fib_niveis":          d.get("fib_niveis"),
+                # Candle Patterns (Phase 6)
+                "candle_padroes_alta":  d.get("candle_padroes_alta", []),
+                "candle_padroes_baixa": d.get("candle_padroes_baixa", []),
+                "candle_score":         d.get("candle_score", 0),
             },
         ))
 
