@@ -238,6 +238,24 @@ async def _analisar_com_ia(
             ],
         }
 
+    # ── Circuit Breaker + Heat (Fase 4 Cérebro Híbrido) ──────────────────
+    if contexto and hasattr(contexto, "circuit_breaker") and contexto.circuit_breaker:
+        cb = contexto.circuit_breaker
+        payload["circuit_breaker"] = {
+            "nivel": cb.nivel,
+            "ativo": cb.ativo,
+            "sizing_modifier": cb.sizing_modifier,
+            "motivo": cb.motivo,
+            "pl_mes_pct": cb.pl_mes_pct,
+        }
+    if contexto and hasattr(contexto, "heat") and contexto.heat:
+        ht = contexto.heat
+        payload["heat"] = {
+            "heat_pct": ht.heat_pct,
+            "pode_operar": ht.pode_operar,
+            "heat_reais": ht.heat_reais,
+        }
+
     if contexto and hasattr(contexto, "narrativa_macro") and contexto.narrativa_macro:
         payload["narrativa_macro"] = contexto.narrativa_macro[:2000]
 
@@ -356,6 +374,22 @@ Se "ranking_setorial" estiver no payload, use como VIÉS (não filtro eliminató
 Se 2 candidatos empatarem em qualidade, ESCOLHA o do setor favorecido.
 Se um candidato excelente estiver em setor a evitar, PODE incluir mas com posição menor e justificativa.
 Mencione o viés setorial na "analise" quando relevante.
+
+━━━ CIRCUIT BREAKER & HEAT (CONTROLE DE RISCO EM TEMPO REAL) ━━━━━━━━━━━━━━
+Se "circuit_breaker" estiver no payload:
+  - nivel 0: normal — sizing padrão
+  - nivel 1: perda mensal ≥5% — sizing REDUZIDO pela metade. Apenas entradas de alta convicção.
+  - nivel 2: perda mensal ≥8% — PAUSA de novas operações. Apenas HOLD/MANTER existentes.
+  - nivel 3: perda mensal ≥10% — PAUSA TOTAL até próximo mês. Zero operações novas.
+Se circuit breaker ativo, MENCIONE na "analise" e RESPEITE a restrição.
+
+Se "heat" estiver no payload:
+  - heat_pct: % do patrimônio em risco simultâneo (soma de distância-ao-stop de todas posições)
+  - pode_operar: false se heat ≥ 6% → NÃO adicione novas posições de risco
+  - Se heat alto, PRIORIZE fechar posições fracas antes de abrir novas
+
+Position sizing foi calculado por risco (ATR-based): ativos voláteis recebem posição menor,
+ativos estáveis recebem posição maior. Respeite os tamanhos sugeridos pelos motores.
 
 ━━━ FRAMEWORK DE DECISÃO (OBRIGATÓRIO para cada ativo) ━━━━━━━━━━━━━━━━━━━━
 Para CADA ativo na carteira_final, a justificativa_ceo DEVE começar com uma das ações:

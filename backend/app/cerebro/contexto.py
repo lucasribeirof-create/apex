@@ -88,7 +88,10 @@ class ContextoCerebro:
 
     # ── Ranking setorial (Fase 2 Cérebro Híbrido) ────────────────────────
     ranking_setorial: Optional[object] = field(default=None)  # RankingSetorial de setor.py
-
+    # ── Risco & Sizing (Fase 4 Cérebro Híbrido) ─────────────────────────────
+    circuit_breaker: Optional[object] = field(default=None)   # CircuitBreakerState
+    heat: Optional[object] = field(default=None)              # HeatState
+    cb_modifier: float = 1.0     # sizing modifier (1.0=normal, 0.5=CB nível 1, 0.0=pausa)
     # ── Metadados ─────────────────────────────────────────────────────────
     gerado_em: str = ""            # ISO timestamp de quando o contexto foi montado
     modulos_ativos: list[str] = field(default_factory=list)  # módulos configurados com alvo > 0

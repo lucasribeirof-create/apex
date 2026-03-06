@@ -434,10 +434,14 @@ async def rodar(
     n_ativos: int = 3,
     excluir_tickers: list[str] | None = None,
     ranking_setorial: object | None = None,
+    patrimonio_total: float = 0.0,
+    regime: str = "NEUTRO",
+    cb_modifier: float = 1.0,
 ) -> list[SugestaoMotor]:
     """
     Seleciona ações com maior potencial de assimetria na watchlist Alpha.
     Score por 4 pilares × 25pts = 0-100. Red flags eliminam antes do CEO.
+    Position sizing por risco (ATR-based).
     """
     if capital < 2_000:
         return []
@@ -472,13 +476,26 @@ async def rodar(
     if not selecionados:
         return []
 
-    capital_por_ativo = capital / len(selecionados)
+    # ATR-based position sizing (Phase 4)
+    from app.cerebro.sizing import sizing_lote, ATR_STOP_MULT_ALPHA
+    _patrim = patrimonio_total if patrimonio_total > 0 else capital
+    sizing_results = sizing_lote(
+        selecionados, capital, _patrim,
+        regime=regime, atr_mult=ATR_STOP_MULT_ALPHA, cb_modifier=cb_modifier,
+    )
+    sizing_map = {s.ticker: s for s in sizing_results}
+
     saida: list[SugestaoMotor] = []
 
     for d in selecionados:
         preco = d["preco"]
-        qtd   = max(1, int(capital_por_ativo / preco))
-        valor = round(qtd * preco, 2)
+        sz = sizing_map.get(d["ticker"])
+        if sz and sz.qtd > 0:
+            qtd = sz.qtd
+            valor = sz.valor
+        else:
+            qtd = max(1, int(capital / len(selecionados) / preco))
+            valor = round(qtd * preco, 2)
 
         # Upside estimado via múltiplo alvo (P/L alvo = 15× para value plays)
         pl = d.get("pl")
@@ -526,6 +543,11 @@ async def rodar(
                 "upside_estimado_pct": upside_est,
                 "red_flags":           flags,
                 "setor":               _get_setor_ticker(d["ticker"]),
+                # Sizing (Phase 4)
+                "atr14":               sz.atr14 if sz else None,
+                "stop_atr":            sz.stop if sz else None,
+                "risco_pct_patrimonio": sz.risco_pct_patrimonio if sz else None,
+                "sizing_method":       "ATR" if (sz and sz.atr14 > 0) else "equal_weight",
             },
         ))
 

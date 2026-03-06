@@ -326,10 +326,13 @@ async def rodar(
     n_ativos: int = 4,
     excluir_tickers: list[str] | None = None,
     ranking_setorial: object | None = None,
+    patrimonio_total: float = 0.0,
+    regime: str = "NEUTRO",
+    cb_modifier: float = 1.0,
 ) -> list[SugestaoMotor]:
     """
     Roda o motor Momentum: varre a watchlist, filtra por critérios técnicos e
-    retorna os melhores candidatos com alocação de capital e parâmetros operacionais.
+    retorna os melhores candidatos com alocação por risco (ATR-based).
     """
     if capital < CAPITAL_MIN:
         return []
@@ -358,13 +361,26 @@ async def rodar(
     if not selecionados:
         return []
 
-    capital_por_ativo = capital / len(selecionados)
+    # ATR-based position sizing (Phase 4) — Momentum já tem stop e atr14
+    from app.cerebro.sizing import sizing_lote, ATR_STOP_MULT_MOMENTUM
+    _patrim = patrimonio_total if patrimonio_total > 0 else capital
+    sizing_results = sizing_lote(
+        selecionados, capital, _patrim,
+        regime=regime, atr_mult=ATR_STOP_MULT_MOMENTUM, cb_modifier=cb_modifier,
+    )
+    sizing_map = {s.ticker: s for s in sizing_results}
+
     saida: list[SugestaoMotor] = []
 
     for d in selecionados:
         preco = d["preco"]
-        qtd   = max(1, int(capital_por_ativo / preco))
-        valor = round(qtd * preco, 2)
+        sz = sizing_map.get(d["ticker"])
+        if sz and sz.qtd > 0:
+            qtd = sz.qtd
+            valor = sz.valor
+        else:
+            qtd = max(1, int(capital / len(selecionados) / preco))
+            valor = round(qtd * preco, 2)
 
         saida.append(SugestaoMotor(
             modulo="momentum",
@@ -394,6 +410,9 @@ async def rodar(
                 "upside_pct":        round((d["alvo"] / preco - 1) * 100, 1),
                 "downside_pct":      round((d["stop"] / preco - 1) * 100, 1),
                 "setor":             _get_setor_ticker(d["ticker"]),
+                # Sizing (Phase 4)
+                "risco_pct_patrimonio": sz.risco_pct_patrimonio if sz else None,
+                "sizing_method":       "ATR" if (sz and sz.atr14 > 0) else "equal_weight",
             },
         ))
 

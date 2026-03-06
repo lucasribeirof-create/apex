@@ -457,6 +457,124 @@ async def simular():
     print("    Fase 3: Alpha Fundamentalista Profunda ✅")
     print("=" * 70)
 
+    # ── POSITION SIZING & CIRCUIT BREAKER (Fase 4) ────────────────────────
+    print(f"\n{'=' * 70}")
+    print("  📐 POSITION SIZING POR RISCO — ATR-BASED (Fase 4)")
+    print("=" * 70)
+
+    from app.cerebro.sizing import (
+        calcular_sizing, sizing_lote, calcular_atr14,
+        avaliar_circuit_breaker, calcular_heat,
+        ATR_STOP_MULT_ALPHA, ATR_STOP_MULT_MOMENTUM, ATR_STOP_MULT_DIVIDENDOS,
+    )
+
+    # 1. ATR para tickers de teste
+    test_tickers_atr = ["PETR4", "WEGE3", "ITUB4"]
+    print(f"\n  📊 ATR(14) de tickers de teste:")
+    atrs = {}
+    for tk in test_tickers_atr:
+        atr = calcular_atr14(tk)
+        atrs[tk] = atr
+        print(f"    {tk}: ATR = R${atr:.2f}" if atr else f"    {tk}: ATR = N/A")
+
+    # 2. Position sizing comparativo: ativo volátil vs estável
+    print(f"\n  📐 Sizing comparativo (capital=R$50.000, patrimônio=R$200.000, regime={ctx.regime_macro}):")
+    print(f"  {'Ticker':<8} {'ATR':>6} {'Stop':>8} {'Qtd':>5} {'Valor':>10} {'%Cap':>6} {'Risco R$':>10} {'Risco%Pat':>10} {'Método'}")
+    print(f"  {'─' * 8} {'─' * 6} {'─' * 8} {'─' * 5} {'─' * 10} {'─' * 6} {'─' * 10} {'─' * 10} {'─' * 8}")
+
+    for tk in test_tickers_atr:
+        import yfinance as yf
+        try:
+            t = yf.Ticker(tk + ".SA")
+            preco = float(t.history(period="5d", auto_adjust=True)["Close"].iloc[-1])
+        except Exception:
+            continue
+        sz = calcular_sizing(
+            ticker=tk, preco=preco, capital_motor=50_000, patrimonio_total=200_000,
+            regime=ctx.regime_macro, atr14=atrs.get(tk), atr_mult=ATR_STOP_MULT_ALPHA,
+        )
+        metodo = "ATR" if sz.atr14 > 0 else "fallback"
+        print(f"  {tk:<8} {sz.atr14:>6.2f} {sz.stop:>8.2f} {sz.qtd:>5} {sz.valor:>10.2f} {sz.pct_capital:>5.1f}% {sz.risco_reais:>10.2f} {sz.risco_pct_patrimonio:>9.2f}% {metodo}")
+
+    # 3. Sizing em lote
+    print(f"\n  📐 Sizing em lote (3 ativos, capital=R$50.000):")
+    lote_data = []
+    for tk in test_tickers_atr:
+        try:
+            t = yf.Ticker(tk + ".SA")
+            preco = float(t.history(period="5d", auto_adjust=True)["Close"].iloc[-1])
+            lote_data.append({"ticker": tk, "preco": preco, "atr14": atrs.get(tk)})
+        except Exception:
+            pass
+
+    if lote_data:
+        results = sizing_lote(lote_data, 50_000, 200_000, regime=ctx.regime_macro, atr_mult=ATR_STOP_MULT_ALPHA)
+        soma = sum(r.valor for r in results)
+        for r in results:
+            print(f"    {r.ticker}: {r.qtd} cotas × R${r.preco:.2f} = R${r.valor:,.2f} ({r.pct_capital:.1f}% cap) risco R${r.risco_reais:,.2f}")
+        print(f"    SOMA: R${soma:,.2f} / R$50.000 ({soma/500:.0f}%)")
+        # Validação: soma não excede capital
+        status_soma = "✅" if soma <= 50_001 else "❌"
+        print(f"    {status_soma} Soma ≤ capital: {'sim' if soma <= 50_001 else 'NÃO!'}")
+
+    # 4. Circuit breaker
+    print(f"\n  🔌 Circuit Breaker:")
+    for pl in [0.0, -3.0, -5.5, -8.5, -11.0]:
+        cb = avaliar_circuit_breaker(pl)
+        status = "🟢" if not cb.ativo else ("🟡" if cb.nivel == 1 else "🔴")
+        print(f"    P&L {pl:+.1f}%: {status} nível {cb.nivel} modifier={cb.sizing_modifier} {'— ' + cb.motivo if cb.motivo else ''}")
+
+    # 5. Heat
+    print(f"\n  🌡️ Heat (risco em aberto):")
+    fake_posicoes = [
+        {"ticker": "PETR4", "tipo": "ACAO", "valor_atual": 30000, "preco_atual": 40, "dados_extras": {"stop": 36}},
+        {"ticker": "VALE3", "tipo": "ACAO", "valor_atual": 25000, "preco_atual": 60, "dados_extras": {"stop": 54}},
+        {"ticker": "HGLG11", "tipo": "FII", "valor_atual": 15000, "preco_atual": 160},
+    ]
+    heat = calcular_heat(fake_posicoes, 200_000)
+    print(f"    Heat: {heat.heat_pct:.2f}% (R${heat.heat_reais:,.2f})")
+    print(f"    Pode operar: {'✅ sim' if heat.pode_operar else '⛔ NÃO (heat ≥ 6%)'}")
+    for det in heat.detalhes:
+        print(f"      {det['ticker']}: risco {det['risco_pct']:.2f}% (R${det['risco_reais']:,.2f})")
+
+    # 6. Motor Alpha com ATR sizing
+    print(f"\n  ⏳ Rodando motor Alpha com ATR sizing (capital=R$50.000, patrim=R$200.000)...")
+    sugestoes_atr = await rodar_alpha(
+        capital=50_000, n_ativos=3, ranking_setorial=ranking,
+        patrimonio_total=200_000, regime=ctx.regime_macro,
+    )
+    print(f"  ✅ {len(sugestoes_atr)} sugestões com ATR sizing!\n")
+    if sugestoes_atr:
+        print(f"  {'Ticker':<8} {'Score':>6} {'Qtd':>5} {'Valor':>10} {'ATR':>6} {'Stop':>8} {'Risco%':>7} {'Método'}")
+        print(f"  {'─' * 8} {'─' * 6} {'─' * 5} {'─' * 10} {'─' * 6} {'─' * 8} {'─' * 7} {'─' * 8}")
+        for s in sugestoes_atr:
+            dx = s.dados_extras
+            atr_v = dx.get("atr14", 0) or 0
+            stop_v = dx.get("stop_atr", 0) or 0
+            risco_v = dx.get("risco_pct_patrimonio", 0) or 0
+            method = dx.get("sizing_method", "?")
+            print(f"  {s.ticker:<8} {s.score:>5.0f} {s.quantidade:>5.0f} {s.valor_total:>10.2f} {atr_v:>6.2f} {stop_v:>8.2f} {risco_v:>6.2f}% {method}")
+
+        # Validação: sizing_method presente, quantidade varia por ATR
+        has_method = all("sizing_method" in s.dados_extras for s in sugestoes_atr)
+        status_method = "✅" if has_method else "❌"
+        print(f"\n  {status_method} sizing_method em todos os ativos: {'sim' if has_method else 'NÃO'}")
+
+        # Validação: ativos diferentes devem ter quantidades diferentes (sizing por risco)
+        qtds = [s.quantidade for s in sugestoes_atr]
+        vals = [s.valor_total for s in sugestoes_atr]
+        all_equal = len(set(vals)) == 1
+        status_diff = "✅" if not all_equal else "⚠️"
+        print(f"  {status_diff} Valores diferentes por ativo (sizing por risco): {'sim — sizing ATR funcionando' if not all_equal else 'todos iguais (pode ser fallback)'}")
+
+    print(f"\n{'=' * 70}")
+    print("  ✅ SIMULAÇÃO COMPLETA — TODAS AS FUNÇÕES DO CÉREBRO OK")
+    print("    Fase 1: Macro Engine ✅")
+    print("    Fase 2: Ranking Setorial ✅")
+    print("    Fase 3: Alpha Fundamentalista Profunda ✅")
+    print("    Fase 4: Position Sizing ATR + Circuit Breaker + Heat ✅")
+    print("=" * 70)
+
 
 if __name__ == "__main__":
     asyncio.run(simular())

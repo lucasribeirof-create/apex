@@ -1157,13 +1157,35 @@ async def sugerir_portfolio(
 
     # ── Ranking setorial (Fase 2 — bonus/penalty nos motores equity) ──────
     _ranking_setorial = None
+    _regime = "NEUTRO"
     try:
         from app.cerebro.setor import montar_ranking
         from app.cerebro.macro import montar_macro
         _macro_ctx = await montar_macro()
         _ranking_setorial = await montar_ranking(_macro_ctx)
+        _regime = getattr(_macro_ctx, "regime_macro", "NEUTRO") or "NEUTRO"
     except Exception as _rs_err:
         logger.warning("sugerir-portfolio: ranking setorial falhou (%s) — motores sem ajuste", _rs_err)
+
+    # ── Circuit breaker + Heat (Fase 4) ───────────────────────────────────
+    _cb_modifier = 1.0
+    try:
+        from app.cerebro.sizing import avaliar_circuit_breaker, calcular_heat
+        _patrim_inicio_mes = portfolio.patrimonio_mes_inicio or capital
+        _pl_mes_pct = ((capital - _patrim_inicio_mes) / _patrim_inicio_mes * 100) if _patrim_inicio_mes > 0 else 0.0
+        _cb = avaliar_circuit_breaker(_pl_mes_pct)
+        _cb_modifier = _cb.sizing_modifier
+        if _cb.ativo:
+            logger.warning("sugerir-portfolio: CIRCUIT BREAKER ATIVO — %s", _cb.motivo)
+    except Exception as _cb_err:
+        logger.warning("sugerir-portfolio: circuit breaker falhou (%s)", _cb_err)
+
+    # Parâmetros compartilhados para sizing
+    _sizing_kwargs = {
+        "patrimonio_total": capital,
+        "regime": _regime,
+        "cb_modifier": _cb_modifier,
+    }
 
     if cap_etfs > 0:
         tarefas.append(motor_etfs.rodar(cap_etfs, estrategia=estrategia))
@@ -1175,16 +1197,16 @@ async def sugerir_portfolio(
         tarefas.append(motor_renda_fixa.rodar(cap_rf, estrategia=estrategia))
         labels.append("renda_fixa")
     if cap_momentum > 0:
-        tarefas.append(motor_momentum.rodar(cap_momentum, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial))
+        tarefas.append(motor_momentum.rodar(cap_momentum, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial, **_sizing_kwargs))
         labels.append("momentum")
     if cap_wheel > 0:
         tarefas.append(motor_wheel.rodar(cap_wheel, excluir_tickers=_excluir_tickers, tickers_carteira=_excluir_tickers))
         labels.append("wheel")
     if cap_alpha > 0:
-        tarefas.append(motor_alpha.rodar(cap_alpha, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial))
+        tarefas.append(motor_alpha.rodar(cap_alpha, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial, **_sizing_kwargs))
         labels.append("alpha")
     if cap_dividendos > 0:
-        tarefas.append(motor_dividendos.rodar(cap_dividendos, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial))
+        tarefas.append(motor_dividendos.rodar(cap_dividendos, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial, **_sizing_kwargs))
         labels.append("dividendos")
 
     # Teses: módulo de convicção manual — capital é reservado e exibido para entrada manual

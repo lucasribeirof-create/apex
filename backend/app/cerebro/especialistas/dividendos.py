@@ -248,19 +248,13 @@ async def rodar(
     n_ativos: int = 4,
     excluir_tickers: list[str] | None = None,
     ranking_setorial: object | None = None,
+    patrimonio_total: float = 0.0,
+    regime: str = "NEUTRO",
+    cb_modifier: float = 1.0,
 ) -> list[SugestaoMotor]:
     """
     Seleciona as melhores ações pagadoras de dividendos para o capital disponível.
-
-    Args:
-        capital:            Capital em R$ disponível para o módulo Dividendos.
-        watchlist:          Lista de tickers candidatos (default: DIVIDENDOS_WATCHLIST).
-        n_ativos:           Número de posições (máx 6 para diversificação setorial).
-        excluir_tickers:    Tickers já na carteira — não serão sugeridos.
-        ranking_setorial:   RankingSetorial (setor.py) — bonus/penalty por setor.
-
-    Returns:
-        Lista de SugestaoMotor com as melhores pagadoras selecionadas.
+    Position sizing por risco (ATR-based).
     """
     if capital < 2_000:
         return []
@@ -299,13 +293,26 @@ async def rodar(
     if not selecionados:
         return []
 
-    capital_por_ativo = capital / len(selecionados)
+    # ATR-based position sizing (Phase 4)
+    from app.cerebro.sizing import sizing_lote, ATR_STOP_MULT_DIVIDENDOS
+    _patrim = patrimonio_total if patrimonio_total > 0 else capital
+    sizing_results = sizing_lote(
+        selecionados, capital, _patrim,
+        regime=regime, atr_mult=ATR_STOP_MULT_DIVIDENDOS, cb_modifier=cb_modifier,
+    )
+    sizing_map = {s.ticker: s for s in sizing_results}
+
     saida: list[SugestaoMotor] = []
 
     for d in selecionados:
         preco = d["preco"]
-        qtd   = max(1, int(capital_por_ativo / preco))
-        valor = round(qtd * preco, 2)
+        sz = sizing_map.get(d["ticker"])
+        if sz and sz.qtd > 0:
+            qtd = sz.qtd
+            valor = sz.valor
+        else:
+            qtd = max(1, int(capital / len(selecionados) / preco))
+            valor = round(qtd * preco, 2)
         dy    = d["dy_12m"]
         renda_mensal = round(valor * dy / 100 / 12, 2)
 
@@ -328,6 +335,11 @@ async def rodar(
                 "setor":                _harmonizar_setor(d.get("setor", "outro")),
                 "renda_mensal_estimada": renda_mensal,
                 "renda_anual_estimada":  round(renda_mensal * 12, 2),
+                # Sizing (Phase 4)
+                "atr14":               sz.atr14 if sz else None,
+                "stop_atr":            sz.stop if sz else None,
+                "risco_pct_patrimonio": sz.risco_pct_patrimonio if sz else None,
+                "sizing_method":       "ATR" if (sz and sz.atr14 > 0) else "equal_weight",
             },
         ))
 
