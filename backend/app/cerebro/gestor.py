@@ -137,6 +137,7 @@ async def _analisar_com_ia(
                 "dy_12m", "dy_estimado", "p_vp", "pl", "crescimento_receita",
                 "rsi", "alvo", "stop", "rr", "taxa_referencia_aa", "segmento",
                 "setor", "payout_ratio", "upside_estimado_pct", "retorno_anual",
+                "classificacao", "hold_elegivel", "hold_motivo",
             )
         }
         if extras_relevantes:
@@ -255,6 +256,32 @@ async def _analisar_com_ia(
             "pode_operar": ht.pode_operar,
             "heat_reais": ht.heat_reais,
         }
+
+    # ── Kill Switch + Hold info (Fase 5 Cérebro Híbrido) ─────────────────
+    if contexto and hasattr(contexto, "kill_switch") and contexto.kill_switch:
+        ks = contexto.kill_switch
+        payload["kill_switch"] = {
+            "ativo": ks.ativo,
+            "nivel": ks.nivel,
+            "motivo": ks.motivo,
+            "recomendacao": ks.recomendacao,
+        }
+    # Hold candidates — tag ações elegíveis a HOLD nos candidatos
+    _hold_candidates = [
+        c for c in candidatos_json
+        if any(
+            s.ticker == c["ticker"] and s.dados_extras.get("hold_elegivel")
+            for s in candidatos_prep
+        )
+    ]
+    if _hold_candidates:
+        payload["hold_candidates"] = [c["ticker"] for c in _hold_candidates]
+    # Watchlist candidates (attached by Alpha motor)
+    for c in candidatos_prep:
+        wl = c.dados_extras.get("_watchlist_candidates")
+        if wl:
+            payload["watchlist_candidates"] = wl
+            break
 
     if contexto and hasattr(contexto, "narrativa_macro") and contexto.narrativa_macro:
         payload["narrativa_macro"] = contexto.narrativa_macro[:2000]
@@ -390,6 +417,28 @@ Se "heat" estiver no payload:
 
 Position sizing foi calculado por risco (ATR-based): ativos voláteis recebem posição menor,
 ativos estáveis recebem posição maior. Respeite os tamanhos sugeridos pelos motores.
+
+━━━ ESTRATÉGIA HOLD (POSIÇÕES DE LONGO PRAZO) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Se "hold_candidates" estiver no payload, estes ativos foram classificados como HOLD:
+  - Score fundamentalista ≥ 80, ROE ≥ 15%, saúde financeira sólida
+  - Para ativos HOLD: NÃO defina stop fixo. Use trailing stop largo (20-25% abaixo do topo).
+  - Revisão trimestral: só sair se fundamentos deteriorarem materialmente.
+  - Posição HOLD = 3-8% do patrimônio (menor que TRADE para compensar a falta de stop fixo).
+  - Na justificativa_ceo, use o framework: "HOLD — [razão: fundamentos superiores + moat + geração de valor]"
+  - Ativos HOLD convivem com ativos TRADE na mesma carteira.
+
+━━━ WATCHLIST (ATIVOS MONITORADOS) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Se "watchlist_candidates" estiver no payload, são ativos que NÃO entraram agora mas merecem acompanhamento:
+  - Cada item tem trigger de entrada (preço, balanço, macro, momentum)
+  - MENCIONE na "analise" os 2-3 ativos mais promissores da watchlist e seus triggers
+  - NÃO adicione watchlist à carteira_final — apenas comente sobre eles
+
+━━━ KILL SWITCH MACRO (PARADA DE EMERGÊNCIA) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Se "kill_switch" estiver no payload com "ativo": true:
+  - nivel 1 (ALERTA): reduzir equity ao mínimo dos guardrails. Zero novas entradas agressivas.
+  - nivel 2 (PAUSA): NÃO pode abrir novas posições de equity. Apenas HOLD e RF.
+  OBRIGATÓRIO: Se kill switch ativo, a "analise" deve começar com:
+  "⚠️ KILL SWITCH MACRO ATIVO (nível X) — [recomendação]"
 
 ━━━ FRAMEWORK DE DECISÃO (OBRIGATÓRIO para cada ativo) ━━━━━━━━━━━━━━━━━━━━
 Para CADA ativo na carteira_final, a justificativa_ceo DEVE começar com uma das ações:

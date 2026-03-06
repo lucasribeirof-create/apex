@@ -62,6 +62,9 @@ class Position(Base):
     # Justificativa de entrada (gerada pelo APEX ao adicionar)
     justificativa_entrada = Column(Text, nullable=True)
 
+    # Classificação da posição (Phase 5: Hold strategy)
+    classificacao = Column(String(10), default="TRADE")   # TRADE | HOLD
+
     # Status
     ativa = Column(Boolean, default=True)
     data_abertura = Column(DateTime, nullable=True)   # data da primeira compra / entrada

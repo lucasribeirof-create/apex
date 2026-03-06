@@ -67,6 +67,8 @@ def migrate_db():
         # Análise IA persistida
         "ALTER TABLE positions ADD COLUMN analise_ia TEXT",
         "ALTER TABLE positions ADD COLUMN analise_ia_at TIMESTAMP",
+        # Phase 5: Hold classification + Watchlist
+        "ALTER TABLE positions ADD COLUMN classificacao VARCHAR(10) DEFAULT 'TRADE'",
     ]
     with engine.connect() as conn:
         for sql in _migrations:

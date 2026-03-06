@@ -70,6 +70,7 @@ app.include_router(market.router)
 app.include_router(scanner.router)
 app.include_router(teses.router)
 app.include_router(transacoes.router)
+app.include_router(watchlist.router)
 
 
 @app.get("/health")

@@ -476,6 +476,16 @@ async def rodar(
     if not selecionados:
         return []
 
+    # Phase 5: Hold classification + Watchlist candidates (attached to output)
+    from app.cerebro.hold import avaliar_hold, gerar_watchlist_candidates
+    _hold_map: dict[str, object] = {}
+    for d in selecionados:
+        hc = avaliar_hold(d, d["score"], d.get("_red_flags", []))
+        _hold_map[d["ticker"]] = hc
+
+    _sel_tickers = {d["ticker"] for d in selecionados}
+    _watchlist_cands = gerar_watchlist_candidates(candidatos, _sel_tickers, n_max=5)
+
     # ATR-based position sizing (Phase 4)
     from app.cerebro.sizing import sizing_lote, ATR_STOP_MULT_ALPHA
     _patrim = patrimonio_total if patrimonio_total > 0 else capital
@@ -505,6 +515,10 @@ async def rodar(
 
         breakdown = d["_breakdown"]
         flags = d["_red_flags"]
+
+        # Phase 5: Hold classification
+        hold_info = _hold_map.get(d["ticker"])
+        classificacao = "HOLD" if (hold_info and hold_info.elegivel) else "TRADE"
 
         saida.append(SugestaoMotor(
             modulo="alpha",
@@ -548,8 +562,27 @@ async def rodar(
                 "stop_atr":            sz.stop if sz else None,
                 "risco_pct_patrimonio": sz.risco_pct_patrimonio if sz else None,
                 "sizing_method":       "ATR" if (sz and sz.atr14 > 0) else "equal_weight",
+                # Hold & Watchlist (Phase 5)
+                "classificacao":       classificacao,
+                "hold_elegivel":       hold_info.elegivel if hold_info else False,
+                "hold_motivo":         hold_info.motivo if hold_info else "",
             },
         ))
+
+    # Attach watchlist candidates as metadata on the first suggestion
+    if saida and _watchlist_cands:
+        saida[0].dados_extras["_watchlist_candidates"] = [
+            {
+                "ticker": w.ticker,
+                "nome": w.nome,
+                "score": w.score,
+                "setor": w.setor,
+                "trigger_tipo": w.trigger_tipo,
+                "trigger_descricao": w.trigger_descricao,
+                "trigger_valor": w.trigger_valor,
+            }
+            for w in _watchlist_cands
+        ]
 
     return saida
 

@@ -567,12 +567,111 @@ async def simular():
         status_diff = "✅" if not all_equal else "⚠️"
         print(f"  {status_diff} Valores diferentes por ativo (sizing por risco): {'sim — sizing ATR funcionando' if not all_equal else 'todos iguais (pode ser fallback)'}")
 
+    # ── HOLD & WATCHLIST & KILL SWITCH (Fase 5) ──────────────────────────
+    print(f"\n{'=' * 70}")
+    print("  🏛️ HOLD STRATEGY + WATCHLIST + KILL SWITCH (Fase 5)")
+    print("=" * 70)
+
+    # 1. Hold classification
+    from app.cerebro.hold import avaliar_hold, gerar_watchlist_candidates, avaliar_kill_switch
+
+    print("\n  📊 Hold Classification (avaliando tickers de teste):")
+    test_hold_data = [
+        # Ativo forte: score alto, ROE alto, saúde boa → deve ser HOLD
+        {"ticker": "WEGE3", "roe": 32.0, "dl_ebitda": -0.2, "fcf": 3.9e9, "score": 88},
+        # Ativo ok mas score baixo → não HOLD
+        {"ticker": "VALE3", "roe": 6.0, "dl_ebitda": 1.0, "fcf": 15.4e9, "score": 42},
+        # Ativo com red flag → não HOLD
+        {"ticker": "BBAS3", "roe": 9.0, "dl_ebitda": None, "fcf": None, "score": 34},
+        # Ativo na fronteira → score 80 exato
+        {"ticker": "ITUB4", "roe": 21.0, "dl_ebitda": None, "fcf": None, "score": 80},
+    ]
+    for td in test_hold_data:
+        flags = []
+        if td["ticker"] == "BBAS3":
+            flags = ["ELIMINAR: Receita caindo -31.4%"]
+        hc = avaliar_hold(td, td["score"], flags)
+        status = "✅ HOLD" if hc.elegivel else "❌ TRADE"
+        print(f"    {td['ticker']}: {status} — {hc.motivo}")
+
+    # 2. Watchlist candidates
+    print("\n  📋 Watchlist Candidates (simulado):")
+    todos_candidatos = [
+        {"ticker": "MGLU3", "nome": "Magazine Luiza", "score": 55, "preco": 8.50, "momentum_6m": -15, "mm200": 9.20, "pl": 22, "cresc_receita": 5},
+        {"ticker": "RENT3", "nome": "Localiza", "score": 62, "preco": 42.00, "momentum_6m": -5, "mm200": 44.0, "pl": 14, "cresc_receita": 12},
+        {"ticker": "SUZB3", "nome": "Suzano", "score": 48, "preco": 55.00, "momentum_6m": 8, "mm200": 52.0, "pl": 25, "cresc_receita": 18},
+        {"ticker": "PETR4", "nome": "Petrobras", "score": 62, "preco": 42.58, "momentum_6m": 37, "mm200": 35.0, "pl": 7.5, "cresc_receita": -1},
+        {"ticker": "RECV3", "nome": "PetroReconcavo", "score": 63, "preco": 13.00, "momentum_6m": 10, "mm200": 12.0, "pl": 8, "cresc_receita": 5},
+    ]
+    selecionados_t = {"PETR4", "RECV3"}  # simulam que já entraram
+    watchlist = gerar_watchlist_candidates(todos_candidatos, selecionados_t, n_max=5)
+    for w in watchlist:
+        print(f"    {w.ticker} (score {w.score:.0f}): [{w.trigger_tipo}] {w.trigger_descricao}")
+    if watchlist:
+        print(f"    ✅ {len(watchlist)} candidatos à watchlist gerados")
+    else:
+        print("    ⚠️ Nenhum candidato à watchlist (nenhum na faixa 45-70)")
+
+    # 3. Kill Switch
+    print("\n  🚨 Kill Switch Macro (cenários simulados):")
+    cenarios_ks = [
+        ("RISK_ON_FORTE", 80, 75),
+        ("NEUTRO", 50, 50),
+        ("RISK_OFF", 55, 20),    # baixa confiança → não ativa
+        ("RISK_OFF", 72, 18),    # confiança 72% ≥ 70% → ALERTA
+        ("RISK_OFF", 90, 12),    # confiança 90% ≥ 85% → PAUSA
+    ]
+    for regime, conf, score in cenarios_ks:
+        ks = avaliar_kill_switch(regime, conf, score)
+        if ks.ativo:
+            nivel_str = "🔴 PAUSA" if ks.nivel >= 2 else "🟡 ALERTA"
+            print(f"    {regime} conf={conf}%: {nivel_str} nível {ks.nivel} — {ks.recomendacao[:60]}...")
+        else:
+            print(f"    {regime} conf={conf}%: 🟢 normal — {ks.motivo[:60]}...")
+
+    # 4. Motor Alpha com Hold + Watchlist integrado
+    print(f"\n  ⏳ Rodando motor Alpha com Hold + Watchlist (capital=R$50.000)...")
+    from app.cerebro.especialistas import alpha as motor_alpha
+    sugestoes_hold = await motor_alpha.rodar(
+        capital=50_000.0,
+        n_ativos=5,
+        ranking_setorial=ranking,
+        patrimonio_total=200_000.0,
+        regime=ctx.regime_macro,
+        cb_modifier=1.0,
+    )
+    if sugestoes_hold:
+        print(f"  ✅ {len(sugestoes_hold)} sugestões com classificação Hold!")
+        print(f"\n  Ticker    Score  Classif.  Hold Motivo")
+        print(f"  {'─' * 70}")
+        for s in sugestoes_hold:
+            classif = s.dados_extras.get("classificacao", "?")
+            hold_motivo = s.dados_extras.get("hold_motivo", "")[:50]
+            icon = "🏛️" if classif == "HOLD" else "📈"
+            print(f"  {icon} {s.ticker:<8} {s.score:>5.0f}  {classif:<9} {hold_motivo}")
+
+        # Watchlist candidates attached?
+        wl_cands = sugestoes_hold[0].dados_extras.get("_watchlist_candidates", [])
+        if wl_cands:
+            print(f"\n  📋 Watchlist candidates (via motor Alpha): {len(wl_cands)}")
+            for wc in wl_cands[:3]:
+                print(f"    → {wc['ticker']} (score {wc['score']:.0f}): [{wc['trigger_tipo']}] {wc['trigger_descricao'][:50]}")
+        else:
+            print(f"\n  ℹ️ Nenhum watchlist candidate gerado (nenhum ativo na faixa 45-70)")
+
+        # Verify all have classificacao
+        has_classif = all("classificacao" in s.dados_extras for s in sugestoes_hold)
+        print(f"\n  {'✅' if has_classif else '❌'} Classificação (TRADE/HOLD) em todos os ativos: {'sim' if has_classif else 'NÃO'}")
+    else:
+        print("  ⚠️ Nenhuma sugestão (yfinance pode ter falhado)")
+
     print(f"\n{'=' * 70}")
     print("  ✅ SIMULAÇÃO COMPLETA — TODAS AS FUNÇÕES DO CÉREBRO OK")
     print("    Fase 1: Macro Engine ✅")
     print("    Fase 2: Ranking Setorial ✅")
     print("    Fase 3: Alpha Fundamentalista Profunda ✅")
     print("    Fase 4: Position Sizing ATR + Circuit Breaker + Heat ✅")
+    print("    Fase 5: Hold Strategy + Watchlist + Kill Switch ✅")
     print("=" * 70)
 
 

@@ -81,6 +81,19 @@ async def gerar_briefing_portfolio(portfolio_id: int, db: Session) -> str | None
         alertas_str = "\n".join(f"- {a}" for a in alertas_criticos)
         user_prompt += f"\n\nALERTAS PRIORITÁRIOS DO SISTEMA:\n{alertas_str}\n\nAborde estes alertas explicitamente no briefing."
 
+    # Kill switch macro (Phase 5) — seção urgente
+    if hasattr(ctx, "kill_switch") and ctx.kill_switch and ctx.kill_switch.ativo:
+        ks = ctx.kill_switch
+        urgencia = "PAUSA OBRIGATÓRIA" if ks.nivel >= 2 else "ALERTA URGENTE"
+        user_prompt += (
+            f"\n\n⚠️ KILL SWITCH MACRO ({urgencia}):\n"
+            f"  Regime: {ks.regime} | Confiança: {ks.confianca}%\n"
+            f"  Motivo: {ks.motivo}\n"
+            f"  Recomendação: {ks.recomendacao}\n"
+            f"OBRIGATÓRIO: Comece o briefing com uma seção de ALERTA sobre o kill switch. "
+            f"Recomende ações concretas de redução de risco."
+        )
+
     user_prompt += "\n\nInclua ao final uma seção AÇÕES PRIORITÁRIAS HOJE com itens acionáveis ordenados por urgência."
 
     # Gerar briefing com IA — o Cérebro executa a chamada
@@ -176,6 +189,19 @@ async def gerar_briefing_portfolio_stream(portfolio_id: int, db: Session):
     if alertas_criticos:
         alertas_str = "\n".join(f"- {a}" for a in alertas_criticos)
         user_prompt += f"\n\nALERTAS PRIORITÁRIOS DO SISTEMA:\n{alertas_str}\n\nAborde estes alertas explicitamente no briefing."
+
+    # Kill switch macro (Phase 5) — seção urgente
+    if hasattr(ctx, "kill_switch") and ctx.kill_switch and ctx.kill_switch.ativo:
+        ks = ctx.kill_switch
+        urgencia = "PAUSA OBRIGATÓRIA" if ks.nivel >= 2 else "ALERTA URGENTE"
+        user_prompt += (
+            f"\n\n⚠️ KILL SWITCH MACRO ({urgencia}):\n"
+            f"  Regime: {ks.regime} | Confiança: {ks.confianca}%\n"
+            f"  Motivo: {ks.motivo}\n"
+            f"  Recomendação: {ks.recomendacao}\n"
+            f"OBRIGATÓRIO: Comece o briefing com uma seção de ALERTA sobre o kill switch. "
+            f"Recomende ações concretas de redução de risco."
+        )
 
     user_prompt += "\n\nInclua ao final uma seção AÇÕES PRIORITÁRIAS HOJE com itens acionáveis ordenados por urgência."
 

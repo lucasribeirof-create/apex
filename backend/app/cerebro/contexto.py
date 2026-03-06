@@ -92,6 +92,9 @@ class ContextoCerebro:
     circuit_breaker: Optional[object] = field(default=None)   # CircuitBreakerState
     heat: Optional[object] = field(default=None)              # HeatState
     cb_modifier: float = 1.0     # sizing modifier (1.0=normal, 0.5=CB nível 1, 0.0=pausa)
+    # ── Hold & Kill Switch (Fase 5 Cérebro Híbrido) ──────────────────────
+    kill_switch: Optional[object] = field(default=None)       # KillSwitchState
+    watchlist_candidates: list = field(default_factory=list)   # WatchlistCandidate summaries
     # ── Metadados ─────────────────────────────────────────────────────────
     gerado_em: str = ""            # ISO timestamp de quando o contexto foi montado
     modulos_ativos: list[str] = field(default_factory=list)  # módulos configurados com alvo > 0
@@ -158,6 +161,27 @@ class ContextoCerebro:
     def alertas_criticos(self) -> list[str]:
         """Lista de alertas urgentes em linguagem natural."""
         alertas = []
+
+        # Kill switch macro (Phase 5) — mais urgente, vem primeiro
+        if self.kill_switch and self.kill_switch.ativo:
+            ks = self.kill_switch
+            urgencia = "PAUSA OBRIGATÓRIA" if ks.nivel >= 2 else "ALERTA"
+            alertas.append(
+                f"🚨 KILL SWITCH MACRO ({urgencia}): {ks.motivo} — {ks.recomendacao}"
+            )
+
+        # Circuit breaker (Phase 4)
+        if self.circuit_breaker and hasattr(self.circuit_breaker, "nivel") and self.circuit_breaker.nivel >= 2:
+            alertas.append(
+                f"🔴 CIRCUIT BREAKER NÍVEL {self.circuit_breaker.nivel}: {self.circuit_breaker.motivo}"
+            )
+
+        # Heat (Phase 4)
+        if self.heat and hasattr(self.heat, "pode_operar") and not self.heat.pode_operar:
+            alertas.append(
+                f"🔴 HEAT {self.heat.heat_pct:.1f}% — OPERAÇÕES BLOQUEADAS (limite 6%)"
+            )
+
         for s in self.stops_proximos:
             alertas.append(
                 f"{s['ticker']} a {s['distancia_pct']:.1f}% do stop "
@@ -395,6 +419,14 @@ async def montar(
         except Exception as e:
             logger.warning("contexto_cerebro: ranking setorial falhou: %s", e)
 
+    # ── Kill Switch macro (Fase 5) ──────────────────────────────────────
+    _kill_switch = None
+    try:
+        from app.cerebro.hold import avaliar_kill_switch
+        _kill_switch = avaliar_kill_switch(_regime_macro, _confianca, _regime_score)
+    except Exception as e:
+        logger.warning("contexto_cerebro: kill switch falhou: %s", e)
+
     return ContextoCerebro(
         # Perfil
         user_id=user.id,
@@ -422,6 +454,8 @@ async def montar(
         guardrails=_guardrails,
         # Ranking setorial (Fase 2)
         ranking_setorial=_ranking_setorial,
+        # Kill Switch (Fase 5)
+        kill_switch=_kill_switch,
         # Carteira
         portfolio_id=portfolio.id,
         patrimonio_total=patrimonio,
