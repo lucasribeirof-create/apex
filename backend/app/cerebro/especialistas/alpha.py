@@ -11,21 +11,19 @@ Filosofia Alpha:
   3. Reversão à média — empresa com fundamentos sólidos em momento adverso temporário
   4. Tese temática — exposição a macro favorável (exportação + dólar, desinflação, crédito)
 
-Critérios de seleção (yfinance fundamentals):
-  - P/L < 20 (ou setor específico com P/L justificável)
-  - P/VP < 3.0
-  - Crescimento receita 1 ano > 0 (empresa ainda crescendo)
-  - Margem EBITDA sólida para o setor
-  - Dívida controlada (D/L < 3.0 para não-financeiras)
-  - Stock em tendência neutra a positiva (não em queda livre)
+Score por 4 pilares × 25pts cada (total 0-100):
+  - Valuation (25):   P/L + P/VP + EV/EBITDA + DY
+  - Rentabilidade (25): ROE + Margem EBITDA + ROIC
+  - Saúde (25):        DL/EBITDA + Cobertura juros + FCF
+  - Crescimento (25):  Revenue growth + Earnings growth + Momentum/MMs
 
-Dados extras por sugestão:
-  - pl: P/L atual
-  - p_vp: P/VP atual
-  - crescimento_receita: % crescimento receita último ano
-  - margem_ebitda: margem EBITDA estimada
-  - tese: texto da tese de investimento (gerada pelo motor)
-  - upside_estimado: % upside estimado vs preço justo
+Red flags (eliminadores automáticos):
+  - DL/EBITDA > 4.0 → ELIMINAR
+  - Margem líquida negativa → ELIMINAR
+  - Receita caindo > 10% → ELIMINAR
+  - FCF negativo → ALERTA (penaliza mas não elimina)
+
+Dados extras: 15+ indicadores por sugestão.
 """
 
 import asyncio
@@ -57,10 +55,12 @@ def _aplicar_ajuste_setor(ticker: str, score: float, ranking_setorial) -> float:
 PL_MAXIMO         = 25.0
 PVP_MAXIMO        = 4.0
 DIVIDA_LIQ_MAX    = 4.0   # Dívida Líquida / EBITDA
+_TAXA_IR_BR       = 0.34  # taxa efetiva IR+CSLL Brasil (aprox.)
 
 
 def _fetch_fundamentals(ticker: str) -> Optional[dict]:
-    """Busca dados fundamentais via prefetch cache (ou yfinance direto)."""
+    """Busca dados fundamentais via prefetch cache (ou yfinance direto).
+    Retorna dict com 15+ indicadores ou None se dados insuficientes."""
     info = None
     hist = None
 
@@ -86,32 +86,54 @@ def _fetch_fundamentals(ticker: str) -> Optional[dict]:
         if preco <= 0:
             return None
 
-        # Extrair campos com fallbacks
+        # ── Campos básicos ────────────────────────────────────────────
         pl            = info.get("trailingPE")
         p_vp          = info.get("priceToBook")
-        receita       = info.get("totalRevenue")
-        receita_ant   = info.get("revenueGrowth")  # yf retorna como fraction
-        margem_bruta  = info.get("grossMargins")
-        margem_op     = info.get("operatingMargins")
+        receita_ant   = info.get("revenueGrowth")      # fração: 0.15 = 15%
+        margem_bruta  = info.get("grossMargins")        # fração
+        margem_op     = info.get("operatingMargins")    # fração
         mkt_cap       = info.get("marketCap")
         divida_bruta  = info.get("totalDebt", 0) or 0
         caixa         = info.get("totalCash", 0) or 0
         ebitda        = info.get("ebitda", 0) or 0
         nome          = info.get("shortName") or info.get("longName") or ticker
 
-        # Dívida Líquida / EBITDA
+        # ── Novos indicadores (Phase 3) ───────────────────────────────
+        ev            = info.get("enterpriseValue")
+        roe           = info.get("returnOnEquity")       # fração
+        fcf           = info.get("freeCashflow")
+        margem_liq    = info.get("profitMargins")        # fração
+        earnings_growth = info.get("earningsGrowth")     # fração
+        dy            = info.get("dividendYield")        # fração
+        interest_exp  = info.get("interestExpense", 0) or 0
+        ebit          = info.get("ebit", 0) or 0
+        equity        = info.get("totalStockholderEquity", 0) or 0
+
+        # ── Cálculos derivados ────────────────────────────────────────
         dl = divida_bruta - caixa
         dl_ebitda = (dl / ebitda) if ebitda and ebitda > 0 else None
 
+        # EV/EBITDA
+        ev_ebitda = (ev / ebitda) if ev and ebitda and ebitda > 0 else None
+
+        # ROIC = EBIT × (1-IR) / Capital Investido
+        net_debt = max(dl, 0)  # não conta caixa líquido como capital negativo
+        invested_capital = equity + net_debt
+        roic = (ebit * (1 - _TAXA_IR_BR) / invested_capital) if ebit and invested_capital > 0 else None
+
+        # Cobertura de juros = EBITDA / |juros|
+        cobertura_juros = (ebitda / abs(interest_exp)) if interest_exp and ebitda else None
+
         # Crescimento receita (yf retorna fração: 0.15 = 15%)
         cresc_receita_pct = float(receita_ant) * 100 if receita_ant is not None else None
+        cresc_lucro_pct   = float(earnings_growth) * 100 if earnings_growth is not None else None
 
         # Preço nas médias (tendência)
         close = hist["Close"]
         mm50  = float(close.rolling(50, min_periods=25).mean().iloc[-1]) if len(close) >= 25 else None
         mm200 = float(close.rolling(200, min_periods=50).mean().iloc[-1]) if len(close) >= 50 else None
 
-        # Momentum 6 meses (para evitar ação em queda libre)
+        # Momentum 6 meses
         preco_6m  = float(close.iloc[-126]) if len(close) >= 126 else float(close.iloc[0])
         mom_6m    = (preco - preco_6m) / preco_6m * 100
 
@@ -119,16 +141,29 @@ def _fetch_fundamentals(ticker: str) -> Optional[dict]:
             "ticker":          ticker,
             "nome":            str(nome),
             "preco":           round(preco, 2),
+            # Valuation
             "pl":              round(float(pl), 1) if pl else None,
             "p_vp":            round(float(p_vp), 2) if p_vp else None,
-            "cresc_receita":   round(cresc_receita_pct, 1) if cresc_receita_pct is not None else None,
-            "margem_bruta":    round(float(margem_bruta) * 100, 1) if margem_bruta else None,
+            "ev_ebitda":       round(float(ev_ebitda), 1) if ev_ebitda else None,
+            "dy":              round(float(dy) * 100, 2) if dy else None,
+            # Rentabilidade
+            "roe":             round(float(roe) * 100, 1) if roe else None,
+            "roic":            round(float(roic) * 100, 1) if roic else None,
             "margem_op":       round(float(margem_op) * 100, 1) if margem_op else None,
-            "mkt_cap":         mkt_cap,
+            "margem_bruta":    round(float(margem_bruta) * 100, 1) if margem_bruta else None,
+            # Saúde
             "dl_ebitda":       round(float(dl_ebitda), 2) if dl_ebitda is not None else None,
+            "cobertura_juros": round(float(cobertura_juros), 1) if cobertura_juros else None,
+            "fcf":             fcf,
+            "margem_liq":      round(float(margem_liq) * 100, 1) if margem_liq else None,
+            # Crescimento
+            "cresc_receita":   round(cresc_receita_pct, 1) if cresc_receita_pct is not None else None,
+            "cresc_lucro":     round(cresc_lucro_pct, 1) if cresc_lucro_pct is not None else None,
+            # Técnico
+            "mkt_cap":         mkt_cap,
+            "momentum_6m":     round(mom_6m, 1),
             "mm50":            round(mm50, 2) if mm50 else None,
             "mm200":           round(mm200, 2) if mm200 else None,
-            "momentum_6m":     round(mom_6m, 1),
             "acima_mm50":      preco > mm50 if mm50 else None,
             "acima_mm200":     preco > mm200 if mm200 else None,
         }
@@ -136,78 +171,204 @@ def _fetch_fundamentals(ticker: str) -> Optional[dict]:
         return None
 
 
-def _score_alpha(d: dict) -> float:
-    """Pontua o ativo por qualidade fundamentalista e potencial de assimetria."""
-    score = 0.0
+# ── Red Flags (eliminadores automáticos) ─────────────────────────────────────
 
-    # P/L (0-25 pts) — desconto vs média histórica
+def _check_red_flags(d: dict) -> list[str]:
+    """Verifica red flags eliminatórias. Retorna lista de flags (vazia = OK)."""
+    flags: list[str] = []
+
+    dl = d.get("dl_ebitda")
+    if dl is not None and dl > DIVIDA_LIQ_MAX:
+        flags.append(f"ELIMINAR: DL/EBITDA {dl:.1f}× > {DIVIDA_LIQ_MAX}")
+
+    ml = d.get("margem_liq")
+    if ml is not None and ml < 0:
+        flags.append(f"ELIMINAR: Margem líquida negativa ({ml:.1f}%)")
+
+    cr = d.get("cresc_receita")
+    if cr is not None and cr < -10:
+        flags.append(f"ELIMINAR: Receita caindo {cr:.1f}%")
+
+    fcf = d.get("fcf")
+    if fcf is not None and fcf < 0:
+        flags.append(f"ALERTA: FCF negativo (R${fcf / 1e6:,.0f}M)")
+
+    mom = d.get("momentum_6m", 0)
+    if mom < -30:
+        flags.append(f"ELIMINAR: Queda severa de {mom:.0f}% em 6m")
+
+    return flags
+
+
+def _is_eliminado(flags: list[str]) -> bool:
+    """Retorna True se alguma flag é eliminatória."""
+    return any(f.startswith("ELIMINAR") for f in flags)
+
+
+# ── Scoring por 4 pilares × 25pts ────────────────────────────────────────────
+
+def _score_valuation(d: dict) -> float:
+    """Pilar Valuation: P/L + P/VP + EV/EBITDA + DY (máx 25pts)."""
+    pts = 0.0
+
+    # P/L (0-8 pts)
     pl = d.get("pl")
     if pl:
-        if   pl < 8:   score += 25   # muito barato
-        elif pl < 12:  score += 20
-        elif pl < 16:  score += 15
-        elif pl < 20:  score += 8
-        elif pl <= 25: score += 3
-        else:          return 0.0    # caro demais para alpha
+        if   pl < 8:   pts += 8
+        elif pl < 12:  pts += 6
+        elif pl < 16:  pts += 4
+        elif pl < 20:  pts += 2
+        elif pl <= 25: pts += 1
 
-    # P/VP (0-20 pts)
+    # P/VP (0-6 pts)
     pvp = d.get("p_vp")
     if pvp:
-        if   pvp < 1.0:  score += 20   # abaixo do valor patrimonial
-        elif pvp < 1.5:  score += 15
-        elif pvp < 2.0:  score += 10
-        elif pvp < 3.0:  score += 5
-        else:            score += 0
+        if   pvp < 1.0: pts += 6
+        elif pvp < 1.5: pts += 5
+        elif pvp < 2.0: pts += 3
+        elif pvp < 3.0: pts += 1
 
-    # Crescimento de receita (0-20 pts)
-    cr = d.get("cresc_receita")
-    if cr is not None:
-        if   cr >= 20: score += 20
-        elif cr >= 10: score += 15
-        elif cr >=  5: score += 10
-        elif cr >=  0: score += 5
-        else:          score -= 5   # receita caindo é penalidade
+    # EV/EBITDA (0-6 pts)
+    ev = d.get("ev_ebitda")
+    if ev:
+        if   ev < 5:   pts += 6
+        elif ev < 8:   pts += 5
+        elif ev < 10:  pts += 3
+        elif ev < 13:  pts += 1
 
-    # Alavancagem (0-15 pts)
-    dl = d.get("dl_ebitda")
-    if dl is not None:
-        if   dl < 0:   score += 15   # caixa líquido — excelente
-        elif dl < 1.0: score += 12
-        elif dl < 2.0: score += 8
-        elif dl < 3.0: score += 4
-        elif dl > 4.0: score -= 10   # muito alavancado
+    # DY (0-5 pts)
+    dy = d.get("dy")
+    if dy:
+        if   dy >= 8:  pts += 5
+        elif dy >= 5:  pts += 4
+        elif dy >= 3:  pts += 2
+        elif dy >= 1:  pts += 1
 
-    # Margem operacional (0-10 pts)
+    return min(pts, 25.0)
+
+
+def _score_rentabilidade(d: dict) -> float:
+    """Pilar Rentabilidade: ROE + Margem EBITDA + ROIC (máx 25pts)."""
+    pts = 0.0
+
+    # ROE (0-10 pts)
+    roe = d.get("roe")
+    if roe:
+        if   roe >= 25: pts += 10
+        elif roe >= 18: pts += 8
+        elif roe >= 12: pts += 6
+        elif roe >= 8:  pts += 4
+        elif roe >= 0:  pts += 1
+
+    # Margem operacional como proxy de margem EBITDA (0-8 pts)
     marg = d.get("margem_op")
     if marg:
-        if   marg >= 25: score += 10
-        elif marg >= 15: score += 7
-        elif marg >= 8:  score += 4
-        elif marg >= 0:  score += 1
-        else:            score -= 5  # prejuízo operacional
+        if   marg >= 30: pts += 8
+        elif marg >= 20: pts += 6
+        elif marg >= 12: pts += 4
+        elif marg >= 5:  pts += 2
 
-    # Não em queda livre (momentum 6m)
+    # ROIC (0-7 pts)
+    roic = d.get("roic")
+    if roic:
+        if   roic >= 20: pts += 7
+        elif roic >= 15: pts += 5
+        elif roic >= 10: pts += 3
+        elif roic >= 5:  pts += 1
+
+    return min(pts, 25.0)
+
+
+def _score_saude(d: dict) -> float:
+    """Pilar Saúde: DL/EBITDA + Cobertura juros + FCF (máx 25pts)."""
+    pts = 0.0
+
+    # DL/EBITDA (0-10 pts) — menor = melhor
+    dl = d.get("dl_ebitda")
+    if dl is not None:
+        if   dl < 0:   pts += 10   # caixa líquido
+        elif dl < 1.0: pts += 8
+        elif dl < 2.0: pts += 6
+        elif dl < 3.0: pts += 3
+        elif dl <= 4.0: pts += 1
+
+    # Cobertura de juros (0-8 pts) — maior = melhor
+    cob = d.get("cobertura_juros")
+    if cob:
+        if   cob >= 10: pts += 8
+        elif cob >= 5:  pts += 6
+        elif cob >= 3:  pts += 4
+        elif cob >= 1.5: pts += 2
+
+    # FCF (0-7 pts) — positivo e crescente
+    fcf = d.get("fcf")
+    if fcf is not None:
+        if   fcf > 1e9:  pts += 7    # > R$1B
+        elif fcf > 500e6: pts += 5
+        elif fcf > 100e6: pts += 3
+        elif fcf > 0:     pts += 1
+
+    return min(pts, 25.0)
+
+
+def _score_crescimento(d: dict) -> float:
+    """Pilar Crescimento: Revenue growth + Earnings growth + Momentum/MMs (máx 25pts)."""
+    pts = 0.0
+
+    # Crescimento receita (0-10 pts)
+    cr = d.get("cresc_receita")
+    if cr is not None:
+        if   cr >= 20: pts += 10
+        elif cr >= 10: pts += 8
+        elif cr >= 5:  pts += 5
+        elif cr >= 0:  pts += 2
+
+    # Crescimento lucro (0-8 pts)
+    cl = d.get("cresc_lucro")
+    if cl is not None:
+        if   cl >= 30: pts += 8
+        elif cl >= 15: pts += 6
+        elif cl >= 5:  pts += 4
+        elif cl >= 0:  pts += 2
+
+    # Momentum 6m + tendência MMs (0-7 pts)
     mom = d.get("momentum_6m", 0)
-    if   mom < -30: return 0.0    # queda severa = foge do filtro
-    elif mom < -15: score -= 10
-    elif mom >= 0:  score += 5
+    if   mom >= 20: pts += 3
+    elif mom >= 5:  pts += 2
+    elif mom >= 0:  pts += 1
 
-    # Tendência (posição nas médias)
     if d.get("acima_mm200"):
-        score += 5
+        pts += 2
     if d.get("acima_mm50"):
-        score += 3
+        pts += 2
 
-    return max(score, 0.0)
+    return min(pts, 25.0)
 
 
-def _justificativa_alpha(d: dict, upside_est: float) -> str:
+def _score_alpha(d: dict) -> tuple[float, dict]:
+    """Pontua 4 pilares × 25pts = 0-100. Retorna (score_total, breakdown)."""
+    v = _score_valuation(d)
+    r = _score_rentabilidade(d)
+    s = _score_saude(d)
+    c = _score_crescimento(d)
+    total = v + r + s + c
+    breakdown = {
+        "valuation": round(v, 1),
+        "rentabilidade": round(r, 1),
+        "saude": round(s, 1),
+        "crescimento": round(c, 1),
+    }
+    return total, breakdown
+
+
+def _justificativa_alpha(d: dict, upside_est: float, breakdown: dict, red_flags: list[str]) -> str:
     partes = []
 
     # Tese principal
     pl  = d.get("pl")
     pvp = d.get("p_vp")
     cr  = d.get("cresc_receita")
+    roe = d.get("roe")
 
     if pl and pl < 12:
         partes.append(
@@ -224,14 +385,31 @@ def _justificativa_alpha(d: dict, upside_est: float) -> str:
             f"{d['ticker']} a P/VP {pvp:.2f} — cotas abaixo do valor contábil, "
             f"margem de segurança estrutural"
         )
+    elif roe and roe >= 20:
+        partes.append(
+            f"{d['ticker']} com ROE de {roe:.0f}% — rentabilidade superior sobre patrimônio"
+        )
     else:
         partes.append(f"{d['ticker']} com fundamentos sólidos e potencial de rerating")
 
-    # Dados quantitativos
+    # 4 pilares
+    pilares_txt = (
+        f"4 pilares: Valuation {breakdown['valuation']:.0f}/25 | "
+        f"Rentab. {breakdown['rentabilidade']:.0f}/25 | "
+        f"Saúde {breakdown['saude']:.0f}/25 | "
+        f"Cresc. {breakdown['crescimento']:.0f}/25"
+    )
+    partes.append(pilares_txt)
+
+    # Dados quantitativos principais
     metricas = []
     if pl:    metricas.append(f"P/L {pl:.1f}×")
     if pvp:   metricas.append(f"P/VP {pvp:.2f}")
-    if cr is not None: metricas.append(f"receita +{cr:.0f}%/ano")
+    ev = d.get("ev_ebitda")
+    if ev:    metricas.append(f"EV/EBITDA {ev:.1f}×")
+    if roe:   metricas.append(f"ROE {roe:.0f}%")
+    roic = d.get("roic")
+    if roic:  metricas.append(f"ROIC {roic:.0f}%")
     dl = d.get("dl_ebitda")
     if dl is not None:
         metricas.append(f"DL/EBITDA {dl:.1f}×" if dl >= 0 else "caixa líquido")
@@ -242,10 +420,10 @@ def _justificativa_alpha(d: dict, upside_est: float) -> str:
     if upside_est > 0:
         partes.append(f"upside estimado de {upside_est:.0f}% em cenário base")
 
-    # Risco
-    dl = d.get("dl_ebitda", 0) or 0
-    if dl > 3.0:
-        partes.append(f"⚠ alavancagem elevada (DL/EBITDA {dl:.1f}×) — position size conservador")
+    # Red flags (alertas, não eliminatórios — os eliminatórios já filtraram)
+    alertas = [f for f in red_flags if f.startswith("ALERTA")]
+    if alertas:
+        partes.append("⚠ " + "; ".join(alertas))
 
     return ". ".join(partes) + "."
 
@@ -259,16 +437,7 @@ async def rodar(
 ) -> list[SugestaoMotor]:
     """
     Seleciona ações com maior potencial de assimetria na watchlist Alpha.
-
-    Args:
-        capital:            Capital em R$ disponível para o módulo Alpha.
-        watchlist:          Lista de tickers candidatos (default: ALPHA_WATCHLIST).
-        n_ativos:           Número de posições (concentração = convicção).
-        excluir_tickers:    Tickers já na carteira — não serão sugeridos.
-        ranking_setorial:   RankingSetorial (setor.py) — bonus/penalty por setor.
-
-    Returns:
-        Lista de SugestaoMotor com as melhores teses de alpha.
+    Score por 4 pilares × 25pts = 0-100. Red flags eliminam antes do CEO.
     """
     if capital < 2_000:
         return []
@@ -285,11 +454,17 @@ async def rodar(
     for r in resultados:
         if not isinstance(r, dict) or r is None:
             continue
-        score = _score_alpha(r)
+
+        # Red flags — eliminadores automáticos
+        flags = _check_red_flags(r)
+        if _is_eliminado(flags):
+            continue
+
+        score, breakdown = _score_alpha(r)
         if score > 0:
             # Ajuste setorial: bonus +12 se favorecido, penalty -15 se evitar
             score = _aplicar_ajuste_setor(r["ticker"], score, ranking_setorial)
-            candidatos.append({**r, "score": score})
+            candidatos.append({**r, "score": score, "_breakdown": breakdown, "_red_flags": flags})
 
     candidatos.sort(key=lambda x: x["score"], reverse=True)
     selecionados = candidatos[:n_ativos]
@@ -311,6 +486,9 @@ async def rodar(
         if pl and 0 < pl < 15:
             upside_est = round((15.0 / pl - 1) * 100, 1)
 
+        breakdown = d["_breakdown"]
+        flags = d["_red_flags"]
+
         saida.append(SugestaoMotor(
             modulo="alpha",
             ticker=d["ticker"],
@@ -319,18 +497,35 @@ async def rodar(
             quantidade=float(qtd),
             preco_atual=preco,
             valor_total=valor,
-            justificativa=_justificativa_alpha(d, upside_est),
+            justificativa=_justificativa_alpha(d, upside_est, breakdown, flags),
             score=d["score"],
             dados_extras={
-                "pl":               d.get("pl"),
-                "p_vp":             d.get("p_vp"),
-                "crescimento_receita": d.get("cresc_receita"),
+                # Valuation
+                "pl":                  d.get("pl"),
+                "p_vp":                d.get("p_vp"),
+                "ev_ebitda":           d.get("ev_ebitda"),
+                "dy_pct":              d.get("dy"),
+                # Rentabilidade
+                "roe_pct":             d.get("roe"),
+                "roic_pct":            d.get("roic"),
                 "margem_operacional":  d.get("margem_op"),
-                "dl_ebitda":        d.get("dl_ebitda"),
-                "momentum_6m":      d.get("momentum_6m"),
+                "margem_bruta":        d.get("margem_bruta"),
+                "margem_liquida":      d.get("margem_liq"),
+                # Saúde
+                "dl_ebitda":           d.get("dl_ebitda"),
+                "cobertura_juros":     d.get("cobertura_juros"),
+                "fcf":                 d.get("fcf"),
+                # Crescimento
+                "crescimento_receita": d.get("cresc_receita"),
+                "crescimento_lucro":   d.get("cresc_lucro"),
+                # Técnico
+                "momentum_6m":         d.get("momentum_6m"),
+                "acima_mm200":         d.get("acima_mm200"),
+                # Score breakdown
+                "pilares":             breakdown,
                 "upside_estimado_pct": upside_est,
-                "acima_mm200":      d.get("acima_mm200"),
-                "setor":            _get_setor_ticker(d["ticker"]),
+                "red_flags":           flags,
+                "setor":               _get_setor_ticker(d["ticker"]),
             },
         ))
 
