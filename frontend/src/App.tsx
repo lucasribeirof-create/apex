@@ -15,6 +15,7 @@ import AISetupPage from '@/pages/AISetup'
 import TesesPage from '@/pages/Teses'
 import SetupSimuladaPage from '@/pages/SetupSimulada'
 import SugestoesAlocacaoPage from '@/pages/SugestoesAlocacao'
+import HistoricoPage from '@/pages/Historico'
 
 type AppStatus = 'loading' | 'offline' | 'ai_missing' | 'ready'
 
@@ -136,11 +137,14 @@ function App() {
       setStatus(r.data.configured === true ? 'ready' : 'ai_missing')
     } catch (err: any) {
       // Distingue erro de rede (servidor offline) de outros erros
+      // Inclui 5xx do proxy Vite quando backend ainda não subiu
+      const status = err?.response?.status
       const isNetworkError =
         err?.code === 'ERR_NETWORK' ||
         err?.message === 'Network Error' ||
         err?.code === 'ECONNREFUSED' ||
-        !err?.response
+        !err?.response ||
+        (status && status >= 500)
       setStatus(isNetworkError ? 'offline' : 'ai_missing')
     }
   }, [])
@@ -209,6 +213,7 @@ function App() {
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/setup-simulada" element={<SetupSimuladaPage />} />
               <Route path="/sugestoes-alocacao" element={<SugestoesAlocacaoPage />} />
+              <Route path="/historico" element={<HistoricoPage />} />
               <Route path="*" element={<Navigate to="/briefing" replace />} />
             </Route>
           </>

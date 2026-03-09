@@ -1,8 +1,29 @@
 ﻿import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Send, MessageSquare, Wand2, X, Check, AlertTriangle, Trash2 } from 'lucide-react'
+import { Send, MessageSquare, Wand2, X, Check, AlertTriangle, Trash2, Zap } from 'lucide-react'
 import { useStore, ChatMessage, ChatRegularMessage, ChatProposalMessage, ChatProposalAction } from '@/store/useStore'
 import api from '@/services/api'
+
+// ─── Usage extraction ────────────────────────────────────────────────────────
+interface UsageInfo { in: number; out: number; cost: number; provider: string; model: string }
+
+function extractUsage(text: string): { cleanText: string; usage: UsageInfo | null } {
+  const idx = text.lastIndexOf('\n<!-- APEX_USAGE:')
+  if (idx === -1) return { cleanText: text, usage: null }
+  const jsonStart = idx + '\n<!-- APEX_USAGE:'.length
+  const jsonEnd = text.indexOf(' -->', jsonStart)
+  if (jsonEnd === -1) return { cleanText: text, usage: null }
+  try {
+    const usage = JSON.parse(text.slice(jsonStart, jsonEnd))
+    return { cleanText: text.slice(0, idx), usage }
+  } catch { return { cleanText: text, usage: null } }
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M'
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K'
+  return String(n)
+}
 
 // ─── Markdown renderer ───────────────────────────────────────────────────────
 
@@ -202,6 +223,7 @@ export default function ChatPage() {
   const messages        = useStore((s) => s.chatMessages)
   const setChatMessages = useStore((s) => s.setChatMessages)
   const clearChat       = useStore((s) => s.clearChat)
+  const addTokenUsage   = useStore((s) => s.addTokenUsage)
   const [streamingText, setStreamingText] = useState('')
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -249,7 +271,9 @@ export default function ChatPage() {
         full += decoder.decode(value, { stream: true })
         setStreamingText(full)
       }
-      setMessages((m) => [...m, { role: 'assistant', content: full }])
+      const { cleanText, usage } = extractUsage(full)
+      if (usage) addTokenUsage(usage.in, usage.out, usage.cost)
+      setMessages((m) => [...m, { role: 'assistant', content: cleanText, usage }])
     } catch {
       setMessages((m) => [...m, { role: 'assistant', content: 'Erro ao conectar com o gestor.' }])
     } finally {
@@ -453,6 +477,16 @@ export default function ChatPage() {
                   {msg.role === 'user'
                     ? <span className="whitespace-pre-wrap">{msg.content}</span>
                     : <MessageText content={msg.content} />}
+                  {msg.role === 'assistant' && (msg as ChatRegularMessage).usage && (
+                    <div className="mt-1.5 text-[10px] flex items-center gap-1.5" style={{ color: '#475569' }}>
+                      <Zap size={9} />
+                      <span>{formatTokens((msg as ChatRegularMessage).usage!.in + (msg as ChatRegularMessage).usage!.out)} tokens</span>
+                      <span>•</span>
+                      <span>{(msg as ChatRegularMessage).usage!.cost > 0 ? `$${(msg as ChatRegularMessage).usage!.cost.toFixed(4)}` : 'grátis'}</span>
+                      <span>•</span>
+                      <span>{(msg as ChatRegularMessage).usage!.provider}</span>
+                    </div>
+                  )}
                 </div>
               </motion.div>
             )

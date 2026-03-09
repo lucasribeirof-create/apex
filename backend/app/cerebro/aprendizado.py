@@ -80,6 +80,7 @@ def registrar_decisao(
 async def gerar_post_mortem(db: Session, trade_id: int) -> str:
     """Gera análise post-mortem via IA para um trade encerrado (SAIDA)."""
     from app.cerebro.client import chat
+    from app.cerebro.prompts import build_postmortem_prompt
 
     entry = db.query(TradeJournal).filter(TradeJournal.id == trade_id).first()
     if not entry:
@@ -125,11 +126,7 @@ async def gerar_post_mortem(db: Session, trade_id: int) -> str:
             f"Ação do framework na entrada: {entrada.acao_framework or 'N/A'}\n"
         )
 
-    system = (
-        "You are a trading performance analyst. Analyze this closed trade: "
-        "what went right, what went wrong, what could be improved. "
-        "Be specific and data-driven. Write in Portuguese."
-    )
+    system = build_postmortem_prompt()
     messages = [{"role": "user", "content": detalhes}]
 
     try:

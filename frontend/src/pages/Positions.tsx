@@ -349,7 +349,7 @@ export default function PositionsPage() {
   const { portfolioAtivo } = useStore()
   const isSimulada = portfolioAtivo?.tipo === 'simulada'
   const [positions, setPositions] = useState<Position[]>([])
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [showAdd, setShowAdd] = useState(false)
   const [showCarteira, setShowCarteira] = useState(false)
@@ -361,11 +361,10 @@ export default function PositionsPage() {
       const res = await api.get('/portfolio/posicoes')
       // Backend retorna { posicoes, capital_declarado, caixa_disponivel }
       const data = res.data
-      if (Array.isArray(data)) {
-        setPositions(data) // fallback para resposta antiga
-      } else {
-        setPositions(data.posicoes || [])
-      }
+      const lista = Array.isArray(data) ? data : (data.posicoes || [])
+      setPositions(lista)
+      // Atualiza posição aberta no modal de detalhe (ex: após nova análise IA)
+      setAnalisando(prev => prev ? lista.find((p: Position) => p.id === prev.id) ?? null : null)
     } catch { /* silent */ }
     setLoading(false)
   }
@@ -380,14 +379,20 @@ export default function PositionsPage() {
   }
 
   const deletePosition = async (id: number) => {
-    if (!confirm('Encerrar esta posição?')) return
+    const pos = positions.find(x => x.id === id)
+    const plInfo = pos
+      ? `\n\nPM: R$ ${pos.preco_medio.toFixed(2)} | Atual: R$ ${pos.preco_atual.toFixed(2)}\nP&L: ${pos.pl_reais >= 0 ? '+' : ''}R$ ${pos.pl_reais.toFixed(2)} (${pos.pl_percentual >= 0 ? '+' : ''}${pos.pl_percentual.toFixed(2)}%)`
+      : ''
+    if (!confirm(`Encerrar posição ${pos?.ticker || ''}?${plInfo}`)) return
     try {
       await api.delete(`/portfolio/posicoes/${id}`)
       setPositions(p => p.filter(x => x.id !== id))
-    } catch { /* silent */ }
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Erro ao encerrar posição')
+    }
   }
 
-  useEffect(() => { loadPositions() }, [])
+  useEffect(() => { refreshPrices() }, [])
 
   // Recarrega posições quando o usuário troca de carteira (sem reload completo da página)
   useEffect(() => {
@@ -486,14 +491,27 @@ export default function PositionsPage() {
         </motion.div>
       )}
 
-      {loading && (
-        <div className="flex items-center gap-3" style={{ color: '#64748b' }}>
-          <div className="w-4 h-4 border-2 rounded-full animate-spin" style={{ borderColor: '#1e293b', borderTopColor: '#00E676' }} />
-          <span className="text-sm">Carregando posições...</span>
-        </div>
+      {(loading || refreshing) && positions.length === 0 && (
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="apex-card p-10 text-center"
+        >
+          <div className="flex flex-col items-center gap-4">
+            <div className="w-10 h-10 border-3 rounded-full animate-spin" style={{ borderColor: '#1e293b', borderTopColor: '#00E676', borderWidth: '3px' }} />
+            <div>
+              <p className="text-sm font-medium" style={{ color: '#f1f5f9' }}>
+                {refreshing ? 'Atualizando cotações ao vivo...' : 'Carregando posições...'}
+              </p>
+              <p className="text-xs mt-1" style={{ color: '#64748b' }}>
+                {refreshing ? 'Buscando preços atualizados para todas as posições' : 'Aguarde um momento'}
+              </p>
+            </div>
+          </div>
+        </motion.div>
       )}
 
-      {!loading && positions.length === 0 && (
+      {!loading && !refreshing && positions.length === 0 && (
         <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="apex-card p-12 text-center">
           <div className="w-14 h-14 rounded-2xl mx-auto mb-4 flex items-center justify-center"
             style={{ background: 'rgba(0,230,118,0.08)', border: '1px solid rgba(0,230,118,0.15)' }}>

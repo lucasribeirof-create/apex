@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { RefreshCw, Sun, TrendingUp, TrendingDown } from 'lucide-react'
+import { RefreshCw, Sun, TrendingUp, TrendingDown, Download } from 'lucide-react'
 import api from '@/services/api'
 import { useStore } from '@/store/useStore'
 import ThinkingSteps from '@/components/ThinkingSteps'
@@ -197,14 +197,86 @@ export default function BriefingPage() {
         </div>
 
         {(briefing || isStreaming) && (
-          <button
-            onClick={() => streamBriefing(true)}
-            disabled={loading || isStreaming}
-            className="btn-secondary flex items-center gap-2"
-          >
-            <RefreshCw size={16} className={(loading || isStreaming) ? 'animate-spin' : ''} />
-            {(loading || isStreaming) ? 'Gerando...' : 'Atualizar'}
-          </button>
+          <div className="flex items-center gap-2">
+            {briefing && !isStreaming && (
+              <button
+                onClick={() => {
+                  const dateStr = briefing.data
+                    ? (() => {
+                        const s = briefing.data
+                        const d = new Date(s.endsWith('Z') || s.includes('+') || s.includes('-', 10) ? s : s + 'Z')
+                        return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+                      })()
+                    : new Date().toLocaleDateString('pt-BR')
+
+                  // Converte **bold** → <strong> e quebras de linha → <p>
+                  const htmlBody = briefing.conteudo
+                    .split('\n')
+                    .map((line: string) => {
+                      if (!line.trim()) return ''
+                      const parsed = line.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                      return `<p style="margin:0 0 6px 0">${parsed}</p>`
+                    })
+                    .join('\n')
+
+                  const regimeColor = briefing.regime === 'BULL' ? '#00E676' : briefing.regime === 'BEAR' ? '#FF5252' : '#FFD740'
+
+                  const macroHtml = macro ? `
+                    <div style="display:flex;gap:24px;margin-bottom:20px;padding:12px 16px;background:#111827;border-radius:8px;border:1px solid #1e293b">
+                      <div><span style="color:#64748b;font-size:11px">Dólar</span><br/><strong style="color:#f1f5f9">R$ ${macro.dolar?.toFixed(2) ?? '--'}</strong></div>
+                      <div><span style="color:#64748b;font-size:11px">IBOVESPA</span><br/><strong style="color:#f1f5f9">${macro.ibov?.toLocaleString('pt-BR') ?? '--'}</strong></div>
+                      <div><span style="color:#64748b;font-size:11px">S&P 500</span><br/><strong style="color:#f1f5f9">${macro.sp500?.toLocaleString('en-US') ?? '--'}</strong></div>
+                      <div><span style="color:#64748b;font-size:11px">Regime</span><br/><strong style="color:${regimeColor}">${briefing.regime || 'N/A'}</strong></div>
+                    </div>` : ''
+
+                  const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Morning Briefing APEX — ${dateStr}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0e17; color: #f1f5f9; max-width: 720px; margin: 0 auto; padding: 40px 24px; line-height: 1.7; font-size: 14px; }
+    h1 { color: #00E676; font-size: 22px; margin-bottom: 4px; }
+    .date { color: #64748b; font-size: 13px; margin-bottom: 24px; }
+    strong { color: #e2e8f0; }
+    hr { border: none; border-top: 1px solid #1e293b; margin: 20px 0; }
+    .footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #1e293b; color: #475569; font-size: 11px; text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>☀ Morning Briefing APEX</h1>
+  <div class="date">${dateStr}</div>
+  ${macroHtml}
+  <hr>
+  ${htmlBody}
+  <div class="footer">APEX Manager · Gerado automaticamente</div>
+</body>
+</html>`
+
+                  const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url
+                  a.download = `briefing-apex-${dateStr.replace(/\//g, '-')}.html`
+                  a.click()
+                  URL.revokeObjectURL(url)
+                }}
+                className="btn-secondary flex items-center gap-2"
+              >
+                <Download size={16} />
+                Baixar
+              </button>
+            )}
+            <button
+              onClick={() => streamBriefing(true)}
+              disabled={loading || isStreaming}
+              className="btn-secondary flex items-center gap-2"
+            >
+              <RefreshCw size={16} className={(loading || isStreaming) ? 'animate-spin' : ''} />
+              {(loading || isStreaming) ? 'Gerando...' : 'Atualizar'}
+            </button>
+          </div>
         )}
       </div>
 

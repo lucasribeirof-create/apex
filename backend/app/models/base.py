@@ -69,6 +69,9 @@ def migrate_db():
         "ALTER TABLE positions ADD COLUMN analise_ia_at TIMESTAMP",
         # Phase 5: Hold classification + Watchlist
         "ALTER TABLE positions ADD COLUMN classificacao VARCHAR(10) DEFAULT 'TRADE'",
+        # Transaction system improvements — destino da venda e valor líquido
+        "ALTER TABLE transacoes ADD COLUMN destino VARCHAR(10)",
+        "ALTER TABLE transacoes ADD COLUMN valor_liquido FLOAT",
     ]
     with engine.connect() as conn:
         for sql in _migrations:

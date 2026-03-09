@@ -6,6 +6,9 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.models import SessionLocal, Portfolio, Briefing
 from app.cerebro import chat, build_briefing_prompt, montar_contexto
+from app.data import get_dados_tecnicos, formatar_tecnico_para_prompt, get_fundamentals, formatar_fundamentalista_para_prompt
+from app.data.news_collector import coletar_noticias_ativo, formatar_noticias_ativo
+from app.data.web_search import buscar_contexto_web
 from app.logger import logger
 
 
@@ -42,6 +45,66 @@ async def gerar_briefing_portfolio(portfolio_id: int, db: Session) -> str | None
 
     # ── Briefing 2.0: enriquecer com narrativa macro, status de teses e ações prioritárias ──
     user_prompt = "Gere o morning call de hoje."
+
+    # ── Dados ao vivo das posições: técnicos + notícias + web search ──
+    import asyncio
+    tickers_posicoes = []
+    for p in (ctx.posicoes or []):
+        t = p.get("ticker")
+        m = p.get("mercado", "B3") or "B3"
+        if t:
+            tickers_posicoes.append((t, m))
+
+    if tickers_posicoes:
+        # Busca técnicos, fundamentalistas, notícias e web search em paralelo
+        tarefas_tec = [get_dados_tecnicos(t, m) for t, m in tickers_posicoes]
+        tarefas_fund = [get_fundamentals(t) for t, _ in tickers_posicoes]
+        tarefas_news = [coletar_noticias_ativo(t) for t, _ in tickers_posicoes]
+        tarefas_web = [buscar_contexto_web(tickers_posicoes[0][0], tickers_posicoes[0][1])]
+
+        todos = await asyncio.gather(
+            *tarefas_tec, *tarefas_fund, *tarefas_news, *tarefas_web,
+            return_exceptions=True,
+        )
+        n = len(tickers_posicoes)
+        resultados_tec = todos[:n]
+        resultados_fund = todos[n:2*n]
+        resultados_news = todos[2*n:3*n]
+        web_ctx = todos[3*n] if not isinstance(todos[3*n], Exception) else ""
+
+        # Montar resumo técnico das posições
+        blocos_tec = []
+        for (ticker, _mercado), tec in zip(tickers_posicoes, resultados_tec):
+            if isinstance(tec, Exception) or not isinstance(tec, dict):
+                blocos_tec.append(f"  • {ticker}: dados técnicos indisponíveis")
+            else:
+                blocos_tec.append(f"--- {ticker} ---\n{formatar_tecnico_para_prompt(tec)}")
+        user_prompt += f"\n\nANÁLISE TÉCNICA AO VIVO:\n" + "\n\n".join(blocos_tec)
+
+        # Montar resumo fundamentalista das posições
+        blocos_fund = []
+        for (ticker, _), fund in zip(tickers_posicoes, resultados_fund):
+            if isinstance(fund, Exception) or not fund:
+                continue
+            txt = formatar_fundamentalista_para_prompt(fund)
+            if txt:
+                blocos_fund.append(f"--- {ticker} ---\n{txt}")
+        if blocos_fund:
+            user_prompt += "\n\nDADOS FUNDAMENTALISTAS:\n" + "\n\n".join(blocos_fund)
+
+        # Montar notícias de todas as posições
+        todas_noticias = []
+        for (ticker, _), news in zip(tickers_posicoes, resultados_news):
+            if not isinstance(news, Exception) and news:
+                txt = formatar_noticias_ativo(news, ticker)
+                if txt:
+                    todas_noticias.append(txt)
+        if todas_noticias:
+            user_prompt += "\n\n" + "\n\n".join(todas_noticias[:5])
+
+        # Web search
+        if web_ctx:
+            user_prompt += f"\n\n{web_ctx}"
 
     # Calendário econômico real (ForexFactory + Copom) — injetar antes da narrativa
     if ctx.macro_context and hasattr(ctx.macro_context, "calendario_eventos") and ctx.macro_context.calendario_eventos:
@@ -92,6 +155,38 @@ async def gerar_briefing_portfolio(portfolio_id: int, db: Session) -> str | None
             f"  Recomendação: {ks.recomendacao}\n"
             f"OBRIGATÓRIO: Comece o briefing com uma seção de ALERTA sobre o kill switch. "
             f"Recomende ações concretas de redução de risco."
+        )
+
+    # Circuit Breaker (Phase 4/7) — status de risco mensal
+    if hasattr(ctx, "circuit_breaker") and ctx.circuit_breaker:
+        cb = ctx.circuit_breaker
+        if cb.ativo:
+            user_prompt += (
+                f"\n\n🔴 CIRCUIT BREAKER ATIVO (nível {cb.nivel}):\n"
+                f"  P&L mês: {cb.pl_mes_pct:+.1f}% | Sizing modifier: {cb.sizing_modifier}\n"
+                f"  {cb.motivo}\n"
+                f"Mencione o circuit breaker no briefing — novas alocações estão restringidas."
+            )
+        else:
+            user_prompt += f"\n\nCircuit Breaker: normal (P&L mês: {cb.pl_mes_pct:+.1f}%)"
+
+    # Heat (Phase 4/7) — risco simultâneo
+    if hasattr(ctx, "heat") and ctx.heat:
+        ht = ctx.heat
+        if not ht.pode_operar:
+            user_prompt += (
+                f"\n\n🔴 HEAT ALTO: {ht.heat_pct:.1f}% do patrimônio em risco — NÃO PODE OPERAR.\n"
+                f"Inclua alerta sobre excesso de risco aberto."
+            )
+        else:
+            user_prompt += f"\n\nHeat: {ht.heat_pct:.1f}% do patrimônio em risco (dentro do limite)."
+
+    # Guardrails (Phase 1/7) — compliance macro
+    if hasattr(ctx, "guardrails") and ctx.guardrails:
+        g = ctx.guardrails
+        user_prompt += (
+            f"\n\nGuardrails Macro: equity máx {g.get('equity_max_pct', '?')}% | "
+            f"RF mín {g.get('rf_min_pct', '?')}% | caixa mín {g.get('caixa_min_pct', '?')}%"
         )
 
     user_prompt += "\n\nInclua ao final uma seção AÇÕES PRIORITÁRIAS HOJE com itens acionáveis ordenados por urgência."
@@ -155,6 +250,61 @@ async def gerar_briefing_portfolio_stream(portfolio_id: int, db: Session):
     # ── Briefing 2.0 stream: mesma lógica de enriquecimento ──
     user_prompt = "Gere o morning call de hoje."
 
+    # ── Dados ao vivo das posições: técnicos + notícias + web search ──
+    import asyncio
+    tickers_posicoes = []
+    for p in (ctx.posicoes or []):
+        t = p.get("ticker")
+        m = p.get("mercado", "B3") or "B3"
+        if t:
+            tickers_posicoes.append((t, m))
+
+    if tickers_posicoes:
+        tarefas_tec = [get_dados_tecnicos(t, m) for t, m in tickers_posicoes]
+        tarefas_fund = [get_fundamentals(t) for t, _ in tickers_posicoes]
+        tarefas_news = [coletar_noticias_ativo(t) for t, _ in tickers_posicoes]
+        tarefas_web = [buscar_contexto_web(tickers_posicoes[0][0], tickers_posicoes[0][1])]
+
+        todos = await asyncio.gather(
+            *tarefas_tec, *tarefas_fund, *tarefas_news, *tarefas_web,
+            return_exceptions=True,
+        )
+        n = len(tickers_posicoes)
+        resultados_tec = todos[:n]
+        resultados_fund = todos[n:2*n]
+        resultados_news = todos[2*n:3*n]
+        web_ctx = todos[3*n] if not isinstance(todos[3*n], Exception) else ""
+
+        blocos_tec = []
+        for (ticker, _mercado), tec in zip(tickers_posicoes, resultados_tec):
+            if isinstance(tec, Exception) or not isinstance(tec, dict):
+                blocos_tec.append(f"  • {ticker}: dados técnicos indisponíveis")
+            else:
+                blocos_tec.append(f"--- {ticker} ---\n{formatar_tecnico_para_prompt(tec)}")
+        user_prompt += f"\n\nANÁLISE TÉCNICA AO VIVO:\n" + "\n\n".join(blocos_tec)
+
+        blocos_fund = []
+        for (ticker, _), fund in zip(tickers_posicoes, resultados_fund):
+            if isinstance(fund, Exception) or not fund:
+                continue
+            txt = formatar_fundamentalista_para_prompt(fund)
+            if txt:
+                blocos_fund.append(f"--- {ticker} ---\n{txt}")
+        if blocos_fund:
+            user_prompt += "\n\nDADOS FUNDAMENTALISTAS:\n" + "\n\n".join(blocos_fund)
+
+        todas_noticias = []
+        for (ticker, _), news in zip(tickers_posicoes, resultados_news):
+            if not isinstance(news, Exception) and news:
+                txt = formatar_noticias_ativo(news, ticker)
+                if txt:
+                    todas_noticias.append(txt)
+        if todas_noticias:
+            user_prompt += "\n\n" + "\n\n".join(todas_noticias[:5])
+
+        if web_ctx:
+            user_prompt += f"\n\n{web_ctx}"
+
     # Calendário econômico real (ForexFactory + Copom)
     if ctx.macro_context and hasattr(ctx.macro_context, "calendario_eventos") and ctx.macro_context.calendario_eventos:
         from app.data.calendar_client import formatar_para_prompt
@@ -201,6 +351,38 @@ async def gerar_briefing_portfolio_stream(portfolio_id: int, db: Session):
             f"  Recomendação: {ks.recomendacao}\n"
             f"OBRIGATÓRIO: Comece o briefing com uma seção de ALERTA sobre o kill switch. "
             f"Recomende ações concretas de redução de risco."
+        )
+
+    # Circuit Breaker (Phase 4/7) — status de risco mensal
+    if hasattr(ctx, "circuit_breaker") and ctx.circuit_breaker:
+        cb = ctx.circuit_breaker
+        if cb.ativo:
+            user_prompt += (
+                f"\n\n🔴 CIRCUIT BREAKER ATIVO (nível {cb.nivel}):\n"
+                f"  P&L mês: {cb.pl_mes_pct:+.1f}% | Sizing modifier: {cb.sizing_modifier}\n"
+                f"  {cb.motivo}\n"
+                f"Mencione o circuit breaker no briefing — novas alocações estão restringidas."
+            )
+        else:
+            user_prompt += f"\n\nCircuit Breaker: normal (P&L mês: {cb.pl_mes_pct:+.1f}%)"
+
+    # Heat (Phase 4/7) — risco simultâneo
+    if hasattr(ctx, "heat") and ctx.heat:
+        ht = ctx.heat
+        if not ht.pode_operar:
+            user_prompt += (
+                f"\n\n🔴 HEAT ALTO: {ht.heat_pct:.1f}% do patrimônio em risco — NÃO PODE OPERAR.\n"
+                f"Inclua alerta sobre excesso de risco aberto."
+            )
+        else:
+            user_prompt += f"\n\nHeat: {ht.heat_pct:.1f}% do patrimônio em risco (dentro do limite)."
+
+    # Guardrails (Phase 1/7) — compliance macro
+    if hasattr(ctx, "guardrails") and ctx.guardrails:
+        g = ctx.guardrails
+        user_prompt += (
+            f"\n\nGuardrails Macro: equity máx {g.get('equity_max_pct', '?')}% | "
+            f"RF mín {g.get('rf_min_pct', '?')}% | caixa mín {g.get('caixa_min_pct', '?')}%"
         )
 
     user_prompt += "\n\nInclua ao final uma seção AÇÕES PRIORITÁRIAS HOJE com itens acionáveis ordenados por urgência."

@@ -46,10 +46,21 @@ from app.cerebro.client import (
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 from app.cerebro.prompts import (
+    APEX_BRAIN,
     GESTOR_BASE,
     build_portfolio_prompt,
     build_onboarding_prompt,
     build_briefing_prompt,
+    build_analyst_prompt,
+    build_cio_prompt,
+    build_ceo_eval_prompt,
+    build_ceo_monitor_prompt,
+    build_narrativa_prompt,
+    build_tese_gerar_prompt,
+    build_tese_revisar_prompt,
+    build_radar_prompt,
+    build_plano_prompt,
+    build_postmortem_prompt,
 )
 
 # ── Contexto unificado ────────────────────────────────────────────────────────
@@ -63,7 +74,12 @@ __all__ = [
     "chat", "chat_stream", "is_ai_configured",
     "load_ai_settings", "save_ai_settings", "set_active_provider", "load_all_providers",
     # Prompts
-    "GESTOR_BASE", "build_portfolio_prompt", "build_onboarding_prompt", "build_briefing_prompt",
+    "APEX_BRAIN", "GESTOR_BASE",
+    "build_portfolio_prompt", "build_onboarding_prompt", "build_briefing_prompt",
+    "build_analyst_prompt", "build_cio_prompt", "build_ceo_eval_prompt",
+    "build_ceo_monitor_prompt", "build_narrativa_prompt",
+    "build_tese_gerar_prompt", "build_tese_revisar_prompt",
+    "build_radar_prompt", "build_plano_prompt", "build_postmortem_prompt",
     # Contexto
     "ContextoCerebro", "montar_contexto",
     # Plano

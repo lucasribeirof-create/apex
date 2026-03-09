@@ -21,5 +21,7 @@ class Transacao(Base):
     quantidade = Column(Float, nullable=False)
     preco = Column(Float, nullable=False)
     valor_total = Column(Float, nullable=True)   # calculado: quantidade * preco
+    valor_liquido = Column(Float, nullable=True)  # quantidade * preco - taxas (receita líquida da venda)
     taxas = Column(Float, default=0.0)
+    destino = Column(String(10), nullable=True)   # "caixa" | "saque" | null (só para vendas)
     observacao = Column(Text, nullable=True)

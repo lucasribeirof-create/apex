@@ -60,7 +60,7 @@ def listar_usuarios(db: Session = Depends(get_db)):
             "name": u.name,
             "nome_carteira": nome_carteira,
             "estrategia": u.estrategia,
-            "patrimonio": u.patrimonio_total,
+            "patrimonio": portfolio.patrimonio_total if portfolio else u.patrimonio_total,
             "created_at": u.created_at,
         })
     return result

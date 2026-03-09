@@ -7,11 +7,8 @@ if exist "C:\Program Files\nodejs\npm.cmd" set "PATH=C:\Program Files\nodejs;%PA
 :: ── Backend em janela minimizada ─────────────────────────────────────────
 start /min "APEX Backend" cmd /k "cd /d %~dp0backend && (if not exist venv\Scripts\activate.bat python -m venv venv) && call venv\Scripts\activate.bat && pip install -r requirements.txt -q && python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --reload-dir app"
 
-:: ── Aguardar backend subir ─────────────────────────────────────────────────
-timeout /t 8 /nobreak > nul
-
-:: ── Abrir browser ─────────────────────────────────────────────────────────
-start "" "http://localhost:3000"
+:: ── Abrir browser após delay (espera frontend + backend subirem) ────────
+start /min "" cmd /c "timeout /t 14 /nobreak > nul && start "" http://localhost:3000"
 
 :: ── Frontend nesta janela ─────────────────────────────────────────────────
 cd /d %~dp0frontend

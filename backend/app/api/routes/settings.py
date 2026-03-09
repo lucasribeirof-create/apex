@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from app.cerebro.client import (
     load_ai_settings, save_ai_settings, set_active_provider,
     is_ai_configured, load_all_providers, DEFAULT_MODELS, SETTINGS_FILE,
-    testar_chave_api,
+    testar_chave_api, get_provider_limits,
 )
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -38,6 +38,7 @@ def get_ai_settings():
         "model": s.get("model") or DEFAULT_MODELS.get(provider, ""),
         "key_hint": f"...{key[-6:]}" if len(key) > 6 else ("***" if key else ""),
         "all_providers": load_all_providers(),
+        "limits": get_provider_limits(provider) if provider else None,
     }
 
 

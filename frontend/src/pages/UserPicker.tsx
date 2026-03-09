@@ -35,7 +35,12 @@ export default function UserPickerPage() {
     api.get('/onboarding/usuarios')
       .then((r) => {
         setUsers(r.data)
-        if (r.data.length === 0) navigate('/onboarding', { replace: true })
+        if (r.data.length === 0) {
+          navigate('/onboarding', { replace: true })
+        } else if (r.data.length === 1) {
+          // Auto-select when there's only one user
+          selectUser(r.data[0])
+        }
       })
       .catch(() => setUsers([]))
       .finally(() => setLoading(false))

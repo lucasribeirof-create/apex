@@ -97,6 +97,7 @@ class ContextoCerebro:
     watchlist_candidates: list = field(default_factory=list)   # WatchlistCandidate summaries
     # ── Metadados ─────────────────────────────────────────────────────────
     gerado_em: str = ""            # ISO timestamp de quando o contexto foi montado
+    alocacao_configurada: bool = False  # True quando o usuário configurou alvos (sum(alvo) > 0)
     modulos_ativos: list[str] = field(default_factory=list)  # módulos configurados com alvo > 0
 
     # ─── Métodos de conveniência ──────────────────────────────────────────
@@ -187,10 +188,11 @@ class ContextoCerebro:
                 f"{s['ticker']} a {s['distancia_pct']:.1f}% do stop "
                 f"(atual R${s['preco_atual']:.2f} / stop R${s['stop']:.2f})"
             )
-        for m in self.modulos_acima_alvo:
-            real = self.alocacao_real.get(m, 0)
-            alvo = self.alocacao_alvo.get(m, 0)
-            alertas.append(f"Módulo {m} acima do alvo: {real:.1f}% real vs {alvo:.1f}% alvo (+{real-alvo:.1f}pp)")
+        if self.alocacao_configurada:
+            for m in self.modulos_acima_alvo:
+                real = self.alocacao_real.get(m, 0)
+                alvo = self.alocacao_alvo.get(m, 0)
+                alertas.append(f"Módulo {m} acima do alvo: {real:.1f}% real vs {alvo:.1f}% alvo (+{real-alvo:.1f}pp)")
         for p in self.posicoes_no_vermelho:
             alertas.append(
                 f"{p['ticker']} com perda de {p['pl_percentual']:.1f}% "
@@ -352,8 +354,9 @@ async def montar(
 
     # ── Alertas pré-computados ────────────────────────────────────────────
     stops_proximos = _detectar_stops_proximos(posicoes, limiar_pct=5.0)
-    modulos_acima = [m for m, d in desvios.items() if d > 5.0]
-    modulos_abaixo = [m for m, d in desvios.items() if d < -5.0]
+    alocacao_configurada = sum(alocacao_alvo.values()) > 0
+    modulos_acima = [m for m, d in desvios.items() if d > 5.0] if alocacao_configurada else []
+    modulos_abaixo = [m for m, d in desvios.items() if d < -5.0] if alocacao_configurada else []
     posicoes_vermelho = [
         p for p in posicoes
         if p["pl_percentual"] < -10 and p["ticker"] not in ("CAIXA", "TESES")
@@ -475,6 +478,7 @@ async def montar(
         # Plano estratégico
         plano_estrategico=plano_estrategico,
         # Meta
+        alocacao_configurada=alocacao_configurada,
         gerado_em=datetime.now(timezone.utc).isoformat(),
         modulos_ativos=_get_modulos_ativos(portfolio),
     )

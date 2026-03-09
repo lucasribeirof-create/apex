@@ -14,37 +14,13 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.data.cache import cache
+from app.cerebro.prompts import build_narrativa_prompt
 from app.logger import logger
 
 CACHE_TTL_NARRATIVA = 43200  # 12h
 
 
-_SYSTEM_NARRATIVA = """\
-Você é o estrategista-chefe do APEX — um gestor de investimentos de classe mundial \
-focado no mercado brasileiro.
-
-Sua tarefa: com base nos DADOS MACRO fornecidos, escreva uma NARRATIVA MACRO densa \
-e acionável (500-800 palavras).
-
-ESTRUTURA OBRIGATÓRIA:
-1. CENÁRIO GLOBAL — O que está acontecendo no mundo? Fed, yields, VIX, dólar, \
-commodities. Qual a direção da liquidez global?
-2. CENÁRIO BRASIL — Trajetória de Selic/IPCA, juro real, câmbio. O ambiente é \
-favorável ou desfavorável para bolsa?
-3. RISCOS — Os 3-5 maiores riscos para o portfólio agora (concretos, não genéricos).
-4. OPORTUNIDADES — O que o cenário atual abre de janela? Setores, classes de ativo, \
-rotações.
-5. IMPLICAÇÕES PARA O PORTFÓLIO — Dada a carteira (se informada), que ajustes fazem \
-sentido? Aumentar/reduzir exposição a quê?
-
-REGRAS:
-- NÃO atribua probabilidades numéricas a cenários (ex: "40% de chance de X"). Isso é \
-falsa precisão.
-- USE dados concretos (VIX em 28, Selic em 14.75%, etc.) para embasar cada afirmação.
-- SEJA direto e opinativo. "O juro real de 7% torna renda fixa imbatível" é melhor que \
-"o investidor pode considerar avaliar renda fixa".
-- Pense como Ray Dalio + Druckenmiller: macro drives everything.
-"""
+_SYSTEM_NARRATIVA = build_narrativa_prompt()
 
 
 async def gerar_narrativa(macro_context, regime_info=None, posicoes_resumo: str = "") -> str:

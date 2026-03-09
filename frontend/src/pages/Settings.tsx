@@ -1,16 +1,64 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Settings, Trash2, AlertTriangle, X, Bot, CheckCircle, XCircle, Loader2 } from 'lucide-react'
+import { Settings, Trash2, AlertTriangle, X, Bot, CheckCircle, XCircle, Loader2, Zap, DollarSign } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import { useNavigate } from 'react-router-dom'
 import api from '@/services/api'
 
+// ─── Budget input mini-component ─────────────────────────────────────────────
+function BudgetInput({ budget, onSave }: { budget: number | null; onSave: (v: number | null) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [val, setVal] = useState(budget != null ? String(budget) : '')
+
+  if (!editing) {
+    return (
+      <button
+        onClick={() => { setVal(budget != null ? String(budget) : ''); setEditing(true) }}
+        className="text-[11px] px-2 py-1 rounded-md transition-all"
+        style={{ background: 'rgba(255,193,7,0.06)', border: '1px solid rgba(255,193,7,0.15)', color: '#FFC107' }}
+      >
+        <DollarSign size={10} className="inline mr-1" />
+        {budget != null ? `Orçamento: $${budget.toFixed(2)} · editar` : 'Definir orçamento'}
+      </button>
+    )
+  }
+
+  const save = () => {
+    const n = parseFloat(val)
+    onSave(isNaN(n) || n <= 0 ? null : n)
+    setEditing(false)
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-[11px]" style={{ color: '#94a3b8' }}>$</span>
+      <input
+        autoFocus
+        type="number"
+        step="0.01"
+        min="0"
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        onKeyDown={(e) => e.key === 'Enter' && save()}
+        className="flex-1 px-2 py-1 rounded-md text-xs font-mono outline-none"
+        style={{ background: '#0f172a', border: '1px solid #334155', color: '#f1f5f9', width: 80 }}
+        placeholder="10.00"
+      />
+      <button onClick={save} className="text-[10px] px-2 py-1 rounded-md" style={{ background: 'rgba(0,230,118,0.1)', color: '#00E676' }}>Salvar</button>
+      <button onClick={() => setEditing(false)} className="text-[10px] px-2 py-1 rounded-md" style={{ color: '#64748b' }}>✕</button>
+    </div>
+  )
+}
+
 export default function SettingsPage() {
-  const { userId, userName, portfolioAtivo, setPortfolioAtivo, setPortfolios, reset } = useStore()
+  const { userId, userName, portfolioAtivo, setPortfolioAtivo, setPortfolios, reset, tokenUsage, tokenBudget, setTokenBudget, tokenSpentAll } = useStore()
   const navigate = useNavigate()
 
   // AI provider info
-  const [aiInfo, setAiInfo] = useState<{ provider: string; model: string; key_hint: string; configured: boolean } | null>(null)
+  const [aiInfo, setAiInfo] = useState<{
+    provider: string; model: string; key_hint: string; configured: boolean;
+    limits?: { tier: string; req_min: number | null; req_day: number | null; tokens_min: number | null; context_window: number | null; pricing_input: number; pricing_output: number; nota: string } | null
+  } | null>(null)
   const [testingAI, setTestingAI] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null)
 
@@ -240,6 +288,92 @@ export default function SettingsPage() {
                 <span style={{ color: testResult.ok ? '#00E676' : '#FF5252' }}>{testResult.msg}</span>
               </div>
             )}
+
+            {/* Token usage — simple */}
+            {aiInfo.limits && (() => {
+              const isFree = aiInfo.limits!.tier === 'free'
+              const today = new Date().toISOString().slice(0, 10)
+              const usedToday = tokenUsage?.date === today ? (tokenUsage.totalIn + tokenUsage.totalOut) : 0
+              const costToday = tokenUsage?.date === today ? tokenUsage.totalCost : 0
+              const budgetPerMin = aiInfo.limits!.tokens_min || 0
+              const fmtK = (n: number) => n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + 'M' : n >= 1_000 ? (n / 1_000).toFixed(1) + 'K' : String(n)
+              const saldo = tokenBudget != null ? Math.max(0, tokenBudget - tokenSpentAll) : null
+
+              return (
+                <div className="rounded-lg px-3 py-2.5 space-y-2" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid #1e293b' }}>
+                  {/* Tier badge */}
+                  <div className="flex items-center gap-2">
+                    <Zap size={13} style={{ color: isFree ? '#00E676' : '#FFC107' }} />
+                    <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-1.5 py-0.5 rounded"
+                      style={{
+                        background: isFree ? 'rgba(0,230,118,0.1)' : 'rgba(255,193,7,0.1)',
+                        color: isFree ? '#00E676' : '#FFC107',
+                        border: `1px solid ${isFree ? 'rgba(0,230,118,0.25)' : 'rgba(255,193,7,0.25)'}`,
+                      }}>
+                      {isFree ? 'GRÁTIS' : 'PAGO'}
+                    </span>
+                    {isFree && budgetPerMin > 0 && (
+                      <span className="text-[10px]" style={{ color: '#64748b' }}>
+                        {fmtK(budgetPerMin)} tok/min
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Saldo (paid only) */}
+                  {!isFree && (
+                    <div className="rounded-lg px-3 py-2" style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid #1e293b' }}>
+                      {saldo != null ? (
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="text-[10px] uppercase tracking-wider" style={{ color: '#64748b' }}>Saldo disponível</p>
+                            <p className="text-lg font-bold font-mono" style={{ color: saldo > 1 ? '#00E676' : saldo > 0 ? '#FFC107' : '#FF5252' }}>
+                              ${saldo.toFixed(2)}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-[10px]" style={{ color: '#475569' }}>Gasto total</p>
+                            <p className="text-xs font-mono" style={{ color: '#94a3b8' }}>${tokenSpentAll.toFixed(4)}</p>
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-[11px]" style={{ color: '#64748b' }}>
+                          Defina um orçamento abaixo para acompanhar seu saldo
+                        </p>
+                      )}
+                      {saldo != null && tokenBudget! > 0 && (
+                        <div className="mt-1.5 w-full h-1.5 rounded-full overflow-hidden" style={{ background: '#1e293b' }}>
+                          <div className="h-full rounded-full transition-all" style={{
+                            width: `${Math.min(100, (tokenSpentAll / tokenBudget!) * 100)}%`,
+                            background: saldo > 1 ? '#00E676' : saldo > 0 ? '#FFC107' : '#FF5252',
+                          }} />
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Budget input (paid only) */}
+                  {!isFree && (
+                    <BudgetInput budget={tokenBudget} onSave={setTokenBudget} />
+                  )}
+
+                  {/* Today stats */}
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span style={{ color: '#64748b' }}>
+                      Hoje: <span style={{ color: '#f1f5f9' }}>{fmtK(usedToday)} tokens</span>
+                    </span>
+                    {!isFree && (
+                      <span style={{ color: '#64748b' }}>
+                        Custo hoje: <span style={{ color: '#f1f5f9' }}>${costToday.toFixed(4)}</span>
+                      </span>
+                    )}
+                  </div>
+
+                  {aiInfo.limits!.nota && (
+                    <p className="text-[10px]" style={{ color: '#475569' }}>{aiInfo.limits!.nota}</p>
+                  )}
+                </div>
+              )
+            })()}
           </div>
         ) : (
           <p className="text-sm" style={{ color: '#475569' }}>Carregando...</p>

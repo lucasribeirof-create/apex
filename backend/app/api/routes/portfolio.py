@@ -8,6 +8,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_user_id, get_portfolio_ativo
 from app.models import User, Portfolio, Position
+from app.models.transacao import Transacao
 from app.data import get_quotes, get_fundamentals
 from app.data.cache import cache as _portfolio_cache
 from app.data.tecnico import get_dados_tecnicos
@@ -83,13 +84,31 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
     tickers = [p.ticker for p in posicoes if p.tipo in ("ACAO", "FII", "ETF", "BDR")]
     cotacoes = await get_quotes(tickers) if tickers else {}
 
+    # Para tickers sem cotação BRAPI, busca via get_dados_tecnicos (yfinance fallback)
+    sem_cotacao = [p for p in posicoes if p.tipo in ("ACAO", "FII", "ETF", "BDR") and not cotacoes.get(p.ticker)]
+    if sem_cotacao:
+        tarefas = [get_dados_tecnicos(p.ticker, getattr(p, "mercado", None) or "B3") for p in sem_cotacao]
+        resultados_yf = await asyncio.gather(*tarefas, return_exceptions=True)
+        for p, res in zip(sem_cotacao, resultados_yf):
+            if isinstance(res, dict) and res.get("preco_atual"):
+                cotacoes[p.ticker] = {"regularMarketPrice": res["preco_atual"]}
+
     resultado = []
+    preco_mudou = False
     for p in posicoes:
         cotacao = cotacoes.get(p.ticker, {})
         preco_atual = cotacao.get("regularMarketPrice", p.preco_atual or p.preco_medio)
         valor_atual = preco_atual * p.quantidade
         pl_reais = valor_atual - p.valor_investido
         pl_pct = (pl_reais / p.valor_investido * 100) if p.valor_investido > 0 else 0
+
+        # Persistir preços atualizados no banco
+        if cotacao.get("regularMarketPrice") and cotacao["regularMarketPrice"] != p.preco_atual:
+            p.preco_atual = round(preco_atual, 2)
+            p.valor_atual = round(valor_atual, 2)
+            p.pl_reais = round(pl_reais, 2)
+            p.pl_percentual = round(pl_pct, 2)
+            preco_mudou = True
 
         resultado.append({
             "id": p.id,
@@ -125,6 +144,9 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
             "premio_recebido": p.premio_recebido,
         })
 
+    if preco_mudou:
+        db.commit()
+
     # Caixa disponível: capital declarado - soma dos valores atuais investidos
     capital_declarado = getattr(portfolio, "capital_declarado", None)
     soma_posicoes = sum(r["valor_atual"] for r in resultado)
@@ -135,6 +157,86 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
         "capital_declarado": capital_declarado,
         "caixa_disponivel": caixa_disponivel,
     }
+
+
+@router.get("/posicoes/historico")
+def listar_posicoes_historico(user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Lista posições encerradas (ativa=False) com P&L de saída."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    posicoes = db.query(Position).filter(
+        Position.portfolio_id == portfolio.id,
+        Position.ativa == False,
+    ).order_by(Position.data_saida.desc()).all()
+
+    resultado = []
+    for p in posicoes:
+        # Duração do trade
+        duracao_dias = None
+        if p.data_abertura and p.data_saida:
+            duracao_dias = (p.data_saida - p.data_abertura).days
+        elif p.data_entrada and p.data_saida:
+            duracao_dias = (p.data_saida - p.data_entrada).days
+
+        resultado.append({
+            "id": p.id,
+            "ticker": p.ticker,
+            "nome": p.nome or p.ticker,
+            "tipo": p.tipo,
+            "modulo": p.modulo,
+            "quantidade": p.quantidade,
+            "preco_medio": p.preco_medio,
+            "preco_atual": p.preco_atual,
+            "valor_investido": p.valor_investido,
+            "pl_reais": p.pl_reais,
+            "pl_percentual": p.pl_percentual,
+            "data_abertura": p.data_abertura.isoformat() if p.data_abertura else (p.data_entrada.isoformat() if p.data_entrada else None),
+            "data_saida": p.data_saida.isoformat() if p.data_saida else None,
+            "motivo_saida": p.motivo_saida,
+            "duracao_dias": duracao_dias,
+        })
+
+    return {"posicoes": resultado}
+
+
+@router.delete("/posicoes/{posicao_id}/permanente")
+def deletar_posicao_permanente(posicao_id: int, user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Remove permanentemente uma posição encerrada (e suas transações) do histórico."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    posicao = db.query(Position).filter(
+        Position.id == posicao_id,
+        Position.portfolio_id == portfolio.id,
+    ).first()
+    if not posicao:
+        raise HTTPException(status_code=404, detail="Posição não encontrada")
+    if posicao.ativa:
+        raise HTTPException(status_code=400, detail="Só é possível deletar posições encerradas")
+
+    # Remove transações associadas
+    db.query(Transacao).filter(Transacao.position_id == posicao_id).delete()
+    # Remove trade journal entries
+    from app.models.trade_journal import TradeJournal
+    db.query(TradeJournal).filter(TradeJournal.position_id == posicao_id).delete()
+    # Remove posição
+    db.delete(posicao)
+    db.commit()
+
+    return {"mensagem": f"Posição {posicao.ticker} removida do histórico."}
 
 
 @router.post("/posicoes")
@@ -181,6 +283,20 @@ def adicionar_posicao(body: NovaPosicao, user_id: Optional[int] = Depends(get_us
         posicao.data_entrada = data_entrada
         posicao.data_abertura = data_entrada
     db.add(posicao)
+    db.flush()
+
+    # Auto-cria transação inicial de compra
+    db.add(Transacao(
+        portfolio_id=portfolio.id,
+        position_id=posicao.id,
+        tipo="compra",
+        data=data_entrada or posicao.data_entrada or datetime.now(timezone.utc),
+        quantidade=body.quantidade,
+        preco=body.preco_medio,
+        valor_total=valor_investido,
+        taxas=0.0,
+        observacao="Compra inicial (posição criada manualmente)",
+    ))
     db.commit()
     db.refresh(posicao)
 
@@ -207,12 +323,22 @@ def encerrar_posicao(posicao_id: int, motivo: str = "Encerrado manualmente", use
     if not posicao:
         raise HTTPException(status_code=404, detail="Posição não encontrada")
 
+    # Calcula P&L de saída usando preço atual vs preço médio
+    preco_saida = posicao.preco_atual or posicao.preco_medio
+    if posicao.preco_medio and posicao.preco_medio > 0 and posicao.quantidade > 0:
+        posicao.pl_reais = (preco_saida - posicao.preco_medio) * posicao.quantidade
+        posicao.pl_percentual = ((preco_saida / posicao.preco_medio) - 1) * 100
+
     posicao.ativa = False
     posicao.data_saida = datetime.now(timezone.utc)
     posicao.motivo_saida = motivo
     db.commit()
 
-    return {"mensagem": f"Posição {posicao.ticker} encerrada."}
+    return {
+        "mensagem": f"Posição {posicao.ticker} encerrada.",
+        "pl_reais": posicao.pl_reais,
+        "pl_percentual": posicao.pl_percentual,
+    }
 
 
 @router.get("/posicoes/{posicao_id}/fundamentals")
@@ -726,6 +852,20 @@ async def criar_carteira_teste(user_id: Optional[int] = Depends(get_user_id), db
             moeda="BRL",
         )
         db.add(posicao)
+        db.flush()
+
+        # Auto-cria transação inicial de compra
+        db.add(Transacao(
+            portfolio_id=novo.id,
+            position_id=posicao.id,
+            tipo="compra",
+            data=datetime.now(timezone.utc),
+            quantidade=p["quantidade"],
+            preco=p["preco_medio"],
+            valor_total=valor_investido,
+            taxas=0.0,
+            observacao="Compra inicial (carteira teste)",
+        ))
 
     # Ativa a nova carteira
     user.portfolio_ativo_id = novo.id
@@ -1131,6 +1271,41 @@ async def sugerir_portfolio(
 
     # ── Dispara todos os motores com capital > 0 em paralelo ─────────────────
 
+    # ── Kill Switch pre-check (Fase 5/7) ─────────────────────────────────
+    # Se kill switch nível ≥ 2 (PAUSA TOTAL), NÃO roda motores — preserva capital
+    try:
+        from app.cerebro.macro import montar_macro as _montar_macro_ks
+        from app.cerebro.hold import avaliar_kill_switch
+        _macro_ks = await _montar_macro_ks()
+        _regime_ks = getattr(_macro_ks, "regime_macro", "NEUTRO") or "NEUTRO"
+        _confianca_ks = getattr(_macro_ks, "confianca", 50)
+        _score_ks = getattr(_macro_ks, "regime_score", 50)
+        _ks = avaliar_kill_switch(_regime_ks, _confianca_ks, _score_ks)
+        if _ks.ativo and _ks.nivel >= 2:
+            logger.warning("sugerir-portfolio: KILL SWITCH nível %d — BLOQUEANDO motores. %s", _ks.nivel, _ks.motivo)
+            return {
+                "portfolio_id": portfolio.id,
+                "capital_total": capital,
+                "total_sugerido": 0,
+                "capital_restante": capital,
+                "sugestoes": [],
+                "analise_ceo": (
+                    f"⚠️ KILL SWITCH MACRO ATIVO (nível {_ks.nivel} — PAUSA TOTAL)\n\n"
+                    f"**Motivo:** {_ks.motivo}\n\n"
+                    f"**Recomendação:** {_ks.recomendacao}\n\n"
+                    "Os motores de seleção foram **bloqueados** enquanto o kill switch estiver ativo. "
+                    "Nenhuma nova posição de risco deve ser aberta. "
+                    "Mantenha as posições existentes em monitoramento e priorize renda fixa e caixa."
+                ),
+                "alertas": [f"KILL SWITCH nível {_ks.nivel}: {_ks.motivo}"],
+                "motores_sem_resultado": [],
+                "score_portfolio": 0,
+            }
+        elif _ks.ativo and _ks.nivel == 1:
+            logger.warning("sugerir-portfolio: KILL SWITCH nível 1 (ALERTA) — motores rodam com warning")
+    except Exception as _ks_err:
+        logger.debug("sugerir-portfolio: kill switch check falhou (%s) — prosseguindo", _ks_err)
+
     # Pre-fetch: busca dados de mercado UMA VEZ antes de disparar os motores
     # Isso evita que 7 motores chamem yfinance para os mesmos tickers
     _all_tickers: set[str] = set()
@@ -1405,6 +1580,20 @@ async def aplicar_sugestoes(
             data_entrada=datetime.now(timezone.utc),
         )
         db.add(posicao)
+        db.flush()
+
+        # Auto-cria transação inicial de compra
+        db.add(Transacao(
+            portfolio_id=portfolio.id,
+            position_id=posicao.id,
+            tipo="compra",
+            data=datetime.now(timezone.utc),
+            quantidade=s.quantidade,
+            preco=round(preco_exec, 2),
+            valor_total=valor_inv,
+            taxas=0.0,
+            observacao="Compra inicial (sugestão aceita)",
+        ))
         criadas.append(s.ticker)
 
     # Capital rejeitado → adiciona/atualiza posição CAIXA

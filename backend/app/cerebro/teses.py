@@ -10,40 +10,14 @@ import json
 from datetime import datetime
 
 from app.cerebro.client import chat
+from app.cerebro.prompts import build_tese_gerar_prompt, build_tese_revisar_prompt
 from app.logger import logger
 from app.models.tese_investimento import TeseInvestimento
 
 
 # ─── Geração de tese ──────────────────────────────────────────────────────────
 
-SYSTEM_GERAR = """\
-Você é um analista de investimentos sênior de um family office brasileiro.
-Sua tarefa é produzir uma tese de investimento completa e estruturada para o ativo solicitado.
-
-A tese deve ser fundamentada nos dados fornecidos (preço, múltiplos, setor, contexto macro) \
-e escrita de forma objetiva, sem eufemismos.
-
-Retorne APENAS JSON válido, sem markdown, sem texto antes ou depois. Formato exato:
-{
-  "tese_resumo": "Frase curta de até 200 caracteres resumindo a tese",
-  "tese_completa": "Análise detalhada em 3-5 parágrafos: fundamento, timing, assimetria risco/retorno",
-  "catalisadores": ["catalisador 1", "catalisador 2", "catalisador 3"],
-  "riscos": ["risco 1", "risco 2", "risco 3"],
-  "condicao_invalidacao": "Condições explícitas que, se ocorrerem, invalidam a tese e justificam saída",
-  "alvo_preco": 45.00,
-  "stop_preco": 28.00,
-  "prazo_estimado": "3-6 meses",
-  "score_conviccao": 7
-}
-
-REGRAS:
-- score_conviccao: 1 (baixíssima convicção) a 10 (altíssima convicção)
-- alvo_preco e stop_preco devem ser números reais baseados nos dados fornecidos
-- catalisadores: pelo menos 2, no máximo 5 itens concretos
-- riscos: pelo menos 2, no máximo 5 itens concretos
-- condicao_invalidacao: seja específico (ex: "perda do suporte de R$28 com volume acima da média")
-- prazo_estimado: use formato como "1-3 meses", "6-12 meses", "12+ meses"
-- tese_completa: inclua dados quantitativos do payload (P/L, DY, crescimento, etc.)"""
+SYSTEM_GERAR = build_tese_gerar_prompt()
 
 
 async def gerar_tese(
@@ -109,30 +83,7 @@ async def gerar_tese(
 
 # ─── Revisão de tese ──────────────────────────────────────────────────────────
 
-SYSTEM_REVISAR = """\
-Você é um analista de investimentos sênior revisando uma tese de investimento existente.
-
-Sua tarefa é avaliar se a tese original ainda é válida com base nos dados atuais do ativo e do mercado.
-
-Retorne APENAS JSON válido, sem markdown. Formato exato:
-{
-  "status": "ATIVA",
-  "score_conviccao": 7,
-  "comentario_revisao": "Análise de 2-4 linhas explicando a decisão de manter/enfraquecer/invalidar",
-  "catalisadores_atualizados": ["catalisador 1", "catalisador 2"],
-  "riscos_atualizados": ["risco 1", "risco 2"],
-  "alvo_preco": 45.00,
-  "stop_preco": 28.00
-}
-
-REGRAS:
-- status DEVE ser exatamente: "ATIVA", "ENFRAQUECIDA" ou "INVALIDADA"
-- ATIVA: tese intacta, fundamentos confirmados, catalisadores no caminho
-- ENFRAQUECIDA: sinais de deterioração, mas ainda não invalidada — monitorar de perto
-- INVALIDADA: condição de invalidação atingida, fundamento quebrado, ou risco materializado → sair
-- Se invalidar, explique claramente por quê no comentario_revisao
-- alvo_preco e stop_preco podem ser ajustados se os dados justificarem
-- score_conviccao: reavalie de 1 a 10 com base nos dados atuais"""
+SYSTEM_REVISAR = build_tese_revisar_prompt()
 
 
 async def revisar_tese(

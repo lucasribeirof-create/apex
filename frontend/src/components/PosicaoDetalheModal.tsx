@@ -7,7 +7,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   X, TrendingUp, TrendingDown, BrainCircuit, Plus, Trash2,
   CalendarDays, ArrowDownCircle, ArrowUpCircle, RotateCcw,
-  Target, ShieldAlert, BarChart2, Pencil, Save, RotateCw,
+  Target, ShieldAlert, BarChart2, Pencil, Save, RotateCw, Download,
 } from 'lucide-react'
 import DOMPurify from 'dompurify'
 import api from '@/services/api'
@@ -49,8 +49,27 @@ interface Transacao {
   quantidade: number
   preco: number
   valor_total: number
+  valor_liquido?: number | null
   taxas: number
+  destino?: string | null
   observacao?: string | null
+  qtd_apos: number
+  pm_apos: number
+  pl_realizado?: number | null
+}
+
+interface TxResumo {
+  total_comprado: number
+  total_vendido: number
+  total_taxas: number
+  pl_realizado_total: number
+  pl_nao_realizado: number
+  pl_total: number
+  qtd_atual: number
+  pm_atual: number
+  custo_remanescente: number
+  preco_breakeven: number
+  preco_atual: number
 }
 
 interface Props {
@@ -115,14 +134,50 @@ function renderMarkdownSimple(text: string): string {
     .replace(/\n/g, '<br/>')
 }
 
+function downloadAnaliseHTML(ticker: string, modulo: string, content: string, dateStr?: string | null) {
+  const data = dateStr
+    ? new Date(dateStr).toLocaleDateString('pt-BR').replace(/\//g, '-')
+    : new Date().toLocaleDateString('pt-BR').replace(/\//g, '-')
+  const hora = dateStr
+    ? new Date(dateStr).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }).replace(':', 'h')
+    : ''
+  const rendered = renderMarkdownSimple(content)
+  const html = `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>APEX \u2014 ${ticker} \u2014 ${data}</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0d1117;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;line-height:1.7;padding:24px;max-width:720px;margin:0 auto}
+  strong{color:#f1f5f9}
+  .header{border-bottom:1px solid #1e293b;padding-bottom:16px;margin-bottom:24px}
+  .header h1{color:#00E676;font-size:20px;margin-bottom:4px}
+  .header p{color:#64748b;font-size:12px}
+  .green{color:#00E676;font-weight:bold;margin-top:20px;display:block}
+  .green-sm{color:#00E676;font-weight:bold;font-size:13px;margin-top:16px;display:block}
+  p{margin-top:8px}
+</style></head><body>
+<div class="header"><h1>An\u00e1lise APEX \u2014 ${ticker}</h1><p>${modulo} \u2022 ${data}${hora ? ' ' + hora : ''}</p></div>
+<div>${rendered}</div>
+</body></html>`
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `APEX_${ticker}_${data}.html`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 // ─── Nova Transação Form ──────────────────────────────────────────────────────
 
 function NovaTransacaoForm({
   positionId,
+  positionQuantidade,
   onSaved,
   onCancel,
 }: {
   positionId: number
+  positionQuantidade: number
   onSaved: () => void
   onCancel: () => void
 }) {
@@ -134,24 +189,55 @@ function NovaTransacaoForm({
   const [observacao, setObservacao] = useState('')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState('')
+  const [showDestino, setShowDestino] = useState(false)
+  const [pendingData, setPendingData] = useState<any>(null)
 
-  const handleSave = async () => {
-    if (!quantidade || !preco) { setErr('Preencha Quantidade e Preço'); return }
+  const isVenda = tipo === 'venda_parcial' || tipo === 'venda_total'
+
+  const doSave = async (destino?: string) => {
+    const payload: any = {
+      tipo,
+      data: new Date(data).toISOString(),
+      quantidade: parseFloat(quantidade),
+      preco: parseFloat(preco),
+      taxas: taxas ? parseFloat(taxas) : 0,
+      observacao: observacao || null,
+    }
+    if (destino) payload.destino = destino
+
     setSaving(true)
     try {
-      await api.post(`/portfolio/posicoes/${positionId}/transacoes`, {
-        tipo,
-        data: new Date(data).toISOString(),
-        quantidade: parseFloat(quantidade),
-        preco: parseFloat(preco),
-        taxas: taxas ? parseFloat(taxas) : 0,
-        observacao: observacao || null,
-      })
+      await api.post(`/portfolio/posicoes/${positionId}/transacoes`, payload)
+      setShowDestino(false)
+      setPendingData(null)
       onSaved()
     } catch (e: any) {
       setErr(e?.response?.data?.detail || 'Erro ao salvar')
+      setShowDestino(false)
     }
     setSaving(false)
+  }
+
+  const handleSave = async () => {
+    if (!quantidade || !preco) { setErr('Preencha Quantidade e Preço'); return }
+
+    const qty = parseFloat(quantidade)
+    // Validação de venda no frontend
+    if (isVenda) {
+      if (qty > positionQuantidade) {
+        setErr(`Quantidade insuficiente. Disponível: ${positionQuantidade}`)
+        return
+      }
+      if (tipo === 'venda_total' && qty !== positionQuantidade) {
+        setErr(`Venda total deve ser a quantidade exata: ${positionQuantidade}`)
+        return
+      }
+      // Mostra popup de destino para vendas
+      setShowDestino(true)
+      return
+    }
+
+    await doSave()
   }
 
   return (
@@ -198,6 +284,11 @@ function NovaTransacaoForm({
             className="w-full px-3 py-2 rounded-lg text-xs outline-none"
             style={{ background: '#0a0e17', border: '1px solid #334155', color: '#f1f5f9' }}
           />
+          {isVenda && (
+            <p className="text-[10px] mt-1" style={{ color: '#64748b' }}>
+              Disponível: <span style={{ color: '#00E676' }}>{positionQuantidade}</span>
+            </p>
+          )}
         </div>
         <div>
           <label className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: '#64748b' }}>Preço (R$)</label>
@@ -253,6 +344,43 @@ function NovaTransacaoForm({
           {saving ? 'Salvando...' : 'Registrar Transação'}
         </button>
       </div>
+
+      {/* Popup destino da venda */}
+      {showDestino && (
+        <div
+          className="rounded-xl p-4 space-y-3 mt-3"
+          style={{ background: 'rgba(255,152,0,0.08)', border: '1px solid rgba(255,152,0,0.25)' }}
+        >
+          <p className="text-xs font-mono uppercase tracking-wider" style={{ color: '#FF9800' }}>
+            Para onde vai o dinheiro da venda?
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => doSave('caixa')}
+              disabled={saving}
+              className="flex-1 py-2.5 rounded-lg text-xs font-medium transition-all"
+              style={{ background: 'rgba(0,230,118,0.12)', color: '#00E676', border: '1px solid rgba(0,230,118,0.25)' }}
+            >
+              {saving ? '...' : 'Mandar p/ Caixa'}
+            </button>
+            <button
+              onClick={() => doSave('saque')}
+              disabled={saving}
+              className="flex-1 py-2.5 rounded-lg text-xs font-medium transition-all"
+              style={{ background: 'rgba(255,82,82,0.12)', color: '#FF5252', border: '1px solid rgba(255,82,82,0.25)' }}
+            >
+              {saving ? '...' : 'Saque (dinheiro saiu)'}
+            </button>
+          </div>
+          <button
+            onClick={() => setShowDestino(false)}
+            className="w-full py-1.5 rounded-lg text-[10px] transition-all"
+            style={{ color: '#475569' }}
+          >
+            Cancelar
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -262,6 +390,7 @@ function NovaTransacaoForm({
 export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Props) {
   const [tab, setTab] = useState<'resumo' | 'transacoes' | 'ai'>('resumo')
   const [transacoes, setTransacoes] = useState<Transacao[]>([])
+  const [txResumo, setTxResumo] = useState<TxResumo | null>(null)
   const [loadingTx, setLoadingTx] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [showAnalise, setShowAnalise] = useState(false)
@@ -336,7 +465,14 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
     setLoadingTx(true)
     try {
       const res = await api.get(`/portfolio/posicoes/${position.id}/transacoes`)
-      setTransacoes(res.data)
+      const data = res.data
+      if (Array.isArray(data)) {
+        setTransacoes(data)  // backward compat
+        setTxResumo(null)
+      } else {
+        setTransacoes(data.transacoes || [])
+        setTxResumo(data.resumo || null)
+      }
     } catch { /* silent */ }
     setLoadingTx(false)
   }
@@ -780,25 +916,56 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
                   exit={{ opacity: 0 }}
                   className="p-5 space-y-4"
                 >
-                  {/* Resumo de estatísticas */}
-                  {transacoes.length > 0 && (() => {
-                    const compras = transacoes.filter(t => ['compra', 'dca', 'bonificacao', 'split', 'aporte'].includes(t.tipo))
-                    const vendas = transacoes.filter(t => ['venda_parcial', 'venda_total'].includes(t.tipo))
-                    const totalComprado = compras.reduce((s, t) => s + t.valor_total, 0)
-                    const totalVendido = vendas.reduce((s, t) => s + t.valor_total, 0)
+                  {/* ── Resumo enriquecido (6 cards) ── */}
+                  {txResumo && transacoes.length > 0 && (() => {
+                    const r = txResumo
+                    const plColor = (v: number) => v > 0 ? '#00E676' : v < 0 ? '#FF5252' : '#94a3b8'
+                    const plSign = (v: number) => v >= 0 ? '+' : ''
                     return (
                       <div className="grid grid-cols-3 gap-2">
-                        <div className="rounded-lg px-3 py-2 text-center" style={{ background: 'rgba(0,230,118,0.05)', border: '1px solid rgba(0,230,118,0.1)' }}>
-                          <p className="text-[9px] font-mono uppercase" style={{ color: '#64748b' }}>Compras</p>
-                          <p className="text-xs font-mono font-bold mt-0.5" style={{ color: '#00E676' }}>{compras.length}x · R$ {formatMoney(totalComprado, 0)}</p>
+                        {/* Capital Investido */}
+                        <div className="rounded-lg px-3 py-2.5" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid #1e293b' }}>
+                          <p className="text-[9px] font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>Capital Investido</p>
+                          <p className="text-xs font-mono font-bold mt-1" style={{ color: '#f1f5f9' }}>R$ {formatMoney(r.custo_remanescente, 0)}</p>
+                          <p className="text-[9px] font-mono mt-0.5" style={{ color: '#475569' }}>compra: {formatMoney(r.total_comprado, 0)} · venda: {formatMoney(r.total_vendido, 0)}</p>
                         </div>
-                        <div className="rounded-lg px-3 py-2 text-center" style={{ background: 'rgba(255,82,82,0.05)', border: '1px solid rgba(255,82,82,0.1)' }}>
-                          <p className="text-[9px] font-mono uppercase" style={{ color: '#64748b' }}>Vendas</p>
-                          <p className="text-xs font-mono font-bold mt-0.5" style={{ color: '#FF9800' }}>{vendas.length}x · R$ {formatMoney(totalVendido, 0)}</p>
+                        {/* P&L Realizado */}
+                        <div className="rounded-lg px-3 py-2.5" style={{ background: r.pl_realizado_total >= 0 ? 'rgba(0,230,118,0.04)' : 'rgba(255,82,82,0.04)', border: `1px solid ${r.pl_realizado_total >= 0 ? 'rgba(0,230,118,0.12)' : 'rgba(255,82,82,0.12)'}` }}>
+                          <p className="text-[9px] font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>P&L Realizado</p>
+                          <p className="text-xs font-mono font-bold mt-1" style={{ color: plColor(r.pl_realizado_total) }}>
+                            {plSign(r.pl_realizado_total)}R$ {formatMoney(Math.abs(r.pl_realizado_total))}
+                          </p>
+                          <p className="text-[9px] font-mono mt-0.5" style={{ color: '#475569' }}>lucro/prejuízo de vendas</p>
                         </div>
-                        <div className="rounded-lg px-3 py-2 text-center" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid #1e293b' }}>
-                          <p className="text-[9px] font-mono uppercase" style={{ color: '#64748b' }}>PM Atual</p>
-                          <p className="text-xs font-mono font-bold mt-0.5" style={{ color: '#f1f5f9' }}>R$ {formatMoney(position.preco_medio)}</p>
+                        {/* P&L Não-Realizado */}
+                        <div className="rounded-lg px-3 py-2.5" style={{ background: r.pl_nao_realizado >= 0 ? 'rgba(0,230,118,0.04)' : 'rgba(255,82,82,0.04)', border: `1px solid ${r.pl_nao_realizado >= 0 ? 'rgba(0,230,118,0.12)' : 'rgba(255,82,82,0.12)'}` }}>
+                          <p className="text-[9px] font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>P&L Papel</p>
+                          <p className="text-xs font-mono font-bold mt-1" style={{ color: plColor(r.pl_nao_realizado) }}>
+                            {plSign(r.pl_nao_realizado)}R$ {formatMoney(Math.abs(r.pl_nao_realizado))}
+                          </p>
+                          <p className="text-[9px] font-mono mt-0.5" style={{ color: '#475569' }}>posição aberta</p>
+                        </div>
+                        {/* P&L Total */}
+                        <div className="rounded-lg px-3 py-2.5" style={{ background: r.pl_total >= 0 ? 'rgba(0,230,118,0.06)' : 'rgba(255,82,82,0.06)', border: `1px solid ${r.pl_total >= 0 ? 'rgba(0,230,118,0.2)' : 'rgba(255,82,82,0.2)'}` }}>
+                          <p className="text-[9px] font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>P&L Total</p>
+                          <p className="text-sm font-mono font-bold mt-1" style={{ color: plColor(r.pl_total) }}>
+                            {plSign(r.pl_total)}R$ {formatMoney(Math.abs(r.pl_total))}
+                          </p>
+                        </div>
+                        {/* PM + Breakeven */}
+                        <div className="rounded-lg px-3 py-2.5" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid #1e293b' }}>
+                          <p className="text-[9px] font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>PM / Breakeven</p>
+                          <p className="text-xs font-mono font-bold mt-1" style={{ color: '#f1f5f9' }}>R$ {formatMoney(r.pm_atual)}</p>
+                          {r.preco_breakeven !== r.pm_atual && r.qtd_atual > 0 && (
+                            <p className="text-[9px] font-mono mt-0.5" style={{ color: '#0EA5E9' }}>BE: R$ {formatMoney(r.preco_breakeven)}</p>
+                          )}
+                        </div>
+                        {/* Taxas */}
+                        <div className="rounded-lg px-3 py-2.5" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid #1e293b' }}>
+                          <p className="text-[9px] font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>Total Taxas</p>
+                          <p className="text-xs font-mono font-bold mt-1" style={{ color: r.total_taxas > 0 ? '#F59E0B' : '#475569' }}>
+                            R$ {formatMoney(r.total_taxas)}
+                          </p>
                         </div>
                       </div>
                     )
@@ -821,6 +988,7 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
                   {showForm && (
                     <NovaTransacaoForm
                       positionId={position.id}
+                      positionQuantidade={position.quantidade}
                       onSaved={onTransacaoSaved}
                       onCancel={() => setShowForm(false)}
                     />
@@ -844,50 +1012,89 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
                       {/* Header */}
                       <div
                         className="grid text-[10px] font-mono uppercase tracking-wider px-3 py-1.5"
-                        style={{ color: '#475569', gridTemplateColumns: '90px 1fr 70px 80px 80px 70px 32px' }}
+                        style={{ color: '#475569', gridTemplateColumns: '80px 1fr 55px 70px 70px 65px 55px 60px 28px' }}
                       >
                         <span>Data</span>
                         <span>Tipo</span>
                         <span className="text-right">Qtd</span>
                         <span className="text-right">Preço</span>
                         <span className="text-right">Total</span>
-                        <span className="text-right">Taxas</span>
+                        <span className="text-right">Saldo</span>
+                        <span className="text-right">PM</span>
+                        <span className="text-right">P&L</span>
                         <span />
                       </div>
                       {transacoes.map(t => {
                         const cor = TIPO_TX_COLORS[t.tipo] || '#94a3b8'
+                        const isVenda = t.tipo === 'venda_parcial' || t.tipo === 'venda_total'
                         return (
                           <div
                             key={t.id}
-                            className="grid items-center px-3 py-2.5 rounded-lg text-xs"
-                            style={{ background: 'rgba(255,255,255,0.015)', gridTemplateColumns: '90px 1fr 70px 80px 80px 70px 32px', border: '1px solid rgba(30,41,59,0.6)' }}
+                            className="grid items-center px-3 py-2.5 rounded-lg text-xs group"
+                            style={{ background: 'rgba(255,255,255,0.015)', gridTemplateColumns: '80px 1fr 55px 70px 70px 65px 55px 60px 28px', border: '1px solid rgba(30,41,59,0.6)' }}
                           >
                             <span className="font-mono" style={{ color: '#64748b' }}>{formatDate(t.data)}</span>
-                            <span className="flex items-center gap-1.5 font-medium" style={{ color: cor }}>
+                            <span className="flex items-center gap-1 font-medium truncate" style={{ color: cor }}>
                               {TIPO_TX_ICONS[t.tipo]}
-                              {TIPO_TX_LABELS[t.tipo] || t.tipo}
+                              <span className="truncate">{TIPO_TX_LABELS[t.tipo] || t.tipo}</span>
+                              {t.destino && (
+                                <span className="text-[9px] px-1 rounded" style={{ color: t.destino === 'caixa' ? '#00E676' : '#FF5252', background: t.destino === 'caixa' ? 'rgba(0,230,118,0.08)' : 'rgba(255,82,82,0.08)' }}>
+                                  → {t.destino}
+                                </span>
+                              )}
                               {t.observacao && (
-                                <span className="text-[10px]" style={{ color: '#475569' }}>· {t.observacao}</span>
+                                <span className="text-[9px] truncate" style={{ color: '#475569' }} title={t.observacao}>· {t.observacao}</span>
                               )}
                             </span>
                             <span className="text-right font-mono" style={{ color: '#f1f5f9' }}>{t.quantidade.toLocaleString('pt-BR')}</span>
                             <span className="text-right font-mono" style={{ color: '#f1f5f9' }}>R$ {formatMoney(t.preco)}</span>
                             <span className="text-right font-mono font-bold" style={{ color: cor }}>R$ {formatMoney(t.valor_total, 0)}</span>
-                            <span className="text-right font-mono" style={{ color: '#475569' }}>
-                              {t.taxas > 0 ? `R$ ${formatMoney(t.taxas, 2)}` : '—'}
+                            {/* Saldo após tx */}
+                            <span className="text-right font-mono" style={{ color: '#94a3b8' }}>{t.qtd_apos.toLocaleString('pt-BR')}</span>
+                            {/* PM após tx */}
+                            <span className="text-right font-mono" style={{ color: '#94a3b8' }}>
+                              {t.pm_apos > 0 ? formatMoney(t.pm_apos) : '—'}
+                            </span>
+                            {/* P&L da operação (só vendas) */}
+                            <span className="text-right font-mono font-bold" style={{ color: isVenda && t.pl_realizado != null ? (t.pl_realizado >= 0 ? '#00E676' : '#FF5252') : '#334155' }}>
+                              {isVenda && t.pl_realizado != null
+                                ? `${t.pl_realizado >= 0 ? '+' : ''}${formatMoney(t.pl_realizado)}`
+                                : '—'}
                             </span>
                             <button
                               onClick={() => deletarTransacao(t.id)}
-                              className="flex items-center justify-center w-6 h-6 rounded transition-all ml-auto"
-                              style={{ color: '#FF5252', opacity: 0.3 }}
-                              onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(255,82,82,0.1)' }}
-                              onMouseLeave={e => { e.currentTarget.style.opacity = '0.3'; e.currentTarget.style.background = 'transparent' }}
+                              className="flex items-center justify-center w-6 h-6 rounded transition-all ml-auto opacity-0 group-hover:opacity-40 hover:!opacity-100"
+                              style={{ color: '#FF5252' }}
+                              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,82,82,0.1)' }}
+                              onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
                             >
                               <Trash2 size={11} />
                             </button>
                           </div>
                         )
                       })}
+
+                      {/* ── Footer totals ── */}
+                      {txResumo && (
+                        <div
+                          className="grid items-center px-3 py-2 rounded-lg text-[10px] font-mono mt-1"
+                          style={{ background: 'rgba(255,255,255,0.03)', gridTemplateColumns: '80px 1fr 55px 70px 70px 65px 55px 60px 28px', border: '1px solid rgba(30,41,59,0.3)' }}
+                        >
+                          <span />
+                          <span className="uppercase tracking-wider font-bold" style={{ color: '#475569' }}>Totais</span>
+                          <span />
+                          <span />
+                          <span className="text-right font-bold" style={{ color: '#94a3b8' }}>
+                            R$ {formatMoney(txResumo.total_comprado - txResumo.total_vendido, 0)}
+                          </span>
+                          <span className="text-right font-bold" style={{ color: '#f1f5f9' }}>{txResumo.qtd_atual.toLocaleString('pt-BR')}</span>
+                          <span className="text-right font-bold" style={{ color: '#f1f5f9' }}>{formatMoney(txResumo.pm_atual)}</span>
+                          <span className="text-right font-bold" style={{ color: txResumo.pl_realizado_total >= 0 ? '#00E676' : '#FF5252' }}>
+                            {txResumo.pl_realizado_total >= 0 ? '+' : ''}{formatMoney(txResumo.pl_realizado_total)}
+                          </span>
+                          <span />
+                        </div>
+                      )}
                     </div>
                   )}
                 </motion.div>
@@ -915,6 +1122,7 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
                             </span>
                           )}
                         </div>
+                      <div className="flex items-center gap-2">
                         <button
                           onClick={() => setShowAnalise(true)}
                           className="flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-all"
@@ -924,6 +1132,17 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
                         >
                           <RotateCw size={11} /> Refazer
                         </button>
+                        <button
+                          onClick={() => downloadAnaliseHTML(position.ticker, position.modulo, position.analise_ia!, position.analise_ia_at)}
+                          title="Download análise (.html)"
+                          className="flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-all"
+                          style={{ color: '#64748b', background: 'rgba(255,255,255,0.04)', border: '1px solid #1e293b' }}
+                          onMouseEnter={e => { e.currentTarget.style.color = '#00E676'; e.currentTarget.style.background = 'rgba(0,230,118,0.08)' }}
+                          onMouseLeave={e => { e.currentTarget.style.color = '#64748b'; e.currentTarget.style.background = 'rgba(255,255,255,0.04)' }}
+                        >
+                          <Download size={11} /> Download
+                        </button>
+                      </div>
                       </div>
                       <div
                         className="rounded-xl p-4 text-sm leading-relaxed overflow-y-auto"

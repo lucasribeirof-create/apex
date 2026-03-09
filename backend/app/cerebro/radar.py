@@ -11,19 +11,14 @@ Roda sob demanda para controlar custo de tokens.
 from datetime import datetime, timezone
 
 from app.cerebro.client import chat
+from app.cerebro.prompts import build_radar_prompt
 from app.core.scanner import executar_scan
 from app.data.cache import cache
 from app.logger import logger
 
 _CACHE_TTL_RADAR = 2 * 3600  # 2 horas
 
-_SYSTEM_PROMPT = (
-    "Você é o radar de oportunidades APEX. "
-    "Analise as oportunidades encontradas vs a carteira atual. "
-    "Seja direto e objetivo. "
-    "Foque em custo de oportunidade: o capital em X renderia mais em Y? "
-    "Responda em português. Máximo 500 palavras."
-)
+_SYSTEM_PROMPT = build_radar_prompt()
 
 _SCORE_RISCO = 50
 _SCORE_OPORTUNIDADE = 75

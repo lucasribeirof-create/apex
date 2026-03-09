@@ -154,6 +154,15 @@ async def stream_briefing_hoje(
             )
 
     async def generate():
+        # Limpar cache de dados macro para garantir dados frescos
+        from app.data.cache import cache as _data_cache
+        _macro_keys = [
+            "macro:engine:full", "macro:engine:global", "macro:engine:brasil",
+            "market:regime", "cerebro:narrativa:diaria",
+        ]
+        for _k in _macro_keys:
+            _data_cache.delete(_k)
+
         try:
             async for chunk, briefing_data in gerar_briefing_portfolio_stream(portfolio.id, db):
                 if chunk is not None:

@@ -196,9 +196,11 @@ async def chat(system: str, messages: list[dict], max_tokens: int = 2048) -> str
 
 
 async def chat_stream(
-    system: str, messages: list[dict], max_tokens: int = 2048
+    system: str, messages: list[dict], max_tokens: int = 2048,
+    track_usage: bool = False,
 ) -> AsyncIterator[str]:
-    """Streaming — usado no chat e no efeito typewriter do onboarding."""
+    """Streaming — usado no chat e no efeito typewriter do onboarding.
+    Se track_usage=True, inclui tag <!-- APEX_USAGE:... --> no final do stream."""
     s = load_ai_settings()
     provider = s.get("provider", "anthropic")
     api_key = s.get("api_key", "")
@@ -206,23 +208,32 @@ async def chat_stream(
 
     try:
         if provider == "anthropic":
-            async for chunk in _stream_anthropic(api_key, model, system, messages, max_tokens):
-                yield chunk
+            gen = _stream_anthropic(api_key, model, system, messages, max_tokens)
         elif provider == "openai":
-            async for chunk in _stream_openai(api_key, model, system, messages, max_tokens):
-                yield chunk
+            gen = _stream_openai(api_key, model, system, messages, max_tokens)
         elif provider == "gemini":
-            async for chunk in _stream_gemini(api_key, model, system, messages, max_tokens):
-                yield chunk
+            gen = _stream_gemini(api_key, model, system, messages, max_tokens)
         elif provider == "groq":
-            async for chunk in _stream_groq(api_key, model, system, messages, max_tokens):
-                yield chunk
+            gen = _stream_groq(api_key, model, system, messages, max_tokens)
         elif provider == "grok":
-            async for chunk in _stream_grok_xai(api_key, model, system, messages, max_tokens):
-                yield chunk
+            gen = _stream_grok_xai(api_key, model, system, messages, max_tokens)
         else:
             yield f"\n\n⚠️ Provedor de IA não configurado: {provider}. Vá em Configurações → Motor de IA."
             return
+
+        if track_usage:
+            async for chunk in gen:
+                yield chunk
+        else:
+            # Buffer one chunk behind to strip usage tag from last chunk
+            prev = None
+            async for chunk in gen:
+                if prev is not None:
+                    yield prev
+                prev = chunk
+            if prev is not None:
+                tag_idx = prev.find("\n<!-- APEX_USAGE:")
+                yield prev[:tag_idx] if tag_idx >= 0 else prev
     except Exception as e:
         msg = str(e)
         if "401" in msg or "authentication" in msg.lower():
@@ -240,6 +251,93 @@ async def chat_stream(
             yield f"\n\n⚠️ Erro na IA ({provider}): {msg[:150]}"
 
 
+# ─── Custo por provedor (USD por 1M tokens) ─────────────────────────────────
+_PRICING: dict[str, tuple[float, float]] = {
+    # (input_per_1M, output_per_1M)
+    "groq":      (0.0, 0.0),
+    "gemini":    (0.0, 0.0),
+    "anthropic": (3.0, 15.0),
+    "openai":    (0.15, 0.60),
+    "grok":      (2.0, 10.0),
+}
+
+# ─── Limites e info por provedor ──────────────────────────────────────────────
+_PROVIDER_INFO: dict[str, dict] = {
+    "groq": {
+        "tier": "free",
+        "req_min": 30,
+        "req_day": 14400,
+        "tokens_min": 20000,
+        "context_window": 128000,
+        "nota": "Llama 3.3 70B · API gratuita com limites generosos",
+    },
+    "gemini": {
+        "tier": "free",
+        "req_min": 15,
+        "req_day": 1500,
+        "tokens_min": 1000000,
+        "context_window": 1048576,
+        "nota": "Gemini 2.0 Flash · API gratuita do Google",
+    },
+    "anthropic": {
+        "tier": "paid",
+        "req_min": 1000,
+        "req_day": None,
+        "tokens_min": 80000,
+        "context_window": 200000,
+        "nota": "Claude Sonnet 4.5 · $3/M input, $15/M output",
+    },
+    "openai": {
+        "tier": "paid",
+        "req_min": 500,
+        "req_day": None,
+        "tokens_min": 200000,
+        "context_window": 128000,
+        "nota": "GPT-4o Mini · $0.15/M input, $0.60/M output",
+    },
+    "grok": {
+        "tier": "paid",
+        "req_min": 60,
+        "req_day": None,
+        "tokens_min": 100000,
+        "context_window": 131072,
+        "nota": "Grok 2 · $2/M input, $10/M output",
+    },
+}
+
+
+def get_provider_limits(provider: str) -> dict:
+    """Retorna info de limites/preço de um provedor para o frontend."""
+    info = _PROVIDER_INFO.get(provider, {})
+    inp, out = _PRICING.get(provider, (0.0, 0.0))
+    return {
+        "tier": info.get("tier", "unknown"),
+        "req_min": info.get("req_min"),
+        "req_day": info.get("req_day"),
+        "tokens_min": info.get("tokens_min"),
+        "context_window": info.get("context_window"),
+        "pricing_input": inp,
+        "pricing_output": out,
+        "nota": info.get("nota", ""),
+    }
+
+
+def _calc_cost(provider: str, input_tokens: int, output_tokens: int) -> float:
+    inp, out = _PRICING.get(provider, (0.0, 0.0))
+    return round(input_tokens * inp / 1_000_000 + output_tokens * out / 1_000_000, 6)
+
+
+def _estimate_tokens(text: str) -> int:
+    """Estimativa rápida: ~4 chars por token (funciona razoavelmente para PT-BR/EN)."""
+    return max(1, len(text) // 4)
+
+
+def _usage_tag(provider: str, model: str, input_tokens: int, output_tokens: int) -> str:
+    cost = _calc_cost(provider, input_tokens, output_tokens)
+    payload = {"in": input_tokens, "out": output_tokens, "cost": cost, "provider": provider, "model": model}
+    return f"\n<!-- APEX_USAGE:{json.dumps(payload)} -->"
+
+
 # ─── Anthropic ────────────────────────────────────────────────────────────────
 
 async def _chat_anthropic(api_key, model, system, messages, max_tokens) -> str:
@@ -252,11 +350,27 @@ async def _chat_anthropic(api_key, model, system, messages, max_tokens) -> str:
 
 async def _stream_anthropic(api_key, model, system, messages, max_tokens) -> AsyncIterator[str]:
     client = _get_client("anthropic", api_key)
+    output_text = ""
+    usage_info = None
     async with client.messages.stream(
         model=model, max_tokens=max_tokens, system=system, messages=messages
     ) as stream:
         async for text in stream.text_stream:
+            output_text += text
             yield text
+        try:
+            msg = stream.get_final_message()
+            if msg and hasattr(msg, 'usage') and msg.usage:
+                usage_info = (msg.usage.input_tokens, msg.usage.output_tokens)
+        except Exception:
+            pass
+    # Yield fora do async with para evitar problemas de context manager + generator
+    if usage_info:
+        yield _usage_tag("anthropic", model, usage_info[0], usage_info[1])
+    else:
+        inp_est = _estimate_tokens(system + " ".join(m["content"] for m in messages))
+        out_est = _estimate_tokens(output_text)
+        yield _usage_tag("anthropic", model, inp_est, out_est)
 
 
 # ─── OpenAI ───────────────────────────────────────────────────────────────────
@@ -271,13 +385,31 @@ async def _chat_openai(api_key, model, system, messages, max_tokens) -> str:
 async def _stream_openai(api_key, model, system, messages, max_tokens) -> AsyncIterator[str]:
     client = _get_client("openai", api_key)
     full = [{"role": "system", "content": system}] + messages
-    stream = await client.chat.completions.create(
-        model=model, max_tokens=max_tokens, messages=full, stream=True
-    )
+    try:
+        stream = await client.chat.completions.create(
+            model=model, max_tokens=max_tokens, messages=full, stream=True,
+            stream_options={"include_usage": True},
+        )
+    except Exception:
+        stream = await client.chat.completions.create(
+            model=model, max_tokens=max_tokens, messages=full, stream=True,
+        )
+    usage = None
+    output_text = ""
     async for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
+        if chunk.choices and chunk.choices[0].delta.content:
+            delta = chunk.choices[0].delta.content
+            output_text += delta
             yield delta
+        if hasattr(chunk, 'usage') and chunk.usage:
+            usage = (getattr(chunk.usage, 'prompt_tokens', 0) or 0,
+                     getattr(chunk.usage, 'completion_tokens', 0) or 0)
+    if usage and (usage[0] or usage[1]):
+        yield _usage_tag("openai", model, usage[0], usage[1])
+    else:
+        inp_est = _estimate_tokens(" ".join(m["content"] for m in full))
+        out_est = _estimate_tokens(output_text)
+        yield _usage_tag("openai", model, inp_est, out_est)
 
 
 # ─── Groq ────────────────────────────────────────────────────────────────────
@@ -292,13 +424,33 @@ async def _chat_groq(api_key, model, system, messages, max_tokens) -> str:
 async def _stream_groq(api_key, model, system, messages, max_tokens) -> AsyncIterator[str]:
     client = _get_client("groq", api_key, GROQ_BASE_URL)
     full = [{"role": "system", "content": system}] + messages
-    stream = await client.chat.completions.create(
-        model=model, max_tokens=max_tokens, messages=full, stream=True
-    )
+    # Groq suporta stream_options mas pode falhar em versões antigas
+    try:
+        stream = await client.chat.completions.create(
+            model=model, max_tokens=max_tokens, messages=full, stream=True,
+            stream_options={"include_usage": True},
+        )
+    except Exception:
+        stream = await client.chat.completions.create(
+            model=model, max_tokens=max_tokens, messages=full, stream=True,
+        )
+    usage = None
+    output_text = ""
     async for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
+        if chunk.choices and chunk.choices[0].delta.content:
+            delta = chunk.choices[0].delta.content
+            output_text += delta
             yield delta
+        if hasattr(chunk, 'usage') and chunk.usage:
+            usage = (getattr(chunk.usage, 'prompt_tokens', 0) or 0,
+                     getattr(chunk.usage, 'completion_tokens', 0) or 0)
+    if usage and (usage[0] or usage[1]):
+        yield _usage_tag("groq", model, usage[0], usage[1])
+    else:
+        # Fallback: estima tokens pelo texto
+        inp_est = _estimate_tokens(" ".join(m["content"] for m in full))
+        out_est = _estimate_tokens(output_text)
+        yield _usage_tag("groq", model, inp_est, out_est)
 
 
 # ─── Grok (xAI) ─────────────────────────────────────────────────────────────
@@ -313,13 +465,31 @@ async def _chat_grok_xai(api_key, model, system, messages, max_tokens) -> str:
 async def _stream_grok_xai(api_key, model, system, messages, max_tokens) -> AsyncIterator[str]:
     client = _get_client("grok", api_key, GROK_BASE_URL)
     full = [{"role": "system", "content": system}] + messages
-    stream = await client.chat.completions.create(
-        model=model, max_tokens=max_tokens, messages=full, stream=True
-    )
+    try:
+        stream = await client.chat.completions.create(
+            model=model, max_tokens=max_tokens, messages=full, stream=True,
+            stream_options={"include_usage": True},
+        )
+    except Exception:
+        stream = await client.chat.completions.create(
+            model=model, max_tokens=max_tokens, messages=full, stream=True,
+        )
+    usage = None
+    output_text = ""
     async for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
+        if chunk.choices and chunk.choices[0].delta.content:
+            delta = chunk.choices[0].delta.content
+            output_text += delta
             yield delta
+        if hasattr(chunk, 'usage') and chunk.usage:
+            usage = (getattr(chunk.usage, 'prompt_tokens', 0) or 0,
+                     getattr(chunk.usage, 'completion_tokens', 0) or 0)
+    if usage and (usage[0] or usage[1]):
+        yield _usage_tag("grok", model, usage[0], usage[1])
+    else:
+        inp_est = _estimate_tokens(" ".join(m["content"] for m in full))
+        out_est = _estimate_tokens(output_text)
+        yield _usage_tag("grok", model, inp_est, out_est)
 
 
 # ─── Gemini ───────────────────────────────────────────────────────────────────
@@ -361,9 +531,21 @@ async def _stream_gemini(api_key, model, system, messages, max_tokens) -> AsyncI
     stream = await client.aio.models.generate_content_stream(
         model=model, contents=_gemini_contents(messages), config=config
     )
+    usage = None
+    output_text = ""
     async for chunk in stream:
         if chunk.text:
+            output_text += chunk.text
             yield chunk.text
+        if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
+            um = chunk.usage_metadata
+            usage = (getattr(um, 'prompt_token_count', 0) or 0, getattr(um, 'candidates_token_count', 0) or 0)
+    if usage and (usage[0] or usage[1]):
+        yield _usage_tag("gemini", model, usage[0], usage[1])
+    else:
+        inp_est = _estimate_tokens(system + " ".join(m["content"] for m in messages))
+        out_est = _estimate_tokens(output_text)
+        yield _usage_tag("gemini", model, inp_est, out_est)
 
 
 # ─── Validação de chave ───────────────────────────────────────────────────────

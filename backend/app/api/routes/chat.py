@@ -9,8 +9,11 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_user_id
 from app.models import Position
 from app.cerebro import chat_stream, build_portfolio_prompt
+from app.cerebro.prompts import build_analyst_prompt, build_ceo_monitor_prompt
 from app.cerebro.contexto import montar as montar_contexto
-from app.data import get_dados_tecnicos, formatar_tecnico_para_prompt
+from app.data import get_dados_tecnicos, formatar_tecnico_para_prompt, get_fundamentals, formatar_fundamentalista_para_prompt
+from app.data.news_collector import coletar_noticias_ativo, formatar_noticias_ativo
+from app.data.web_search import buscar_contexto_web
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -18,6 +21,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 class ChatMensagem(BaseModel):
     mensagem: str
     historico: list[dict] = []
+    modulo: Optional[str] = None
 
 
 
@@ -28,16 +32,53 @@ async def chat_com_gestor(body: ChatMensagem, user_id: Optional[int] = Depends(g
     """Streaming de chat com o gestor IA com contexto completo do portfólio (v2)."""
     ctx, system = await _build_context(db, user_id)
 
+    # Se veio de uma análise de posição, usa o system prompt APEX Analyst
+    if body.modulo:
+        system = build_analyst_prompt(body.modulo.lower(), patrimonio=ctx.patrimonio_total)
+
     # Chat V2: injeta contexto enriquecido na mensagem do usuário
     contexto_extra = _montar_contexto_chat(ctx, db)
     mensagem_user = body.mensagem
-    if contexto_extra:
-        mensagem_user = f"{body.mensagem}\n\n---\n[CONTEXTO AUTOMÁTICO — não mencione que recebeu isto]\n{contexto_extra}"
+
+    # Detecta ticker na mensagem para enriquecer com web search + notícias
+    import re as _re
+    _ticker_match = _re.findall(r'\b([A-Z]{4}\d{1,2}(?:\.SA)?)\b', body.mensagem.upper())
+    web_extra = ""
+    if _ticker_match:
+        _ticker = _ticker_match[0]
+        _mercado = "US" if "." not in _ticker and not _ticker[-1].isdigit() else "B3"
+        try:
+            _web, _news, _tec, _fund = await asyncio.gather(
+                buscar_contexto_web(_ticker, _mercado),
+                coletar_noticias_ativo(_ticker),
+                get_dados_tecnicos(_ticker, _mercado),
+                get_fundamentals(_ticker),
+            )
+            if _web:
+                web_extra += f"\n\n{_web}"
+            if _news:
+                _news_txt = formatar_noticias_ativo(_news, _ticker)
+                if _news_txt:
+                    web_extra += f"\n\n{_news_txt}"
+            if isinstance(_tec, dict) and _tec:
+                _tec_txt = formatar_tecnico_para_prompt(_tec)
+                if _tec_txt:
+                    web_extra += f"\n\nANÁLISE TÉCNICA ({_ticker}):\n{_tec_txt}"
+            if _fund:
+                _fund_txt = formatar_fundamentalista_para_prompt(_fund)
+                if _fund_txt:
+                    web_extra += f"\n\nDADOS FUNDAMENTALISTAS ({_ticker}):\n{_fund_txt}"
+        except Exception:
+            pass
+
+    if contexto_extra or web_extra:
+        mensagem_user = f"{body.mensagem}\n\n---\n[CONTEXTO AUTOMÁTICO — não mencione que recebeu isto]\n{contexto_extra}{web_extra}"
 
     messages = body.historico + [{"role": "user", "content": mensagem_user}]
+    tokens = 8000 if body.modulo else 4000
 
     async def gerador():
-        async for trecho in chat_stream(system=system, messages=messages, max_tokens=4000):
+        async for trecho in chat_stream(system=system, messages=messages, max_tokens=tokens, track_usage=True):
             yield trecho
 
     return StreamingResponse(gerador(), media_type="text/plain")
@@ -74,9 +115,36 @@ async def analisar_posicao(position_id: int, user_id: Optional[int] = Depends(ge
     async def gerador():
         yield f"🔍 Buscando dados ao vivo de {pos_db.ticker}...\n\n"
 
-        # Busca cotação e dados técnicos ao vivo — sem motores
-        tecnico = await get_dados_tecnicos(pos_db.ticker, mercado)
+        # Busca cotação, técnicos, fundamentalistas, notícias e web em paralelo
+        tecnico, fundamentos, noticias, web_contexto = await asyncio.gather(
+            get_dados_tecnicos(pos_db.ticker, mercado),
+            get_fundamentals(pos_db.ticker),
+            coletar_noticias_ativo(pos_db.ticker),
+            buscar_contexto_web(pos_db.ticker, mercado),
+        )
         tec_texto = formatar_tecnico_para_prompt(tecnico, moeda=moeda_str)
+        fund_texto = formatar_fundamentalista_para_prompt(fundamentos) if fundamentos else ""
+        news_texto = formatar_noticias_ativo(noticias, pos_db.ticker)
+
+        # ── Validação: aborta cedo se dados críticos falharam (economiza tokens) ──
+        preco_check = tecnico.get("preco_atual")
+        tem_erro_tec = bool(tecnico.get("erro"))
+        tem_fund = bool(fundamentos)
+
+        if not preco_check and tem_erro_tec and not tem_fund:
+            yield f"❌ Não foi possível obter dados de {pos_db.ticker}. As APIs de cotação não retornaram dados suficientes.\n\n"
+            yield "💡 Tente novamente em alguns minutos — pode ser instabilidade temporária da BRAPI ou yFinance.\n"
+            return
+
+        # Indicador de qualidade dos dados técnicos
+        tec_aviso = ""
+        rsi_check = tecnico.get("rsi14")
+        if not preco_check or not rsi_check:
+            tec_aviso = "\n⚠️ AVISO: Dados técnicos incompletos — a API não retornou todos os indicadores. NÃO invente valores."
+
+        # Header com preço ao vivo
+        if preco_check:
+            yield f"💰 {pos_db.ticker.upper()}: {moeda_str} {preco_check:,.2f}\n"
 
         pm = pos_db.preco_medio or 0
         pm_usd = getattr(pos_db, "preco_medio_usd", None)
@@ -115,23 +183,14 @@ NÃO gere red flags sobre itens que já foram avaliados na montagem (stops, aloc
 Foque em confirmar a configuração e validar que a execução está conforme o planejado.
 Uma posição recém-criada com P&L próximo de zero é NORMAL."""
 
-        SYSTEM = f"""\
-Você é o CEO Brain APEX — gestor sênior com visão completa do portfólio.
-Sua missão é diagnosticar esta posição com dados reais ao vivo.
-{fresh_clause}
-FRAMEWORK DE DIAGNÓSTICO:
-  APORTAR MAIS  → tese sólida, preço representa oportunidade, técnicos favoráveis
-  MANTER        → posição ok, sem catalisador para mudar, risco controlado
-  REDUZIR       → risco/retorno desfavorável, posição acima do peso ideal
-  ZERAR         → fundamento deteriorado, stop rompido ou tese invalidada
+        # Detecta se posição é HOLD (Fase 5 — classificação Hold)
+        _dados_extras = {}
+        if hasattr(pos_db, "dados_extras") and isinstance(pos_db.dados_extras, dict):
+            _dados_extras = pos_db.dados_extras
+        is_hold = bool(_dados_extras.get("hold_elegivel"))
 
-PRINCÍPIOS:
-1. Use os dados técnicos ao vivo como evidência — não especule.
-2. Analise o stop com precisão: está próximo? foi rompido?
-3. A tese de entrada ainda é válida dado o preço atual?
-4. Selic alta = renda fixa competitiva — o retorno esperado justifica o risco?
-5. Seja específico: mostre os números. Evite respostas vagas.
-6. Retorne markdown limpo. Sem JSON, sem blocos de código."""
+        # System prompt especializado por tipo de investimento + hold override
+        SYSTEM = build_analyst_prompt(modulo, is_fresh=is_fresh, is_hold=is_hold, patrimonio=ctx.patrimonio_total)
 
         pm_str = f"PM: {moeda_str} {pm:,.2f}"
         if pm_usd:
@@ -141,25 +200,38 @@ PRINCÍPIOS:
         if is_fresh and pos_age_hours is not None:
             age_str = f"\n⏱️ POSIÇÃO RECÉM-CRIADA (há {pos_age_hours:.0f}h) — avalie como revisão pós-montagem, não como correção."
 
-        USER = f"""DIAGNÓSTICO DE POSIÇÃO — {pos_db.ticker.upper()} [{modulo.upper()}]{age_str}
+        USER = f"""## POSIÇÃO: {pos_db.ticker.upper()} [{modulo.upper()}]{' [HOLD]' if is_hold else ''}{age_str}
+- Tese de entrada: {tese}
+- {pm_str}
+- P&L atual: {pl_pct:+.1f}%{stop_info}{alvo_info}
+{plano_resumo}
+{fresh_clause}
 
-Tese de entrada: {tese}
-{pm_str}
-P&L atual: {pl_pct:+.1f}%{stop_info}{alvo_info}
-{plano_resumo}{macro_str}
+## CONTEXTO MACRO{macro_str if macro_str else chr(10) + 'Sem dados macro disponíveis.'}
 
-DADOS TÉCNICOS AO VIVO:
+## ANÁLISE TÉCNICA (gráfico diário, 1 ano de histórico){tec_aviso}
 {tec_texto}
 
-Diagnostique esta posição. Devo APORTAR MAIS, MANTER, REDUZIR ou ZERAR?
-Seja direto e use os dados acima como base."""
+## DADOS FUNDAMENTALISTAS
+{fund_texto if fund_texto else 'Sem dados fundamentalistas disponíveis.'}
 
-        yield "✅ Dados ao vivo coletados — CEO Brain analisando...\n\n"
+## {news_texto}
+
+## PESQUISA WEB
+{web_contexto if web_contexto else 'Sem resultados de pesquisa web.'}
+
+## CONTEXTO CÉREBRO (decisões anteriores do sistema)
+{_injetar_cerebro_completo(ctx)}
+
+Analise esta posição usando as 7 camadas. Devo APORTAR MAIS, MANTER, REDUZIR ou ZERAR?"""
+
+        yield "✅ Dados ao vivo coletados — APEX Analyst analisando...\n\n"
 
         async for trecho in chat_stream(
             system=SYSTEM,
             messages=[{"role": "user", "content": USER}],
-            max_tokens=2500,
+            max_tokens=6000,
+            track_usage=True,
         ):
             yield trecho
 
@@ -204,12 +276,32 @@ async def analisar_carteira(
         n = len(posicoes_filtradas)
         yield f"📡 Buscando cotações ao vivo de {n} posições...\n\n"
 
-        # Busca técnicos de todas as posições em paralelo — sem motores
-        tarefas = [
+        # Busca técnicos, fundamentalistas, notícias e web search em paralelo
+        tarefas_tec = [
             get_dados_tecnicos(p["ticker"], p.get("mercado", "B3") or "B3")
             for p in posicoes_filtradas
         ]
-        resultados = await asyncio.gather(*tarefas, return_exceptions=True)
+        tarefas_fund = [
+            get_fundamentals(p["ticker"])
+            for p in posicoes_filtradas
+        ]
+        tarefas_news = [
+            coletar_noticias_ativo(p["ticker"])
+            for p in posicoes_filtradas
+        ]
+        # Web search: busca contexto do primeiro ticker (representància)
+        primeiro_ticker = posicoes_filtradas[0]["ticker"]
+        primeiro_mercado = posicoes_filtradas[0].get("mercado", "B3") or "B3"
+        tarefa_web = buscar_contexto_web(primeiro_ticker, primeiro_mercado)
+
+        todos = await asyncio.gather(
+            *tarefas_tec, *tarefas_fund, *tarefas_news, tarefa_web,
+            return_exceptions=True,
+        )
+        resultados = todos[:n]
+        resultados_fund = todos[n:2*n]
+        resultados_news = todos[2*n:3*n]
+        web_contexto = todos[3*n] if not isinstance(todos[3*n], Exception) else ""
 
         linhas_pos = []
         stops_proximos = []
@@ -262,37 +354,7 @@ async def analisar_carteira(
         if stops_proximos:
             stops_alerta = "\n⚠️ STOPS PRÓXIMOS (< 5%): " + ", ".join(stops_proximos)
 
-        fresh_cart = ""
-        if carteira_recente:
-            fresh_cart = """
-CONTEXTO IMPORTANTE: Esta carteira foi montada há menos de 24 horas pelo próprio sistema.
-As posições, stops, alvos e alocações foram escolhidos com base no perfil e nos motores especializados.
-NÃO critique decisões recém-tomadas — P&L próximo de zero é ESPERADO. Stops configurados pelo sistema são intencionais.
-Foque em: confirmar que a montagem está coerente com o plano, e apontar APENAS riscos externos ou mudanças macro que ocorreram APÓS a montagem."""
-
-        SYSTEM = f"""\
-Você é o CEO Brain APEX — gestor sênior com visão completa do portfólio.
-Sua missão é monitorar a saúde da carteira com dados reais ao vivo.
-
-ESTA É UMA ANÁLISE DE MONITORAMENTO — não de reconstrução. A carteira já foi montada.
-Seu papel: identificar riscos imediatos, desvios do plano e posições que merecem atenção.
-{fresh_cart}
-
-PERGUNTAS QUE DEVE RESPONDER:
-1. Algum stop está prestes a ser atingido? Qual a urgência?
-2. O P&L de cada posição está saudável para o tempo de vida esperado?
-3. A alocação real está desviando do plano estratégico?
-4. O cenário macro atual afeta alguma posição específica?
-5. Alguma posição perdeu a tese? O que fazer?
-
-FORMATO DE RESPOSTA:
-- **Saúde Geral:** [ÓTIMA / BOA / ATENÇÃO / CRÍTICA]
-- Destaques positivos
-- Alertas e riscos imediatos
-- Posições que merecem revisão (com dados)
-- Recomendação de curto prazo
-
-Use markdown limpo. Sem JSON. Seja direto e baseado nos dados."""
+        SYSTEM = build_ceo_monitor_prompt(is_recent=carteira_recente)
 
         age_cart = ""
         if carteira_recente and _idades:
@@ -306,14 +368,43 @@ POSIÇÕES COM COTAÇÃO AO VIVO:
 Patrimônio total: R$ {(ctx.patrimonio_total or 0):,.0f}
 Módulos ativos: {', '.join(ctx.modulos_ativos or [])}
 
+{_injetar_cerebro_completo(ctx)}
+
 Faça o diagnóstico de saúde desta carteira. Foque nos riscos imediatos e desvios do plano."""
+
+        # Injetar notícias das posições
+        noticias_bloco = []
+        for pos, news in zip(posicoes_filtradas, resultados_news):
+            ticker = pos.get("ticker", "?")
+            if not isinstance(news, Exception) and news:
+                txt = formatar_noticias_ativo(news, ticker)
+                if txt:
+                    noticias_bloco.append(txt)
+        if noticias_bloco:
+            USER += "\n\n" + "\n\n".join(noticias_bloco[:5])
+
+        # Injetar fundamentalistas das posições
+        fund_bloco = []
+        for pos, fund in zip(posicoes_filtradas, resultados_fund):
+            ticker = pos.get("ticker", "?")
+            if not isinstance(fund, Exception) and fund:
+                txt = formatar_fundamentalista_para_prompt(fund)
+                if txt:
+                    fund_bloco.append(f"--- {ticker} ---\n{txt}")
+        if fund_bloco:
+            USER += "\n\nDADOS FUNDAMENTALISTAS:\n" + "\n\n".join(fund_bloco)
+
+        # Injetar web search
+        if web_contexto:
+            USER += f"\n\n{web_contexto}"
 
         yield "✅ Dados ao vivo coletados — CEO Brain analisando...\n\n"
 
         async for trecho in chat_stream(
             system=SYSTEM,
             messages=[{"role": "user", "content": USER}],
-            max_tokens=4000,
+            max_tokens=6000,
+            track_usage=True,
         ):
             yield trecho
 
@@ -323,6 +414,86 @@ Faça o diagnóstico de saúde desta carteira. Foque nos riscos imediatos e desv
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _injetar_cerebro_completo(ctx) -> str:
+    """Gera bloco padronizado com TODOS os dados do Cérebro (Fases 1-6) para injeção em prompts."""
+    secoes: list[str] = []
+
+    # 1. Kill Switch (Fase 5)
+    if hasattr(ctx, "kill_switch") and ctx.kill_switch and ctx.kill_switch.ativo:
+        ks = ctx.kill_switch
+        urgencia = "PAUSA TOTAL" if ks.nivel >= 2 else "ALERTA"
+        secoes.append(
+            f"⚠️ KILL SWITCH MACRO ({urgencia} — nível {ks.nivel}):\n"
+            f"  Motivo: {ks.motivo}\n"
+            f"  Recomendação: {ks.recomendacao}"
+        )
+
+    # 2. Circuit Breaker (Fase 4)
+    if hasattr(ctx, "circuit_breaker") and ctx.circuit_breaker:
+        cb = ctx.circuit_breaker
+        if cb.ativo:
+            secoes.append(
+                f"🔴 CIRCUIT BREAKER ATIVO (nível {cb.nivel}):\n"
+                f"  P&L mês: {cb.pl_mes_pct:+.1f}% | Sizing modifier: {cb.sizing_modifier}\n"
+                f"  {cb.motivo}"
+            )
+        else:
+            secoes.append(f"CIRCUIT BREAKER: normal (P&L mês: {cb.pl_mes_pct:+.1f}%)")
+
+    # 3. Heat (Fase 4)
+    if hasattr(ctx, "heat") and ctx.heat:
+        ht = ctx.heat
+        status_heat = "🔴 NÃO PODE OPERAR" if not ht.pode_operar else "✅ OK"
+        secoes.append(f"HEAT: {ht.heat_pct:.1f}% do patrimônio em risco — {status_heat}")
+
+    # 4. Regime Macro 4-States (Fase 1)
+    if hasattr(ctx, "regime_macro") and ctx.regime_macro:
+        secoes.append(
+            f"REGIME MACRO: {ctx.regime_macro} (score {ctx.regime_score}/100, "
+            f"confiança {ctx.confianca_macro}%) | Fase Selic: {ctx.fase_selic or '—'}"
+        )
+
+    # 5. Guardrails (Fase 1)
+    if hasattr(ctx, "guardrails") and ctx.guardrails:
+        g = ctx.guardrails
+        secoes.append(
+            f"GUARDRAILS MACRO: equity máx {g.get('equity_max_pct', '?')}% | "
+            f"RF mín {g.get('rf_min_pct', '?')}% | caixa mín {g.get('caixa_min_pct', '?')}%"
+        )
+
+    # 6. Ranking Setorial (Fase 2)
+    if hasattr(ctx, "ranking_setorial") and ctx.ranking_setorial:
+        rs = ctx.ranking_setorial
+        fav = ", ".join(rs.favorecidos[:5]) if rs.favorecidos else "—"
+        evit = ", ".join(rs.evitar[:5]) if rs.evitar else "—"
+        secoes.append(f"SETORES FAVORECIDOS: {fav}\nSETORES A EVITAR: {evit}")
+
+    # 7. Alocação real vs guardrails (só mostra se o usuário configurou alvos)
+    if ctx.alocacao_real and ctx.guardrails and getattr(ctx, 'alocacao_configurada', False):
+        equity_mods = ["etfs", "fiis", "momentum", "alpha", "dividendos", "wheel"]
+        equity_real = sum(ctx.alocacao_real.get(m, 0) for m in equity_mods)
+        rf_real = ctx.alocacao_real.get("renda_fixa", 0)
+        caixa_real = ctx.alocacao_real.get("caixa", 0)
+        g = ctx.guardrails
+        secoes.append(
+            f"ALOCAÇÃO REAL: equity {equity_real:.0f}% (máx {g.get('equity_max_pct', '?')}%) | "
+            f"RF {rf_real:.0f}% (mín {g.get('rf_min_pct', '?')}%) | "
+            f"caixa {caixa_real:.0f}% (mín {g.get('caixa_min_pct', '?')}%)"
+        )
+
+    # 8. Alertas críticos
+    try:
+        alertas = ctx.alertas_criticos()
+        if alertas:
+            secoes.append("ALERTAS CRÍTICOS:\n" + "\n".join(f"  • {a}" for a in alertas[:8]))
+    except Exception:
+        pass
+
+    if not secoes:
+        return ""
+    return "━━━ CONTEXTO CÉREBRO COMPLETO ━━━\n" + "\n\n".join(secoes)
+
 
 async def _build_context(db: Session, user_id: Optional[int] = None):
     """Monta ContextoCerebro e o system prompt — fonte única de verdade para todos os endpoints."""
@@ -358,7 +529,7 @@ async def _build_context(db: Session, user_id: Optional[int] = None):
 
 
 def _montar_contexto_chat(ctx, db) -> str:
-    """Monta contexto enriquecido para o Chat V2 — macro, teses, correlação, histórico."""
+    """Monta contexto enriquecido para o Chat V2 — macro, teses, correlação, histórico + Cérebro completo."""
     partes = []
 
     # Narrativa macro
@@ -401,5 +572,10 @@ def _montar_contexto_chat(ctx, db) -> str:
             partes.append(f"PERFORMANCE 90d: {resumo_performance_texto(perf)}")
     except Exception:
         pass
+
+    # ── Cérebro Completo (Fases 1-6) ─────────────────────────────────────
+    cerebro_bloco = _injetar_cerebro_completo(ctx)
+    if cerebro_bloco:
+        partes.append(cerebro_bloco)
 
     return "\n\n".join(partes)
