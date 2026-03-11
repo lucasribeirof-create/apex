@@ -109,7 +109,7 @@ def _fetch_fundamentals(ticker: str) -> Optional[dict]:
         fcf           = info.get("freeCashflow")
         margem_liq    = info.get("profitMargins")        # fração
         earnings_growth = info.get("earningsGrowth")     # fração
-        dy            = info.get("dividendYield")        # fração
+        dy            = info.get("trailingAnnualDividendYield") or info.get("dividendYield")  # fração
         interest_exp  = info.get("interestExpense", 0) or 0
         ebit          = info.get("ebit", 0) or 0
         equity        = info.get("totalStockholderEquity", 0) or 0

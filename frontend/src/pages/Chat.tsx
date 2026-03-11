@@ -329,6 +329,8 @@ export default function ChatPage() {
           i === idx ? { ...(item as ProposalMessage), status: 'aprovado' as const } : item
         )
       )
+      // Confirmar mudança ao user
+      setMessages((m) => [...m, { role: 'assistant', content: '✅ Mudança aplicada com sucesso. O portfólio foi atualizado.' }])
     } catch {
       setMessages((m) => [...m, { role: 'assistant', content: 'Erro ao aplicar mudanÃ§a. Tente novamente.' }])
     } finally {

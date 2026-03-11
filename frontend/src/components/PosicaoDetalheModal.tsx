@@ -176,13 +176,15 @@ function NovaTransacaoForm({
   positionQuantidade,
   onSaved,
   onCancel,
+  defaultTipo = 'compra',
 }: {
   positionId: number
   positionQuantidade: number
   onSaved: () => void
   onCancel: () => void
+  defaultTipo?: string
 }) {
-  const [tipo, setTipo] = useState('compra')
+  const [tipo, setTipo] = useState(defaultTipo)
   const [data, setData] = useState(new Date().toISOString().slice(0, 10))
   const [quantidade, setQuantidade] = useState('')
   const [preco, setPreco] = useState('')
@@ -394,6 +396,7 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
   const [txResumo, setTxResumo] = useState<TxResumo | null>(null)
   const [loadingTx, setLoadingTx] = useState(false)
   const [showForm, setShowForm] = useState(false)
+  const [defaultTxTipo, setDefaultTxTipo] = useState('compra')
   const [showAnalise, setShowAnalise] = useState(false)
   const { format: fmtCost } = useCostEstimates()
   const [fundamentos, setFundamentos] = useState<Record<string, any> | null>(null)
@@ -888,6 +891,19 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
                     </div>
                   )}
 
+                  {/* Aportar — atalho para tese positions */}
+                  {position.modulo === 'teses' && !editMode && (
+                    <button
+                      onClick={() => { setTab('transacoes'); setShowForm(true); setDefaultTxTipo('dca') }}
+                      className="w-full py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all"
+                      style={{ background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.25)', color: '#a78bfa' }}
+                      onMouseEnter={e => (e.currentTarget.style.borderColor = 'rgba(167,139,250,0.5)')}
+                      onMouseLeave={e => (e.currentTarget.style.borderColor = 'rgba(167,139,250,0.25)')}
+                    >
+                      <Plus size={14} /> Registrar Aporte (DCA)
+                    </button>
+                  )}
+
                   {/* Tese — editable or read-only */}
                   {(editMode || position.tese) && (
                     <div className="rounded-xl p-4" style={{ background: '#111827', border: '1px solid rgba(167,139,250,0.2)' }}>
@@ -991,8 +1007,9 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
                     <NovaTransacaoForm
                       positionId={position.id}
                       positionQuantidade={position.quantidade}
-                      onSaved={onTransacaoSaved}
-                      onCancel={() => setShowForm(false)}
+                      defaultTipo={defaultTxTipo}
+                      onSaved={() => { onTransacaoSaved(); setDefaultTxTipo('compra') }}
+                      onCancel={() => { setShowForm(false); setDefaultTxTipo('compra') }}
                     />
                   )}
 
