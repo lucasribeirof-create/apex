@@ -358,14 +358,9 @@ export default function ChatPage() {
   useEffect(() => {
     const buildSuggestions = async () => {
       try {
-        const [posRes, tesRes] = await Promise.allSettled([
-          api.get('/portfolio/posicoes'),
-          api.get('/teses'),
-        ])
-        const posicoes = posRes.status === 'fulfilled'
-          ? (Array.isArray(posRes.value.data) ? posRes.value.data : posRes.value.data?.posicoes ?? [])
-          : []
-        const teses = tesRes.status === 'fulfilled' ? tesRes.value.data : []
+        const posRes = await api.get('/portfolio/posicoes')
+        const posicoes = Array.isArray(posRes.data) ? posRes.data : posRes.data?.posicoes ?? []
+        const teses = posicoes.filter((p: any) => p.modulo === 'teses')
 
         const sugs: string[] = []
 

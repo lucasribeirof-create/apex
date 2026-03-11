@@ -58,9 +58,9 @@ export default function DashboardPage() {
         setRegime(regimeRes.data)
 
         // V2 endpoints — load in background
-        api.get('/dashboard/macro').then(r => setMacroData(r.data)).catch(() => {})
-        api.get('/dashboard/teses').then(r => setTesesData(r.data)).catch(() => {})
-        api.get('/dashboard/stress').then(r => setStressData(r.data)).catch(() => {})
+        api.get('/dashboard/macro').then(r => setMacroData(r.data)).catch(e => console.warn('Dashboard macro:', e))
+        api.get('/dashboard/teses').then(r => setTesesData(r.data)).catch(e => console.warn('Dashboard teses:', e))
+        api.get('/dashboard/stress').then(r => setStressData(r.data)).catch(e => console.warn('Dashboard stress:', e))
       } catch (err) {
         console.error('Dashboard load error:', err)
       } finally {
