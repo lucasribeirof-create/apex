@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import {
-  TrendingUp, DollarSign, Globe,
+  TrendingUp, DollarSign, Globe, Calendar,
   Shield, FileText, AlertTriangle, RefreshCw, Zap, ArrowUpRight,
   ArrowDownRight, Crosshair
 } from 'lucide-react'
@@ -61,14 +61,15 @@ export default function DashboardPage() {
   const [tesesData, setTesesData] = useState<any>(null)
   const [stressData, setStressData] = useState<any>(null)
   const [perfData, setPerfData] = useState<any>(null)
+  const [dividendosData, setDividendosData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [v2Loading, setV2Loading] = useState({ macro: true, teses: true, stress: true, perf: true })
+  const [v2Loading, setV2Loading] = useState({ macro: true, teses: true, stress: true, perf: true, divs: true })
 
   async function loadDashboard() {
     setLoading(true)
     setError(null)
-    setV2Loading({ macro: true, teses: true, stress: true, perf: true })
+    setV2Loading({ macro: true, teses: true, stress: true, perf: true, divs: true })
     try {
       const [dashRes, regimeRes] = await Promise.all([
         api.get('/dashboard/'),
@@ -82,6 +83,7 @@ export default function DashboardPage() {
       api.get('/dashboard/teses').then(r => setTesesData(r.data)).catch(e => console.warn('Dashboard teses:', e)).finally(() => setV2Loading(s => ({ ...s, teses: false })))
       api.get('/dashboard/stress').then(r => setStressData(r.data)).catch(e => console.warn('Dashboard stress:', e)).finally(() => setV2Loading(s => ({ ...s, stress: false })))
       api.get('/dashboard/performance').then(r => setPerfData(r.data)).catch(e => console.warn('Dashboard perf:', e)).finally(() => setV2Loading(s => ({ ...s, perf: false })))
+      api.get('/dashboard/dividendos').then(r => setDividendosData(r.data)).catch(e => console.warn('Dashboard divs:', e)).finally(() => setV2Loading(s => ({ ...s, divs: false })))
     } catch (err: any) {
       console.error('Dashboard load error:', err)
       setError(err?.response?.data?.detail || 'Erro ao carregar dashboard')
@@ -420,6 +422,60 @@ export default function DashboardPage() {
               <div key={i} className="flex items-start gap-2 text-xs rounded-lg p-2.5" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
                 <AlertTriangle size={12} className="mt-0.5 shrink-0" style={{ color: a.tipo === 'danger' ? '#FF5252' : '#FFD740' }} />
                 <span style={{ color: a.tipo === 'danger' ? '#FF5252' : '#FFD740' }}>{a.texto}</span>
+              </div>
+            ))}
+          </div>
+        </motion.div>
+      )}
+
+      {/* Próximos Dividendos */}
+      {v2Loading.divs ? (
+        <motion.div className="apex-card p-5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.42 }}>
+          <div className="flex items-center gap-2 mb-4">
+            <Calendar size={16} style={{ color: '#00BFA5' }} />
+            <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>PRÓXIMOS DIVIDENDOS</h3>
+          </div>
+          <div className="space-y-2">
+            {[1,2,3].map(i => <Skeleton key={i} className="h-12 rounded-lg" />)}
+          </div>
+        </motion.div>
+      ) : dividendosData && dividendosData.proximos?.length > 0 && (
+        <motion.div
+          className="apex-card p-5"
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.42 }}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <Calendar size={16} style={{ color: '#00BFA5' }} />
+              <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>PRÓXIMOS DIVIDENDOS</h3>
+            </div>
+            {dividendosData.total_projetado_mes > 0 && (
+              <span className="text-xs font-mono px-2 py-1 rounded" style={{ background: 'rgba(0,191,165,0.1)', color: '#00BFA5' }}>
+                Este mês: {fmtR$(dividendosData.total_projetado_mes)}
+              </span>
+            )}
+          </div>
+          <div className="space-y-2">
+            {dividendosData.proximos.slice(0, 8).map((d: any) => (
+              <div key={d.ticker} className="flex items-center justify-between rounded-lg p-3" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-mono font-bold" style={{ color: '#f1f5f9' }}>{d.ticker}</span>
+                  <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(100,116,139,0.15)', color: '#94a3b8' }}>{d.frequencia}</span>
+                </div>
+                <div className="flex items-center gap-4">
+                  <div className="text-right">
+                    <p className="text-xs" style={{ color: '#64748b' }}>
+                      ~{new Date(d.data_estimada + 'T00:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })}
+                      <span style={{ color: '#475569' }}> ({d.dias_restantes}d)</span>
+                    </p>
+                  </div>
+                  <div className="text-right min-w-[80px]">
+                    <p className="text-sm font-bold font-data" style={{ color: '#00BFA5' }}>{fmtR$(d.valor_estimado)}</p>
+                    <p className="text-xs" style={{ color: '#475569' }}>DY {d.dy_12m}%</p>
+                  </div>
+                </div>
               </div>
             ))}
           </div>

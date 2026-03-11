@@ -1,6 +1,6 @@
 """Rota do Dashboard — patrimônio, alocação, performance, macro, risco."""
 from typing import Optional
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_user_id, get_portfolio_ativo
@@ -364,3 +364,101 @@ async def get_stress_test(user_id: Optional[int] = Depends(get_user_id), db: Ses
     except Exception as e:
         logger.error("dashboard/stress falhou: %s", e)
         return []
+
+
+@router.get("/dividendos")
+async def get_proximos_dividendos(user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Próximos dividendos projetados para posições em carteira."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    posicoes = db.query(Position).filter(
+        Position.portfolio_id == portfolio.id,
+        Position.ativa == True,
+        Position.tipo.in_(["ACAO", "FII", "ETF", "BDR"]),
+    ).all()
+
+    if not posicoes:
+        return {"proximos": [], "total_projetado_mes": 0}
+
+    try:
+        from app.data.brapi import get_fundamentals
+
+        hoje = datetime.now()
+        proximos = []
+
+        for pos in posicoes:
+            fund = await get_fundamentals(pos.ticker)
+            if not fund:
+                continue
+            divs = fund.get("_raw_dividends") or []
+            if not divs:
+                continue
+
+            # Pegar os últimos 12 meses de dividendos para estimar próximos
+            recentes = []
+            cutoff_12m = hoje - timedelta(days=365)
+            for d in divs:
+                try:
+                    dt = datetime.fromisoformat(d.get("paymentDate", "2000-01-01T00:00:00.000Z").replace("Z", ""))
+                    if dt > cutoff_12m:
+                        recentes.append({"date": dt, "rate": d.get("rate", 0)})
+                except Exception:
+                    pass
+
+            if not recentes:
+                continue
+
+            # Média por evento dos últimos 12 meses
+            media_por_evento = sum(r["rate"] for r in recentes) / len(recentes)
+            total_12m = sum(r["rate"] for r in recentes)
+
+            # Estimar próximo pagamento: último pagamento + intervalo médio
+            recentes.sort(key=lambda x: x["date"])
+            ultimo = recentes[-1]["date"]
+            if len(recentes) >= 2:
+                gaps = [(recentes[i]["date"] - recentes[i-1]["date"]).days for i in range(1, len(recentes))]
+                intervalo_medio = sum(gaps) / len(gaps)
+            else:
+                # FII geralmente mensal, ações trimestrais
+                intervalo_medio = 30 if pos.tipo == "FII" else 90
+
+            proximo_dt = ultimo + timedelta(days=intervalo_medio)
+            # Se a data estimada já passou, avançar um intervalo
+            while proximo_dt < hoje:
+                proximo_dt += timedelta(days=intervalo_medio)
+
+            valor_estimado = media_por_evento * (pos.quantidade or 0)
+
+            proximos.append({
+                "ticker": pos.ticker,
+                "tipo": pos.tipo,
+                "data_estimada": proximo_dt.strftime("%Y-%m-%d"),
+                "dias_restantes": (proximo_dt - hoje).days,
+                "valor_por_cota": round(media_por_evento, 4),
+                "quantidade": pos.quantidade or 0,
+                "valor_estimado": round(valor_estimado, 2),
+                "dy_12m": round(total_12m / (pos.preco_atual or 1) * 100, 2) if pos.preco_atual else 0,
+                "frequencia": "mensal" if intervalo_medio < 45 else ("trimestral" if intervalo_medio < 100 else "semestral"),
+            })
+
+        proximos.sort(key=lambda x: x["dias_restantes"])
+
+        total_projetado_mes = sum(
+            p["valor_estimado"] for p in proximos
+            if p["dias_restantes"] <= 31
+        )
+
+        return {
+            "proximos": proximos,
+            "total_projetado_mes": round(total_projetado_mes, 2),
+        }
+    except Exception as e:
+        logger.error("dashboard/dividendos falhou: %s", e)
+        return {"proximos": [], "total_projetado_mes": 0}
