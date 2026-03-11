@@ -25,6 +25,7 @@ Dados extras por sugestão:
 """
 
 import asyncio
+import logging
 from typing import Optional
 
 import yfinance as yf
@@ -32,6 +33,8 @@ import yfinance as yf
 from app.cerebro.especialistas import SugestaoMotor
 from app.cerebro.especialistas.watchlist import DIVIDENDOS_WATCHLIST
 from app.cerebro.especialistas import prefetch as _pf
+
+logger = logging.getLogger("apex.motor_dividendos")
 
 # ── Metadados curados ────────────────────────────────────────────────────────
 # DY de referência (médias recentes), setor, e tipo predominante de provento
@@ -251,10 +254,12 @@ async def rodar(
     patrimonio_total: float = 0.0,
     regime: str = "NEUTRO",
     cb_modifier: float = 1.0,
+    macro_context: object | None = None,
 ) -> list[SugestaoMotor]:
     """
-    Seleciona as melhores ações pagadoras de dividendos para o capital disponível.
-    Position sizing por risco (ATR-based).
+    Seleciona as melhores ações pagadoras de dividendos usando IA + dados reais.
+    Dados DY/payout/growth → Pre-filtro → IA avalia sustentabilidade vs Selic.
+    Fallback: top-N por score algorítmico + diversificação setorial.
     """
     if capital < 2_000:
         return []
@@ -272,13 +277,76 @@ async def rodar(
             continue
         score = _score_div(r)
         if score > 0:
-            # Ajuste setorial: bonus +12 se favorecido, penalty -15 se evitar
             score = _aplicar_ajuste_setor_div(r.get("setor", "outro"), score, ranking_setorial)
             candidatos.append({**r, "score": score})
 
     candidatos.sort(key=lambda x: x["score"], reverse=True)
 
-    # Seleciona com diversificação setorial (max 2 por setor — usando nomes canônicos)
+    if not candidatos:
+        return []
+
+    # ── Fallback algorítmico (diversificação setorial + ATR sizing) ───────
+    fallback = _construir_fallback_dividendos(candidatos, n_ativos, capital, patrimonio_total, regime, cb_modifier)
+
+    # ── Enriquecer candidatos para IA ─────────────────────────────────────
+    candidatos_enriched = []
+    for c in candidatos:
+        candidatos_enriched.append({
+            "ticker": c["ticker"],
+            "nome": c["nome"],
+            "tipo": "ACAO",
+            "preco": c["preco"],
+            "dy_12m": c["dy_12m"],
+            "div_12m_rs": c.get("div_12m_rs", 0),
+            "payout_ratio": c.get("payout"),
+            "dividendo_crescendo": c.get("div_crescendo"),
+            "setor": c.get("setor", "outros"),
+            "tipo_provento": c.get("tipo_prov", "Dividendo"),
+            "score_algoritmico": round(c["score"], 1),
+            "dados_extras": {
+                "dy_12m": c["dy_12m"],
+                "payout_ratio": c.get("payout"),
+                "setor": _harmonizar_setor(c.get("setor", "outro")),
+                "tipo_provento": c.get("tipo_prov", "Dividendo"),
+            },
+        })
+
+    # ── Obter resumo macro ────────────────────────────────────────────────
+    macro_resumo = ""
+    if macro_context and hasattr(macro_context, "resumo_texto"):
+        macro_resumo = macro_context.resumo_texto()
+    else:
+        try:
+            from app.cerebro.macro import montar_macro
+            ctx = await montar_macro()
+            macro_resumo = ctx.resumo_texto()
+        except Exception:
+            macro_resumo = "Dados macro indisponíveis."
+
+    # ── Chamar IA especialista ────────────────────────────────────────────
+    from app.cerebro.especialistas._ai_motor import selecionar_com_ia
+    from app.cerebro.prompts import build_motor_prompt
+
+    resultado = await selecionar_com_ia(
+        modulo="dividendos",
+        candidatos_enriched=candidatos_enriched,
+        macro_resumo=macro_resumo,
+        estrategia="RENDA",
+        capital=capital,
+        motor_system_prompt=build_motor_prompt("dividendos"),
+        n_ativos=n_ativos,
+        max_tokens=3000,
+        fallback_candidatos=fallback,
+    )
+
+    return resultado if resultado else fallback
+
+
+def _construir_fallback_dividendos(
+    candidatos: list[dict], n_ativos: int, capital: float,
+    patrimonio_total: float, regime: str, cb_modifier: float,
+) -> list[SugestaoMotor]:
+    """Fallback algorítmico: diversificação setorial + ATR sizing."""
     selecionados = []
     setores_usados: dict[str, int] = {}
     for cand in candidatos:
@@ -327,19 +395,18 @@ async def rodar(
             justificativa=_justificativa_div(d, renda_mensal),
             score=d["score"],
             dados_extras={
-                "dy_12m":               dy,
+                "dy_12m": dy,
                 "dividendo_rs_estimado": round(d["div_12m_rs"], 2) if d["div_12m_rs"] > 0 else round(preco * dy / 100, 2),
-                "payout_ratio":         d.get("payout"),
-                "dividendo_crescendo":  d.get("div_crescendo"),
-                "tipo_provento":        d.get("tipo_prov", "Dividendo"),
-                "setor":                _harmonizar_setor(d.get("setor", "outro")),
+                "payout_ratio": d.get("payout"),
+                "dividendo_crescendo": d.get("div_crescendo"),
+                "tipo_provento": d.get("tipo_prov", "Dividendo"),
+                "setor": _harmonizar_setor(d.get("setor", "outro")),
                 "renda_mensal_estimada": renda_mensal,
-                "renda_anual_estimada":  round(renda_mensal * 12, 2),
-                # Sizing (Phase 4)
-                "atr14":               sz.atr14 if sz else None,
-                "stop_atr":            sz.stop if sz else None,
+                "renda_anual_estimada": round(renda_mensal * 12, 2),
+                "atr14": sz.atr14 if sz else None,
+                "stop_atr": sz.stop if sz else None,
                 "risco_pct_patrimonio": sz.risco_pct_patrimonio if sz else None,
-                "sizing_method":       "ATR" if (sz and sz.atr14 > 0) else "equal_weight",
+                "sizing_method": "ATR" if (sz and sz.atr14 > 0) else "equal_weight",
             },
         ))
 

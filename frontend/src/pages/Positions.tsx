@@ -4,8 +4,10 @@ import { useNavigate } from 'react-router-dom'
 import { Plus, X, TrendingUp, TrendingDown, Circle, Trash2, ChevronDown, ChevronUp, BrainCircuit, LayoutList, FlaskConical } from 'lucide-react'
 import PosicaoDetalheModal from '@/components/PosicaoDetalheModal'
 import CarteiraPanel from '@/components/CarteiraPanel'
+import RebalanceWizard from '@/components/RebalanceWizard'
 import api from '@/services/api'
 import { useStore } from '@/store/useStore'
+import { useCostEstimates } from '@/hooks/useCostEstimates'
 
 interface Position {
   id: number
@@ -42,6 +44,9 @@ interface FormData {
   preco_medio: string
   stop_loss: string
   data_entrada: string
+  tese: string
+  mercado: string
+  moeda: string
 }
 
 const MODULE_LABELS: Record<string, string> = {
@@ -52,6 +57,7 @@ const MODULE_LABELS: Record<string, string> = {
   renda_fixa: 'Renda Fixa',
   alpha: 'Alpha',
   dividendos: 'Dividendos',
+  teses: 'Teses',
   caixa: 'Caixa',
 }
 
@@ -60,7 +66,7 @@ const TIPO_COLORS: Record<string, string> = {
   RF: '#FFD740', OPCAO: '#FF9800', BDR: '#64FFDA', DIVIDENDO: '#FFD740', CAIXA: '#475569',
 }
 
-const emptyForm: FormData = { ticker: '', nome: '', tipo: 'ACAO', modulo: 'momentum', quantidade: '', preco_medio: '', stop_loss: '', data_entrada: new Date().toISOString().slice(0, 10) }
+const emptyForm: FormData = { ticker: '', nome: '', tipo: 'ACAO', modulo: 'momentum', quantidade: '', preco_medio: '', stop_loss: '', data_entrada: new Date().toISOString().slice(0, 10), tese: '', mercado: 'B3', moeda: 'BRL' }
 
 function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState<FormData>(emptyForm)
@@ -83,6 +89,11 @@ function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => vo
         preco_medio: parseFloat(form.preco_medio),
         stop_loss: form.stop_loss ? parseFloat(form.stop_loss) : undefined,
         data_entrada: form.data_entrada || undefined,
+        ...(form.modulo === 'teses' ? {
+          tese: form.tese || undefined,
+          mercado: form.mercado,
+          moeda: form.moeda,
+        } : {}),
       })
       onSaved()
     } catch (e: any) {
@@ -153,7 +164,37 @@ function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => vo
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
+          {form.modulo === 'teses' && (
+            <>
+              <div>
+                <label className="text-xs mb-1.5 block" style={{ color: '#64748b' }}>Tese de Convicção *</label>
+                <textarea className="apex-input" rows={3} placeholder="Descreva sua tese de convicção..."
+                  value={form.tese} onChange={e => setForm(f => ({ ...f, tese: e.target.value }))} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs mb-1.5 block" style={{ color: '#64748b' }}>Mercado</label>
+                  <select className="apex-input" value={form.mercado}
+                    onChange={e => setForm(f => ({ ...f, mercado: e.target.value }))} style={{ cursor: 'pointer' }}>
+                    {['B3', 'BDR', 'NYSE', 'NASDAQ', 'AMEX'].map(m => (
+                      <option key={m} value={m} style={{ background: '#0f1729' }}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs mb-1.5 block" style={{ color: '#64748b' }}>Moeda</label>
+                  <select className="apex-input" value={form.moeda}
+                    onChange={e => setForm(f => ({ ...f, moeda: e.target.value }))} style={{ cursor: 'pointer' }}>
+                    {['BRL', 'USD'].map(m => (
+                      <option key={m} value={m} style={{ background: '#0f1729' }}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </>
+          )}
+
+          <div className={`grid gap-3 ${form.modulo === 'teses' ? 'grid-cols-2' : 'grid-cols-3'}`}>
             <div>
               <label className="text-xs mb-1.5 block" style={{ color: '#64748b' }}>Qtd *</label>
               <input className="apex-input" placeholder="100" type="number" value={form.quantidade}
@@ -164,11 +205,13 @@ function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => vo
               <input className="apex-input" placeholder="35.50" type="number" value={form.preco_medio}
                 onChange={e => setForm(f => ({ ...f, preco_medio: e.target.value }))} />
             </div>
-            <div>
-              <label className="text-xs mb-1.5 block" style={{ color: '#64748b' }}>Stop Loss</label>
-              <input className="apex-input" placeholder="31.00" type="number" value={form.stop_loss}
-                onChange={e => setForm(f => ({ ...f, stop_loss: e.target.value }))} />
-            </div>
+            {form.modulo !== 'teses' && (
+              <div>
+                <label className="text-xs mb-1.5 block" style={{ color: '#64748b' }}>Stop Loss</label>
+                <input className="apex-input" placeholder="31.00" type="number" value={form.stop_loss}
+                  onChange={e => setForm(f => ({ ...f, stop_loss: e.target.value }))} />
+              </div>
+            )}
           </div>
 
           <div>
@@ -347,12 +390,14 @@ function ModuleGroup({ modulo, positions, onDelete, onDetalhe }: { modulo: strin
 export default function PositionsPage() {
   const navigate = useNavigate()
   const { portfolioAtivo } = useStore()
+  const { format: fmtCost } = useCostEstimates()
   const isSimulada = portfolioAtivo?.tipo === 'simulada'
   const [positions, setPositions] = useState<Position[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [showAdd, setShowAdd] = useState(false)
   const [showCarteira, setShowCarteira] = useState(false)
+  const [showWizard, setShowWizard] = useState(false)
   const [analisando, setAnalisando] = useState<Position | null>(null)
 
   const loadPositions = async () => {
@@ -459,14 +504,16 @@ export default function PositionsPage() {
           >
             <LayoutList size={16} />
             Analisar Carteira
+            {fmtCost('analise_carteira') && <span style={{ fontSize: 10, opacity: 0.6 }}>{fmtCost('analise_carteira')}</span>}
           </button>
           <button
-            onClick={() => navigate('/sugestoes-alocacao', { state: { portfolioId: portfolioAtivo?.id, modo: 'rebalanceamento' } })}
+            onClick={() => setShowWizard(true)}
             className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all"
             style={{ background: 'rgba(255,152,0,0.1)', color: '#FF9800', border: '1px solid rgba(255,152,0,0.25)' }}
           >
             <BrainCircuit size={16} />
             Rebalancear
+            {fmtCost('sugerir_portfolio') && <span style={{ fontSize: 10, opacity: 0.6 }}>{fmtCost('sugerir_portfolio')}</span>}
           </button>
           <button onClick={() => setShowAdd(true)} className="btn-primary flex items-center gap-2">
             <Plus size={16} />
@@ -554,6 +601,14 @@ export default function PositionsPage() {
           <AddModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); loadPositions() }} />
         )}
       </AnimatePresence>
+
+      {showWizard && portfolioAtivo && (
+        <RebalanceWizard
+          onClose={() => setShowWizard(false)}
+          positions={positions.map(p => ({ modulo: p.modulo, valor_atual: p.valor_atual }))}
+          portfolioId={portfolioAtivo.id}
+        />
+      )}
     </div>
   )
 }

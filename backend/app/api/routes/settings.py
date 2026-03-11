@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from app.cerebro.client import (
     load_ai_settings, save_ai_settings, set_active_provider,
     is_ai_configured, load_all_providers, DEFAULT_MODELS, SETTINGS_FILE,
-    testar_chave_api, get_provider_limits,
+    testar_chave_api, get_provider_limits, _PRICING,
 )
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -98,3 +98,35 @@ def clear_ai_settings():
     if SETTINGS_FILE.exists():
         SETTINGS_FILE.unlink()
     return {"ok": True}
+
+
+# ─── Estimativas de custo por feature ─────────────────────────────────────────
+
+# (avg_input_tokens, max_output_tokens) — estimativas conservadoras por feature
+_FEATURE_TOKENS: dict[str, tuple[int, int]] = {
+    "briefing":          (4000, 2000),   # Morning Call completo
+    "chat":              (5000, 4000),   # Mensagem no chat
+    "analise_posicao":   (8000, 6000),   # Análise de posição individual
+    "analise_carteira":  (8000, 6000),   # Diagnóstico de carteira
+    "sugerir_alocacao":  (800,  500),    # Sugestão de alocação % (wizard)
+    "sugerir_portfolio": (15000, 12000), # Motores + CEO Brain (rebalanceamento)
+}
+
+
+@router.get("/ai/cost-estimates")
+def get_cost_estimates():
+    """Retorna custo estimado por feature baseado no provedor ativo."""
+    s = load_ai_settings()
+    provider = s.get("provider", "")
+    if not provider:
+        return {"estimates": {}, "provider": None, "tier": "none"}
+
+    inp_price, out_price = _PRICING.get(provider, (0.0, 0.0))
+    tier = "free" if inp_price == 0 and out_price == 0 else "paid"
+
+    estimates: dict[str, float] = {}
+    for key, (avg_in, max_out) in _FEATURE_TOKENS.items():
+        cost = round(avg_in * inp_price / 1_000_000 + max_out * out_price / 1_000_000, 4)
+        estimates[key] = cost
+
+    return {"estimates": estimates, "provider": provider, "tier": tier}

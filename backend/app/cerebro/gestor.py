@@ -45,6 +45,8 @@ async def analisar(
     score_perfil: int,
     contexto: Optional[Any] = None,
     modo: str = "inicial",
+    descricao_investidor: Optional[str] = None,
+    noticias_frescas: Optional[str] = None,
 ) -> ResultadoGestorGeral:
     """
     Ponto de entrada principal.
@@ -66,21 +68,26 @@ async def analisar(
 
     candidatos_prep = _marcar_duplicatas(candidatos)
 
+    _timeout = 180.0 if modo == "rebalanceamento" else 60.0
+
     try:
         resultado = await asyncio.wait_for(
-            _analisar_com_ia(candidatos_prep, capital, estrategia, regime, score_perfil, contexto, modo),
-            timeout=60.0,
+            _analisar_com_ia(candidatos_prep, capital, estrategia, regime, score_perfil, contexto, modo, descricao_investidor, noticias_frescas),
+            timeout=_timeout,
         )
         # Validação hard de guardrails pós-IA
-        if contexto and hasattr(contexto, "guardrails") and contexto.guardrails:
+        # No rebalanceamento, o investidor escolheu a alocação conscientemente no wizard.
+        # Guardrails fariam o CEO perder controle (ex: user quer 70% ETFs mas guardrail corta para 30%).
+        if modo != "rebalanceamento" and contexto and hasattr(contexto, "guardrails") and contexto.guardrails:
             resultado = _validar_guardrails(resultado, contexto.guardrails, capital)
         return resultado
     except asyncio.TimeoutError:
-        logger.error("gestor_geral: timeout IA (60s) — IA não respondeu a tempo, usando fallback algorítmico")
-        return _fallback_algoritmico(candidatos_prep, capital, estrategia, regime)
+        logger.error("gestor_geral: timeout IA (%.0fs) — IA não respondeu a tempo, usando fallback algorítmico", _timeout)
+        return _fallback_algoritmico(candidatos_prep, capital, estrategia, regime, reason="timeout")
     except Exception as e:
         logger.error("gestor_geral: IA falhou — %s: %s", type(e).__name__, e, exc_info=True)
-        return _fallback_algoritmico(candidatos_prep, capital, estrategia, regime)
+        _reason = "config" if "não configurada" in str(e) else "error"
+        return _fallback_algoritmico(candidatos_prep, capital, estrategia, regime, reason=_reason)
 
 
 # ─── Pré-processamento ────────────────────────────────────────────────────────
@@ -112,6 +119,8 @@ async def _analisar_com_ia(
     score_perfil: int,
     contexto: Optional[Any] = None,
     modo: str = "inicial",
+    descricao_investidor: Optional[str] = None,
+    noticias_frescas: Optional[str] = None,
 ) -> ResultadoGestorGeral:
     from app.cerebro.client import chat, is_ai_configured
 
@@ -130,7 +139,7 @@ async def _analisar_com_ia(
             "valor_sugerido": round(c.valor_total, 2),
             "quantidade_sugerida": c.quantidade,
             "preco_atual": round(c.preco_atual, 2),
-            "justificativa_motor": c.justificativa[:400],  # trunca para economizar tokens
+            "justificativa_motor": c.justificativa[:200 if modo == "rebalanceamento" else 400],
         }
         extras_relevantes = {
             k: v for k, v in c.dados_extras.items()
@@ -272,13 +281,13 @@ async def _analisar_com_ia(
         c for c in candidatos_json
         if any(
             s.ticker == c["ticker"] and s.dados_extras.get("hold_elegivel")
-            for s in candidatos_prep
+            for s in candidatos
         )
     ]
     if _hold_candidates:
         payload["hold_candidates"] = [c["ticker"] for c in _hold_candidates]
     # Watchlist candidates (attached by Alpha motor)
-    for c in candidatos_prep:
+    for c in candidatos:
         wl = c.dados_extras.get("_watchlist_candidates")
         if wl:
             payload["watchlist_candidates"] = wl
@@ -286,6 +295,10 @@ async def _analisar_com_ia(
 
     if contexto and hasattr(contexto, "narrativa_macro") and contexto.narrativa_macro:
         payload["narrativa_macro"] = contexto.narrativa_macro[:2000]
+
+    # Notícias frescas — CEO precisa saber de eventos recentes (CPI já saiu, guerra, etc.)
+    if noticias_frescas:
+        payload["noticias_frescas"] = noticias_frescas[:4000]
 
     # Injeta plano estratégico do Estrategista (plano.py) — âncora de longo prazo
     if contexto and hasattr(contexto, "plano_estrategico") and contexto.plano_estrategico:
@@ -303,17 +316,26 @@ async def _analisar_com_ia(
 
     SYSTEM = build_cio_prompt(modo=modo)
 
+    # Injeta descrição livre do investidor (texto do wizard)
+    if descricao_investidor:
+        payload["descricao_investidor"] = descricao_investidor[:2000]
+
     # ── Modo rebalanceamento: instrução adicional ──
     if modo == "rebalanceamento":
         payload["modo"] = "rebalanceamento"
-        USER = f"Rebalanceie o portfólio existente com base nos dados a seguir. Justifique CADA mudança em relação à carteira atual:\n\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
+        intro = "Rebalanceie o portfólio existente com base nos dados a seguir."
+        if descricao_investidor:
+            intro += f"\n\nO INVESTIDOR DESCREVEU SUAS EXPECTATIVAS:\n\"{descricao_investidor[:2000]}\"\n\nLeve esta descrição em conta em TODA decisão."
+        intro += "\n\nAnalise CADA posição existente individualmente antes de decidir. Justifique CADA mudança em relação à carteira atual."
+        intro += "\n\nIMPORTANTE: ETFs e ativos core são posições de ACUMULAÇÃO de longo prazo. P&L negativo de curto prazo (-1% a -10%) é NORMAL e esperado em DCA. SÓ recomende sair se a tese ESTRUTURAL quebrou ou existe alternativa claramente superior para o MESMO papel. Se o investidor tem ETFs diversificados (ouro, tech, global, dividendos, etc.), isso é POSITIVO — não troque por ETFs genéricos. Viés correto: MANTER > TROCAR."
+        USER = f"{intro}\n\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
     else:
         USER = f"Monte o portfólio final com base nos dados a seguir:\n\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
 
     resposta_raw = await chat(
         system=SYSTEM,
         messages=[{"role": "user", "content": USER}],
-        max_tokens=6500,
+        max_tokens=12000 if modo == "rebalanceamento" else 6500,
     )
 
     return _parsear_resposta_ia(resposta_raw, candidatos, capital)
@@ -721,6 +743,7 @@ def _fallback_algoritmico(
     capital: float,
     estrategia: str,
     regime: str,
+    reason: str = "unknown",
 ) -> ResultadoGestorGeral:
     """
     Fallback quando a IA não está disponível.
@@ -759,10 +782,16 @@ def _fallback_algoritmico(
     n_ativos = len([s for s in sugestoes if s.ticker != "CAIXA"])
     modulos = list({s.modulo for s in sugestoes if s.ticker != "CAIXA"})
 
+    _reason_msg = {
+        "timeout": "A análise com IA excedeu o tempo limite. Clique em 'Atualizar dados' para tentar novamente com a IA.",
+        "config":  "IA não configurada. Vá em Configurações → IA para ativar a análise inteligente.",
+        "error":   "A IA encontrou um erro ao processar. Clique em 'Atualizar dados' para tentar novamente.",
+    }.get(reason, "Análise detalhada indisponível (IA não configurada ou timeout).")
+
     analise = (
         f"Portfólio {estrategia} montado com {n_ativos} ativos em {len(modulos)} módulos "
         f"({', '.join(modulos)}) — regime de mercado: {regime}. "
-        f"Análise detalhada indisponível (IA não configurada ou timeout). "
+        f"{_reason_msg} "
         f"Sugestões baseadas nos scores dos motores especializados."
     )
 

@@ -27,6 +27,7 @@ Dados extras: 15+ indicadores por sugestão.
 """
 
 import asyncio
+import logging
 from typing import Optional
 
 import yfinance as yf
@@ -34,6 +35,8 @@ import yfinance as yf
 from app.cerebro.especialistas import SugestaoMotor
 from app.cerebro.especialistas.watchlist import ALPHA_WATCHLIST
 from app.cerebro.especialistas import prefetch as _pf
+
+logger = logging.getLogger("apex.motor_alpha")
 
 
 # ── Ajuste setorial ──────────────────────────────────────────────────────────
@@ -73,7 +76,9 @@ def _fetch_fundamentals(ticker: str) -> Optional[dict]:
     # Fallback direto
     if info is None or hist is None:
         try:
-            t = yf.Ticker(ticker + ".SA")
+            from app.data.brapi import _resolve_yf_ticker
+            yf_ticker = _resolve_yf_ticker(ticker)
+            t = yf.Ticker(yf_ticker)
             info = t.info
             hist = t.history(period="1y", auto_adjust=True)
             if not info or hist.empty:
@@ -437,11 +442,12 @@ async def rodar(
     patrimonio_total: float = 0.0,
     regime: str = "NEUTRO",
     cb_modifier: float = 1.0,
+    macro_context: object | None = None,
 ) -> list[SugestaoMotor]:
     """
-    Seleciona ações com maior potencial de assimetria na watchlist Alpha.
-    Score por 4 pilares × 25pts = 0-100. Red flags eliminam antes do CEO.
-    Position sizing por risco (ATR-based).
+    Seleciona ações com maior potencial de assimetria usando IA + dados fundamentais.
+    Dados reais (4 pilares × 25pts) → Red flags → IA seleciona com visão macro.
+    Fallback: top-N por score algorítmico se IA falhar.
     """
     if capital < 2_000:
         return []
@@ -466,17 +472,94 @@ async def rodar(
 
         score, breakdown = _score_alpha(r)
         if score > 0:
-            # Ajuste setorial: bonus +12 se favorecido, penalty -15 se evitar
             score = _aplicar_ajuste_setor(r["ticker"], score, ranking_setorial)
             candidatos.append({**r, "score": score, "_breakdown": breakdown, "_red_flags": flags})
 
     candidatos.sort(key=lambda x: x["score"], reverse=True)
-    selecionados = candidatos[:n_ativos]
 
+    if not candidatos:
+        return []
+
+    # ── Fallback algorítmico (top-N por score) ───────────────────────────
+    fallback = _construir_fallback_alpha(candidatos, n_ativos, capital, patrimonio_total, regime, cb_modifier)
+
+    # ── Enriquecer candidatos para IA ─────────────────────────────────────
+    candidatos_enriched = []
+    for c in candidatos:
+        candidatos_enriched.append({
+            "ticker": c["ticker"],
+            "nome": c["nome"],
+            "tipo": "ACAO",
+            "preco": c["preco"],
+            "pl": c.get("pl"),
+            "p_vp": c.get("p_vp"),
+            "ev_ebitda": c.get("ev_ebitda"),
+            "dy_pct": c.get("dy"),
+            "roe_pct": c.get("roe"),
+            "roic_pct": c.get("roic"),
+            "margem_op_pct": c.get("margem_op"),
+            "dl_ebitda": c.get("dl_ebitda"),
+            "cresc_receita_pct": c.get("cresc_receita"),
+            "cresc_lucro_pct": c.get("cresc_lucro"),
+            "momentum_6m": c.get("momentum_6m"),
+            "acima_mm200": c.get("acima_mm200"),
+            "score_algoritmico": round(c["score"], 1),
+            "pilares": c["_breakdown"],
+            "red_flags": c["_red_flags"],
+            "setor": _get_setor_ticker(c["ticker"]),
+            "dados_extras": {
+                "pl": c.get("pl"),
+                "p_vp": c.get("p_vp"),
+                "ev_ebitda": c.get("ev_ebitda"),
+                "dy_pct": c.get("dy"),
+                "roe_pct": c.get("roe"),
+                "roic_pct": c.get("roic"),
+                "pilares": c["_breakdown"],
+                "setor": _get_setor_ticker(c["ticker"]),
+            },
+        })
+
+    # ── Obter resumo macro ────────────────────────────────────────────────
+    macro_resumo = ""
+    if macro_context and hasattr(macro_context, "resumo_texto"):
+        macro_resumo = macro_context.resumo_texto()
+    else:
+        try:
+            from app.cerebro.macro import montar_macro
+            ctx = await montar_macro()
+            macro_resumo = ctx.resumo_texto()
+        except Exception:
+            macro_resumo = "Dados macro indisponíveis."
+
+    # ── Chamar IA especialista ────────────────────────────────────────────
+    from app.cerebro.especialistas._ai_motor import selecionar_com_ia
+    from app.cerebro.prompts import build_motor_prompt
+
+    resultado = await selecionar_com_ia(
+        modulo="alpha",
+        candidatos_enriched=candidatos_enriched,
+        macro_resumo=macro_resumo,
+        estrategia="ALPHA",
+        capital=capital,
+        motor_system_prompt=build_motor_prompt("alpha"),
+        n_ativos=n_ativos,
+        max_tokens=3000,
+        fallback_candidatos=fallback,
+    )
+
+    return resultado if resultado else fallback
+
+
+def _construir_fallback_alpha(
+    candidatos: list[dict], n_ativos: int, capital: float,
+    patrimonio_total: float, regime: str, cb_modifier: float,
+) -> list[SugestaoMotor]:
+    """Fallback algorítmico: top-N por score com sizing ATR."""
+    selecionados = candidatos[:n_ativos]
     if not selecionados:
         return []
 
-    # Phase 5: Hold classification + Watchlist candidates (attached to output)
+    # Phase 5: Hold classification + Watchlist candidates
     from app.cerebro.hold import avaliar_hold, gerar_watchlist_candidates
     _hold_map: dict[str, object] = {}
     for d in selecionados:
@@ -507,16 +590,11 @@ async def rodar(
             qtd = max(1, int(capital / len(selecionados) / preco))
             valor = round(qtd * preco, 2)
 
-        # Upside estimado via múltiplo alvo (P/L alvo = 15× para value plays)
         pl = d.get("pl")
-        upside_est = 0.0
-        if pl and 0 < pl < 15:
-            upside_est = round((15.0 / pl - 1) * 100, 1)
+        upside_est = round((15.0 / pl - 1) * 100, 1) if pl and 0 < pl < 15 else 0.0
 
         breakdown = d["_breakdown"]
         flags = d["_red_flags"]
-
-        # Phase 5: Hold classification
         hold_info = _hold_map.get(d["ticker"])
         classificacao = "HOLD" if (hold_info and hold_info.elegivel) else "TRADE"
 
@@ -531,55 +609,39 @@ async def rodar(
             justificativa=_justificativa_alpha(d, upside_est, breakdown, flags),
             score=d["score"],
             dados_extras={
-                # Valuation
-                "pl":                  d.get("pl"),
-                "p_vp":                d.get("p_vp"),
-                "ev_ebitda":           d.get("ev_ebitda"),
-                "dy_pct":              d.get("dy"),
-                # Rentabilidade
-                "roe_pct":             d.get("roe"),
-                "roic_pct":            d.get("roic"),
-                "margem_operacional":  d.get("margem_op"),
-                "margem_bruta":        d.get("margem_bruta"),
-                "margem_liquida":      d.get("margem_liq"),
-                # Saúde
-                "dl_ebitda":           d.get("dl_ebitda"),
-                "cobertura_juros":     d.get("cobertura_juros"),
-                "fcf":                 d.get("fcf"),
-                # Crescimento
+                "pl": d.get("pl"), "p_vp": d.get("p_vp"),
+                "ev_ebitda": d.get("ev_ebitda"), "dy_pct": d.get("dy"),
+                "roe_pct": d.get("roe"), "roic_pct": d.get("roic"),
+                "margem_operacional": d.get("margem_op"),
+                "margem_bruta": d.get("margem_bruta"),
+                "margem_liquida": d.get("margem_liq"),
+                "dl_ebitda": d.get("dl_ebitda"),
+                "cobertura_juros": d.get("cobertura_juros"),
+                "fcf": d.get("fcf"),
                 "crescimento_receita": d.get("cresc_receita"),
-                "crescimento_lucro":   d.get("cresc_lucro"),
-                # Técnico
-                "momentum_6m":         d.get("momentum_6m"),
-                "acima_mm200":         d.get("acima_mm200"),
-                # Score breakdown
-                "pilares":             breakdown,
+                "crescimento_lucro": d.get("cresc_lucro"),
+                "momentum_6m": d.get("momentum_6m"),
+                "acima_mm200": d.get("acima_mm200"),
+                "pilares": breakdown,
                 "upside_estimado_pct": upside_est,
-                "red_flags":           flags,
-                "setor":               _get_setor_ticker(d["ticker"]),
-                # Sizing (Phase 4)
-                "atr14":               sz.atr14 if sz else None,
-                "stop_atr":            sz.stop if sz else None,
+                "red_flags": flags,
+                "setor": _get_setor_ticker(d["ticker"]),
+                "atr14": sz.atr14 if sz else None,
+                "stop_atr": sz.stop if sz else None,
                 "risco_pct_patrimonio": sz.risco_pct_patrimonio if sz else None,
-                "sizing_method":       "ATR" if (sz and sz.atr14 > 0) else "equal_weight",
-                # Hold & Watchlist (Phase 5)
-                "classificacao":       classificacao,
-                "hold_elegivel":       hold_info.elegivel if hold_info else False,
-                "hold_motivo":         hold_info.motivo if hold_info else "",
+                "sizing_method": "ATR" if (sz and sz.atr14 > 0) else "equal_weight",
+                "classificacao": classificacao,
+                "hold_elegivel": hold_info.elegivel if hold_info else False,
+                "hold_motivo": hold_info.motivo if hold_info else "",
             },
         ))
 
-    # Attach watchlist candidates as metadata on the first suggestion
     if saida and _watchlist_cands:
         saida[0].dados_extras["_watchlist_candidates"] = [
             {
-                "ticker": w.ticker,
-                "nome": w.nome,
-                "score": w.score,
-                "setor": w.setor,
-                "trigger_tipo": w.trigger_tipo,
-                "trigger_descricao": w.trigger_descricao,
-                "trigger_valor": w.trigger_valor,
+                "ticker": w.ticker, "nome": w.nome, "score": w.score,
+                "setor": w.setor, "trigger_tipo": w.trigger_tipo,
+                "trigger_descricao": w.trigger_descricao, "trigger_valor": w.trigger_valor,
             }
             for w in _watchlist_cands
         ]

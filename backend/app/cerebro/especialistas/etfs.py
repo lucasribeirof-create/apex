@@ -1,107 +1,50 @@
 """
-APEX Motor — ETFs
+APEX Motor — ETFs (IA-Driven)
 
-Motor de alocação em ETFs da B3. Filosofia:
-  ETFs são o núcleo de eficiência da carteira — baixo custo, diversificação
-  instantânea, sem risco de seleção individual. A alocação entre ETFs depende
-  do perfil e do capital disponível.
+Motor de seleção de ETFs da B3 usando análise MACRO + IA.
 
-Lógica de alocação:
-  1. Núcleo BR (BOVA11) — sempre presente, representa o mercado brasileiro
-  2. Internacional (IVVB11) — exposição ao S&P 500 / dólar
-  3. Small Cap (SMAL11) — diversificação fora do IBOV  
-  4. Setoriais/Temáticos — dependendo do perfil
-  5. Renda Fixa ETF (IMAB11) — para perfis mais conservadores
+Filosofia:
+  ETFs são o NÚCLEO ESTRATÉGICO do portfólio — diversificação instantânea,
+  baixo custo, exposição a teses macro. A seleção NÃO é fixa: depende do
+  cenário global (dólar, juros, commodities, tendências setoriais).
 
-Pesos base por perfil:
-  CORE:  BOVA11 50% | IVVB11 30% | SMAL11 20%
-  ALPHA: BOVA11 35% | IVVB11 35% | SMAL11 20% | NASD11 10%
-  RENDA: BOVA11 40% | IVVB11 20% | DIVO11 30% | IMAB11 10%
+Fluxo:
+  1. Busca preços reais de ~35 ETFs do universo expandido (ETFS_UNIVERSE)
+  2. Pre-filtra: remove sem preço ou sem liquidez
+  3. Envia candidatos enriquecidos + macro para IA especialista
+  4. IA seleciona 3-6 ETFs com pesos baseados em análise macro
+  5. Fallback: alocação por perfil se IA não disponível
 
-O motor busca o preço real de cada ETF via yfinance e calcula a quantidade.
-Justificativa explica o papel de cada ETF na carteira.
+O cérebro é UM SÓ — usa APEX_BRAIN + expertise de ETFs para pensar como
+um gestor que analisa macro, prevê tendências e escolhe a melhor composição.
 """
 
 import asyncio
+import logging
 from typing import Optional
 
 import yfinance as yf
 
 from app.cerebro.especialistas import SugestaoMotor
 from app.cerebro.especialistas import prefetch as _pf
+from app.cerebro.especialistas.watchlist import ETFS_UNIVERSE
 
-# ── Configuração de ETFs por perfil ─────────────────────────────────────────
+logger = logging.getLogger("apex.motor_etfs")
 
-_ETF_INFO = {
-    "BOVA11": {
-        "nome": "iShares IBOVESPA",
-        "papel": "núcleo da carteira BR — as 84 maiores ações da B3 em um único ativo",
-        "taxa_adm": 0.10,
-    },
-    "IVVB11": {
-        "nome": "iShares S&P 500 (BRL)",
-        "papel": "exposição ao mercado americano e hedge natural em dólar",
-        "taxa_adm": 0.23,
-    },
-    "SMAL11": {
-        "nome": "iShares Small Cap BR",
-        "papel": "diversificação fora do IBOV — small caps com maior potencial de crescimento",
-        "taxa_adm": 0.50,
-    },
-    "NASD11": {
-        "nome": "Hashdex Nasdaq",
-        "papel": "exposição concentrada em tecnologia e crescimento global (Nasdaq)",
-        "taxa_adm": 0.40,
-    },
-    "DIVO11": {
-        "nome": "It Now Dividendos",
-        "papel": "ações com maior histórico de pagamento de dividendos na B3",
-        "taxa_adm": 0.40,
-    },
-    "IMAB11": {
-        "nome": "iShares IMA-B (IPCA+)",
-        "papel": "título IPCA+ via ETF — proteção real contra inflação com liquidez de ETF",
-        "taxa_adm": 0.20,
-    },
-    "ISUS11": {
-        "nome": "iShares ESG BR",
-        "papel": "exposição ao mercado BR com filtro ESG",
-        "taxa_adm": 0.30,
-    },
-}
-
-_PERFIL_ALOCACAO = {
-    "ALPHA": [
-        ("BOVA11", 0.35),
-        ("IVVB11", 0.35),
-        ("SMAL11", 0.20),
-        ("NASD11", 0.10),
-    ],
-    "RENDA": [
-        ("BOVA11", 0.40),
-        ("DIVO11", 0.30),
-        ("IVVB11", 0.20),
-        ("IMAB11", 0.10),
-    ],
-    "CORE": [
-        ("BOVA11", 0.50),
-        ("IVVB11", 0.30),
-        ("SMAL11", 0.20),
-    ],
-    "CUSTOM": [
-        ("BOVA11", 0.45),
-        ("IVVB11", 0.35),
-        ("SMAL11", 0.20),
-    ],
+# ── Fallback estático (usado quando IA não está configurada) ─────────────────
+_PERFIL_ALOCACAO_FALLBACK = {
+    "ALPHA": [("BOVA11", 0.35), ("IVVB11", 0.35), ("SMAL11", 0.20), ("NASD11", 0.10)],
+    "RENDA": [("BOVA11", 0.40), ("DIVO11", 0.30), ("IVVB11", 0.20), ("IMAB11", 0.10)],
+    "CORE":  [("BOVA11", 0.50), ("IVVB11", 0.30), ("SMAL11", 0.20)],
+    "CUSTOM": [("BOVA11", 0.45), ("IVVB11", 0.35), ("SMAL11", 0.20)],
 }
 
 
 def _fetch_preco(ticker: str) -> Optional[float]:
-    # Tenta prefetch primeiro
+    """Busca preço via prefetch ou yfinance direto."""
     p = _pf.get_preco(ticker)
     if p is not None:
         return p
-    # Fallback direto
     try:
         t = yf.Ticker(ticker + ".SA")
         hist = t.history(period="5d", auto_adjust=True)
@@ -112,69 +55,112 @@ def _fetch_preco(ticker: str) -> Optional[float]:
     return None
 
 
-def _justificativa_etf(ticker: str, pct: float, perfil: str) -> str:
-    info = _ETF_INFO.get(ticker, {"nome": ticker, "papel": "diversificação global", "taxa_adm": 0.5})
-    partes = [
-        f"{info['nome']} — {info['papel']}",
-        f"alocação de {pct*100:.0f}% do módulo ETFs para perfil {perfil}",
-        f"taxa de administração de apenas {info['taxa_adm']:.2f}%/ano (eficiência máxima)",
-    ]
-    return ". ".join(partes) + "."
+def _construir_fallback(capital: float, estrategia: str) -> list[SugestaoMotor]:
+    """Fallback algorítmico: alocação estática por perfil (comportamento antigo)."""
+    alocacao = _PERFIL_ALOCACAO_FALLBACK.get(estrategia, _PERFIL_ALOCACAO_FALLBACK["CORE"])
+    saida: list[SugestaoMotor] = []
+    for ticker, pct in alocacao:
+        preco = _fetch_preco(ticker)
+        if not preco or preco <= 0:
+            continue
+        capital_etf = capital * pct
+        qtd = max(1, int(capital_etf / preco))
+        valor = round(qtd * preco, 2)
+        meta = ETFS_UNIVERSE.get(ticker, {})
+        saida.append(SugestaoMotor(
+            modulo="etfs", ticker=ticker,
+            nome=meta.get("nome", ticker), tipo="ETF",
+            quantidade=float(qtd), preco_atual=round(preco, 2),
+            valor_total=valor, score=pct * 100,
+            justificativa=f"Alocação padrão {pct*100:.0f}% para perfil {estrategia} (fallback sem IA).",
+            dados_extras={"peso_alocacao_pct": pct * 100, "taxa_adm_aa": meta.get("taxa_adm", 0.5), "perfil": estrategia},
+        ))
+    return saida
 
 
 async def rodar(
     capital: float,
     estrategia: str = "CORE",
     n_ativos: Optional[int] = None,
+    macro_context: Optional[object] = None,
 ) -> list[SugestaoMotor]:
     """
-    Aloca o capital nos ETFs adequados para a estratégia informada.
+    Seleciona os melhores ETFs usando IA + análise macro.
 
     Args:
-        capital:    Capital disponível para o módulo ETFs.
-        estrategia: Estratégia do perfil (CORE | ALPHA | RENDA | CUSTOM).
-        n_ativos:   Ignorado para ETFs — quantidade determinada pelo perfil.
+        capital:       Capital disponível para o módulo ETFs.
+        estrategia:    Estratégia do perfil (CORE | ALPHA | RENDA | CUSTOM).
+        n_ativos:      Número desejado de ETFs (padrão: 4-6).
+        macro_context: MacroContext com dados macro reais (regime, Selic, VIX, etc.)
 
     Returns:
-        Lista de SugestaoMotor, um por ETF da alocação.
+        Lista de SugestaoMotor, um por ETF selecionado pela IA.
     """
     if capital < 500:
         return []
 
     estrategia = (estrategia or "CORE").upper()
-    alocacao = _PERFIL_ALOCACAO.get(estrategia, _PERFIL_ALOCACAO["CORE"])
+    n_ativos = n_ativos or (5 if estrategia == "ALPHA" else 4)
 
-    # Busca preços em paralelo
-    tarefas = [asyncio.to_thread(_fetch_preco, ticker) for ticker, _ in alocacao]
-    precos  = await asyncio.gather(*tarefas, return_exceptions=True)
+    # ── Step 1: Buscar preços de TODOS os ETFs do universo ────────────────
+    tickers = list(ETFS_UNIVERSE.keys())
+    tarefas = [asyncio.to_thread(_fetch_preco, t) for t in tickers]
+    precos = await asyncio.gather(*tarefas, return_exceptions=True)
 
-    saida: list[SugestaoMotor] = []
-
-    for (ticker, pct), preco in zip(alocacao, precos):
-        if not isinstance(preco, float) or preco is None or preco <= 0:
+    # ── Step 2: Construir candidatos enriched ─────────────────────────────
+    candidatos_enriched: list[dict] = []
+    for ticker, preco in zip(tickers, precos):
+        if not isinstance(preco, (int, float)) or preco is None or preco <= 0:
             continue
-
-        capital_etf = capital * pct
-        qtd = max(1, int(capital_etf / preco))
-        valor = round(qtd * preco, 2)
-
-        info = _ETF_INFO.get(ticker, {"nome": ticker, "papel": "", "taxa_adm": 0.5})
-
-        saida.append(SugestaoMotor(
-            modulo="etfs",
-            ticker=ticker,
-            nome=info["nome"],
-            tipo="ETF",
-            quantidade=float(qtd),
-            preco_atual=round(preco, 2),
-            valor_total=valor,
-            justificativa=_justificativa_etf(ticker, pct, estrategia),
-            score=pct * 100,  # peso = score
-            dados_extras={
-                "peso_alocacao_pct": pct * 100,
-                "taxa_adm_aa":       info["taxa_adm"],
-                "perfil":            estrategia,
+        meta = ETFS_UNIVERSE[ticker]
+        candidatos_enriched.append({
+            "ticker": ticker,
+            "nome": meta["nome"],
+            "tipo": "ETF",
+            "preco": round(float(preco), 2),
+            "exposicao": meta["exposicao"],
+            "taxa_adm": meta["taxa_adm"],
+            "categoria": meta["categoria"],
+            "dados_extras": {
+                "taxa_adm_aa": meta["taxa_adm"],
+                "categoria": meta["categoria"],
+                "exposicao": meta["exposicao"],
             },
-        ))
+        })
 
-    return saida
+    if not candidatos_enriched:
+        logger.warning("motor_etfs: nenhum ETF com preço — usando fallback")
+        return _construir_fallback(capital, estrategia)
+
+    # ── Step 3: Construir fallback (para graceful degradation) ────────────
+    fallback = _construir_fallback(capital, estrategia)
+
+    # ── Step 4: Obter resumo macro ────────────────────────────────────────
+    macro_resumo = ""
+    if macro_context and hasattr(macro_context, "resumo_texto"):
+        macro_resumo = macro_context.resumo_texto()
+    else:
+        try:
+            from app.cerebro.macro import montar_macro
+            ctx = await montar_macro()
+            macro_resumo = ctx.resumo_texto()
+        except Exception:
+            macro_resumo = "Dados macro indisponíveis."
+
+    # ── Step 5: Chamar IA especialista ────────────────────────────────────
+    from app.cerebro.especialistas._ai_motor import selecionar_com_ia
+    from app.cerebro.prompts import build_motor_prompt
+
+    resultado = await selecionar_com_ia(
+        modulo="etfs",
+        candidatos_enriched=candidatos_enriched,
+        macro_resumo=macro_resumo,
+        estrategia=estrategia,
+        capital=capital,
+        motor_system_prompt=build_motor_prompt("etfs"),
+        n_ativos=n_ativos,
+        max_tokens=3000,
+        fallback_candidatos=fallback,
+    )
+
+    return resultado if resultado else fallback

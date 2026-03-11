@@ -25,6 +25,7 @@ Dados extras por sugestão:
 """
 
 import asyncio
+import logging
 from typing import Optional
 
 import yfinance as yf
@@ -32,6 +33,8 @@ import yfinance as yf
 from app.cerebro.especialistas import SugestaoMotor
 from app.cerebro.especialistas.watchlist import FIIS_WATCHLIST, FIIS_WATCHLIST_FLAT
 from app.cerebro.especialistas import prefetch as _pf
+
+logger = logging.getLogger("apex.motor_fiis")
 
 # ── Metadados curados dos FIIs (segmento + dados de FALLBACK) ────────────────
 # dy_ref e p_vp_ref são usados APENAS quando o yfinance não retorna dados live.
@@ -189,16 +192,17 @@ async def rodar(
     n_ativos: int = 4,
     estrategia: str = "CORE",
     excluir_tickers: list[str] | None = None,
+    macro_context: object | None = None,
 ) -> list[SugestaoMotor]:
     """
-    Seleciona os melhores FIIs para a carteira, garantindo diversificação
-    entre segmentos e critérios fundamentalistas mínimos.
+    Seleciona os melhores FIIs para a carteira usando IA + dados reais.
 
     Args:
         capital:          Capital em R$ disponível para o módulo FIIs.
         n_ativos:         Número desejado de FIIs (máx 6).
         estrategia:       Perfil do investidor (afeta aversão a risco).
         excluir_tickers:  Tickers já na carteira — não serão sugeridos.
+        macro_context:    MacroContext para análise IA (Selic, IPCA, regime).
 
     Returns:
         Lista de SugestaoMotor com os FIIs selecionados.
@@ -237,15 +241,72 @@ async def rodar(
 
     candidatos.sort(key=lambda x: x["score"], reverse=True)
 
-    # Seleciona garantindo diversificação de segmentos
+    if not candidatos:
+        return []
+
+    # ── Fallback algorítmico (seleção por score + diversificação) ─────────
+    fallback = _construir_fallback_fiis(candidatos, n_ativos, capital)
+
+    # ── Enriquecer candidatos para IA ─────────────────────────────────────
+    candidatos_enriched = []
+    for c in candidatos:
+        meta = c["meta"]
+        candidatos_enriched.append({
+            "ticker": c["ticker"],
+            "nome": meta["nome"],
+            "tipo": "FII",
+            "preco": c["preco"],
+            "dy_12m": c["dy"],
+            "p_vp": c["p_vp"],
+            "segmento": meta["segmento"],
+            "score_algoritmico": round(c["score"], 1),
+            "dados_extras": {
+                "segmento": meta["segmento"],
+                "dy_estimado": c["dy"],
+                "p_vp": c["p_vp"],
+            },
+        })
+
+    # ── Obter resumo macro ────────────────────────────────────────────────
+    macro_resumo = ""
+    if macro_context and hasattr(macro_context, "resumo_texto"):
+        macro_resumo = macro_context.resumo_texto()
+    else:
+        try:
+            from app.cerebro.macro import montar_macro
+            ctx = await montar_macro()
+            macro_resumo = ctx.resumo_texto()
+        except Exception:
+            macro_resumo = "Dados macro indisponíveis."
+
+    # ── Chamar IA especialista ────────────────────────────────────────────
+    from app.cerebro.especialistas._ai_motor import selecionar_com_ia
+    from app.cerebro.prompts import build_motor_prompt
+
+    resultado = await selecionar_com_ia(
+        modulo="fiis",
+        candidatos_enriched=candidatos_enriched,
+        macro_resumo=macro_resumo,
+        estrategia=estrategia,
+        capital=capital,
+        motor_system_prompt=build_motor_prompt("fiis"),
+        n_ativos=n_ativos,
+        max_tokens=3000,
+        fallback_candidatos=fallback,
+    )
+
+    return resultado if resultado else fallback
+
+
+def _construir_fallback_fiis(candidatos: list[dict], n_ativos: int, capital: float) -> list[SugestaoMotor]:
+    """Fallback algorítmico: seleção por score com diversificação de segmentos."""
     selecionados = []
-    segmentos_usados: dict[str, int] = {}  # segmento → count
+    segmentos_usados: dict[str, int] = {}
 
     for cand in candidatos:
         if len(selecionados) >= n_ativos:
             break
         seg = cand["meta"]["segmento"]
-        # Máximo 2 FIIs por segmento
         if segmentos_usados.get(seg, 0) >= 2:
             continue
         selecionados.append(cand)

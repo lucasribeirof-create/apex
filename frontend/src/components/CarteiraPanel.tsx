@@ -6,6 +6,7 @@ import { useRef, useState } from 'react'
 import { X, BrainCircuit, Loader2, Copy, Check, Download, Play } from 'lucide-react'
 import DOMPurify from 'dompurify'
 import { useStore } from '@/store/useStore'
+import { useCostEstimates } from '@/hooks/useCostEstimates'
 import ThinkingSteps from '@/components/ThinkingSteps'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -42,6 +43,8 @@ interface CarteiraPanelProps {
 // ─── Componente ───────────────────────────────────────────────────────────────
 export default function CarteiraPanel({ onClose }: CarteiraPanelProps) {
   const { userId, carteiraCache, carteiraModulo, setCarteiraCache, setCarteiraModulo } = useStore()
+  const { format: fmtCost } = useCostEstimates()
+  const carteiraCost = fmtCost('analise_carteira')
   const [moduloSelecionado, setModuloSelecionadoLocal] = useState(carteiraModulo)
   const [texto, setTextoLocal] = useState(carteiraCache[carteiraModulo] || '')
   const [loading, setLoading] = useState(false)
@@ -157,6 +160,7 @@ export default function CarteiraPanel({ onClose }: CarteiraPanelProps) {
             >
               {loading || streaming ? <Loader2 size={12} className="animate-spin" /> : <Play size={10} fill="currentColor" />}
               Analisar
+              {!loading && !streaming && carteiraCost && <span style={{ fontSize: 10, color: '#2d6a4f', opacity: 0.7 }}>{carteiraCost}</span>}
             </button>
             {texto && (
               <button

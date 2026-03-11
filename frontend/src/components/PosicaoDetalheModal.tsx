@@ -12,6 +12,7 @@ import {
 import DOMPurify from 'dompurify'
 import api from '@/services/api'
 import AnaliseModal from '@/components/AnaliseModal'
+import { useCostEstimates } from '@/hooks/useCostEstimates'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -394,6 +395,7 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
   const [loadingTx, setLoadingTx] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [showAnalise, setShowAnalise] = useState(false)
+  const { format: fmtCost } = useCostEstimates()
   const [fundamentos, setFundamentos] = useState<Record<string, any> | null>(null)
   const [loadingFund, setLoadingFund] = useState(false)
   const fundLoadedRef = useRef<number | null>(null)
@@ -1131,6 +1133,7 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
                           onMouseLeave={e => (e.currentTarget.style.background = 'rgba(167,139,250,0.08)')}
                         >
                           <RotateCw size={11} /> Refazer
+                          {fmtCost('analise_posicao') && <span style={{ fontSize: 10, opacity: 0.7, color: '#7c3aed' }}>{fmtCost('analise_posicao')}</span>}
                         </button>
                         <button
                           onClick={() => downloadAnaliseHTML(position.ticker, position.modulo, position.analise_ia!, position.analise_ia_at)}
@@ -1172,6 +1175,7 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
                         onMouseLeave={e => (e.currentTarget.style.background = 'rgba(167,139,250,0.12)')}
                       >
                         <BrainCircuit size={15} /> Abrir Análise AI
+                        {fmtCost('analise_posicao') && <span style={{ fontSize: 10, opacity: 0.7, color: '#7c3aed' }}>{fmtCost('analise_posicao')}</span>}
                       </button>
                       <p className="text-xs text-center" style={{ color: '#334155' }}>
                         Analisa RSI, MACD, médias móveis, suporte/resistência e tese de investimento.

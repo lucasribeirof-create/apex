@@ -221,7 +221,7 @@ Uma posição recém-criada com P&L próximo de zero é NORMAL."""
 {web_contexto if web_contexto else 'Sem resultados de pesquisa web.'}
 
 ## CONTEXTO CÉREBRO (decisões anteriores do sistema)
-{_injetar_cerebro_completo(ctx)}
+{_injetar_cerebro_completo(ctx, excluir_guardrails=True)}
 
 Analise esta posição usando as 7 camadas. Devo APORTAR MAIS, MANTER, REDUZIR ou ZERAR?"""
 
@@ -415,7 +415,7 @@ Faça o diagnóstico de saúde desta carteira. Foque nos riscos imediatos e desv
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def _injetar_cerebro_completo(ctx) -> str:
+def _injetar_cerebro_completo(ctx, excluir_guardrails: bool = False) -> str:
     """Gera bloco padronizado com TODOS os dados do Cérebro (Fases 1-6) para injeção em prompts."""
     secoes: list[str] = []
 
@@ -454,8 +454,8 @@ def _injetar_cerebro_completo(ctx) -> str:
             f"confiança {ctx.confianca_macro}%) | Fase Selic: {ctx.fase_selic or '—'}"
         )
 
-    # 5. Guardrails (Fase 1)
-    if hasattr(ctx, "guardrails") and ctx.guardrails:
+    # 5. Guardrails (Fase 1) — só para análise de carteira, não individual
+    if not excluir_guardrails and hasattr(ctx, "guardrails") and ctx.guardrails:
         g = ctx.guardrails
         secoes.append(
             f"GUARDRAILS MACRO: equity máx {g.get('equity_max_pct', '?')}% | "
@@ -469,8 +469,8 @@ def _injetar_cerebro_completo(ctx) -> str:
         evit = ", ".join(rs.evitar[:5]) if rs.evitar else "—"
         secoes.append(f"SETORES FAVORECIDOS: {fav}\nSETORES A EVITAR: {evit}")
 
-    # 7. Alocação real vs guardrails (só mostra se o usuário configurou alvos)
-    if ctx.alocacao_real and ctx.guardrails and getattr(ctx, 'alocacao_configurada', False):
+    # 7. Alocação real vs guardrails (só mostra se o usuário configurou alvos e não é análise individual)
+    if not excluir_guardrails and ctx.alocacao_real and ctx.guardrails and getattr(ctx, 'alocacao_configurada', False):
         equity_mods = ["etfs", "fiis", "momentum", "alpha", "dividendos", "wheel"]
         equity_real = sum(ctx.alocacao_real.get(m, 0) for m in equity_mods)
         rf_real = ctx.alocacao_real.get("renda_fixa", 0)

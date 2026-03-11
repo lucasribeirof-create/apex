@@ -319,10 +319,11 @@ async def montar(
     if _regime_cached:
         if isinstance(_regime_cached, _RegimeInfo):
             regime_info_obj = _regime_cached
-            regime_str = str(regime_info_obj.regime)
+            regime_str = regime_info_obj.regime.value if hasattr(regime_info_obj.regime, 'value') else str(regime_info_obj.regime)
             regime_motivo = regime_info_obj.regime_motivo
         else:
-            regime_str = str(_regime_cached.get("regime", "MISTO"))
+            _raw_regime = _regime_cached.get("regime", "MISTO")
+            regime_str = _raw_regime.value if hasattr(_raw_regime, 'value') else str(_raw_regime)
             regime_motivo = str(_regime_cached.get("motivo", ""))
 
     if regime_str == "MISTO" and getattr(portfolio, "regime", None):
@@ -355,8 +356,8 @@ async def montar(
     # ── Alertas pré-computados ────────────────────────────────────────────
     stops_proximos = _detectar_stops_proximos(posicoes, limiar_pct=5.0)
     alocacao_configurada = sum(alocacao_alvo.values()) > 0
-    modulos_acima = [m for m, d in desvios.items() if d > 5.0] if alocacao_configurada else []
-    modulos_abaixo = [m for m, d in desvios.items() if d < -5.0] if alocacao_configurada else []
+    modulos_acima = [m for m, d in desvios.items() if d > 5.0 and alocacao_alvo.get(m, 0) > 0] if alocacao_configurada else []
+    modulos_abaixo = [m for m, d in desvios.items() if d < -5.0 and alocacao_alvo.get(m, 0) > 0] if alocacao_configurada else []
     posicoes_vermelho = [
         p for p in posicoes
         if p["pl_percentual"] < -10 and p["ticker"] not in ("CAIXA", "TESES")

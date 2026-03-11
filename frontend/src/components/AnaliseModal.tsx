@@ -11,6 +11,7 @@ import { X, BrainCircuit, Loader2, Send, BookText, Check, ChevronDown, ChevronUp
 import DOMPurify from 'dompurify'
 import api from '@/services/api'
 import { useStore } from '@/store/useStore'
+import { useCostEstimates } from '@/hooks/useCostEstimates'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -437,6 +438,8 @@ export default function AnaliseModal({
   positionId, ticker, modulo, tese, onClose, onTeseSalva,
 }: AnaliseModalProps) {
   const { portfolioAtivo, userId, addTokenUsage } = useStore()
+  const { format: fmtCost } = useCostEstimates()
+  const chatCost = fmtCost('chat')
   const isSimulada = portfolioAtivo?.tipo === 'simulada'
   const isTese = portfolioAtivo?.tipo === 'tese'
   const [fase, setFase] = useState<'analisando' | 'chat'>('analisando')
@@ -931,6 +934,7 @@ ${body}
               >
                 {enviando ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
               </button>
+              {chatCost && <span style={{ fontSize: 10, color: '#334155' }}>{chatCost}</span>}
             </div>
             <p className="text-xs mt-1 ml-1" style={{ color: '#334155' }}>Shift+Enter para nova linha</p>
           </div>

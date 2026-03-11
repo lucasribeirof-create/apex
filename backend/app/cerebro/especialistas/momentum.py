@@ -30,6 +30,7 @@ Dados extras por sugestão:
 """
 
 import asyncio
+import logging
 from typing import Optional
 
 import numpy as np
@@ -41,6 +42,8 @@ from app.cerebro.especialistas.watchlist import MOMENTUM_WATCHLIST
 from app.cerebro.especialistas import prefetch as _pf
 from app.cerebro.especialistas.candles import detectar_padroes, resumo_padroes
 from app.cerebro.especialistas.fibonacci import calcular_fibonacci
+
+logger = logging.getLogger("apex.motor_momentum")
 
 # ── Parâmetros do motor ──────────────────────────────────────────────────────
 MIN_RR           = 2.0    # risco/retorno mínimo para incluir
@@ -473,10 +476,12 @@ async def rodar(
     patrimonio_total: float = 0.0,
     regime: str = "NEUTRO",
     cb_modifier: float = 1.0,
+    macro_context: object | None = None,
 ) -> list[SugestaoMotor]:
     """
-    Roda o motor Momentum: varre a watchlist, filtra por critérios técnicos e
-    retorna os melhores candidatos com alocação por risco (ATR-based).
+    Motor Momentum com camada de convicção IA.
+    Análise técnica completa (RSI, MACD, MMs, Fibonacci, candles) → IA reordena
+    por convicção considerando contexto macro. Fallback: ranking algorítmico.
     """
     if capital < CAPITAL_MIN:
         return []
@@ -485,7 +490,7 @@ async def rodar(
     tickers = [t for t in (watchlist or MOMENTUM_WATCHLIST) if t.upper() not in _excluir]
     n_ativos = min(n_ativos, 8)
 
-    # Retorno do IBOV para força relativa (uma única requisição)
+    # Retorno do IBOV para força relativa
     ibov_ret = await asyncio.to_thread(_calcular_ibov_retorno_20d)
 
     # Analisa cada ticker em paralelo
@@ -500,12 +505,86 @@ async def rodar(
             c["score"] = _aplicar_ajuste_setor(c["ticker"], c["score"], ranking_setorial)
 
     candidatos.sort(key=lambda x: x["score"], reverse=True)
-    selecionados = candidatos[:n_ativos]
 
+    if not candidatos:
+        return []
+
+    # ── Fallback algorítmico (top-N por score técnico) ────────────────────
+    fallback = _construir_fallback_momentum(candidatos, n_ativos, capital, patrimonio_total, regime, cb_modifier)
+
+    # ── Enriquecer candidatos para IA ─────────────────────────────────────
+    candidatos_enriched = []
+    for c in candidatos:
+        candidatos_enriched.append({
+            "ticker": c["ticker"],
+            "nome": c["ticker"],
+            "tipo": "ACAO",
+            "preco": c["preco"],
+            "rsi": c["rsi"],
+            "macd_positivo": c["macd_positivo"],
+            "macd_cruzando": c["macd_cruzando"],
+            "golden_cross": c["golden_cross"],
+            "dist_mm200_pct": c["dist_mm200"],
+            "momentum_20d": c["momentum_20"],
+            "forca_relativa_ibov": c["forca_relativa"],
+            "alvo": c["alvo"],
+            "stop": c["stop"],
+            "rr": c["rr"],
+            "atr14": c["atr14"],
+            "tendencia_semanal": c.get("tendencia_semanal", "neutra"),
+            "fib_zona": c.get("fib_zona"),
+            "fib_confluencia": c.get("fib_confluencia"),
+            "candle_padroes_alta": c.get("candle_padroes_alta", []),
+            "candle_padroes_baixa": c.get("candle_padroes_baixa", []),
+            "score_tecnico": round(c["score"], 1),
+            "setor": _get_setor_ticker(c["ticker"]),
+            "dados_extras": {
+                "alvo": c["alvo"], "stop": c["stop"], "rr": c["rr"],
+                "rsi": c["rsi"], "atr14": c["atr14"],
+                "setor": _get_setor_ticker(c["ticker"]),
+            },
+        })
+
+    # ── Obter resumo macro ────────────────────────────────────────────────
+    macro_resumo = ""
+    if macro_context and hasattr(macro_context, "resumo_texto"):
+        macro_resumo = macro_context.resumo_texto()
+    else:
+        try:
+            from app.cerebro.macro import montar_macro
+            ctx = await montar_macro()
+            macro_resumo = ctx.resumo_texto()
+        except Exception:
+            macro_resumo = "Dados macro indisponíveis."
+
+    # ── Chamar IA especialista ────────────────────────────────────────────
+    from app.cerebro.especialistas._ai_motor import selecionar_com_ia
+    from app.cerebro.prompts import build_motor_prompt
+
+    resultado = await selecionar_com_ia(
+        modulo="momentum",
+        candidatos_enriched=candidatos_enriched,
+        macro_resumo=macro_resumo,
+        estrategia="ALPHA",
+        capital=capital,
+        motor_system_prompt=build_motor_prompt("momentum"),
+        n_ativos=n_ativos,
+        max_tokens=3000,
+        fallback_candidatos=fallback,
+    )
+
+    return resultado if resultado else fallback
+
+
+def _construir_fallback_momentum(
+    candidatos: list[dict], n_ativos: int, capital: float,
+    patrimonio_total: float, regime: str, cb_modifier: float,
+) -> list[SugestaoMotor]:
+    """Fallback algorítmico: top-N por score técnico com ATR sizing."""
+    selecionados = candidatos[:n_ativos]
     if not selecionados:
         return []
 
-    # ATR-based position sizing (Phase 4) — Momentum já tem stop e atr14
     from app.cerebro.sizing import sizing_lote, ATR_STOP_MULT_MOMENTUM
     _patrim = patrimonio_total if patrimonio_total > 0 else capital
     sizing_results = sizing_lote(
@@ -537,38 +616,27 @@ async def rodar(
             justificativa=_justificativa(d),
             score=d["score"],
             dados_extras={
-                "alvo":              d["alvo"],
-                "stop":              d["stop"],
-                "rr":                d["rr"],
-                "rsi":               d["rsi"],
-                "macd_positivo":     d["macd_positivo"],
-                "macd_cruzando":     d["macd_cruzando"],
-                "golden_cross":      d["golden_cross"],
-                "dist_mm200":        d["dist_mm200"],
-                "momentum_20d":      d["momentum_20"],
-                "forca_relativa_ibov": d["forca_relativa"],
-                "atr14":             d["atr14"],
-                "range_52s_pct":     d["range_pct"],
-                "suporte":           d["suporte"],
-                "resistencia":       d["resistencia"],
-                "upside_pct":        round((d["alvo"] / preco - 1) * 100, 1),
-                "downside_pct":      round((d["stop"] / preco - 1) * 100, 1),
-                "setor":             _get_setor_ticker(d["ticker"]),
-                # Sizing (Phase 4)
+                "alvo": d["alvo"], "stop": d["stop"], "rr": d["rr"],
+                "rsi": d["rsi"], "macd_positivo": d["macd_positivo"],
+                "macd_cruzando": d["macd_cruzando"], "golden_cross": d["golden_cross"],
+                "dist_mm200": d["dist_mm200"], "momentum_20d": d["momentum_20"],
+                "forca_relativa_ibov": d["forca_relativa"], "atr14": d["atr14"],
+                "range_52s_pct": d["range_pct"],
+                "suporte": d["suporte"], "resistencia": d["resistencia"],
+                "upside_pct": round((d["alvo"] / preco - 1) * 100, 1),
+                "downside_pct": round((d["stop"] / preco - 1) * 100, 1),
+                "setor": _get_setor_ticker(d["ticker"]),
                 "risco_pct_patrimonio": sz.risco_pct_patrimonio if sz else None,
-                "sizing_method":       "ATR" if (sz and sz.atr14 > 0) else "equal_weight",
-                # Multi-Timeframe (Phase 6)
-                "tendencia_semanal":   d.get("tendencia_semanal", "neutra"),
-                "mm40w":               d.get("mm40w", 0.0),
-                # Fibonacci (Phase 6)
-                "fib_zona":            d.get("fib_zona"),
-                "fib_confluencia":     d.get("fib_confluencia"),
-                "fib_score":           d.get("fib_score", 0),
-                "fib_niveis":          d.get("fib_niveis"),
-                # Candle Patterns (Phase 6)
-                "candle_padroes_alta":  d.get("candle_padroes_alta", []),
+                "sizing_method": "ATR" if (sz and sz.atr14 > 0) else "equal_weight",
+                "tendencia_semanal": d.get("tendencia_semanal", "neutra"),
+                "mm40w": d.get("mm40w", 0.0),
+                "fib_zona": d.get("fib_zona"),
+                "fib_confluencia": d.get("fib_confluencia"),
+                "fib_score": d.get("fib_score", 0),
+                "fib_niveis": d.get("fib_niveis"),
+                "candle_padroes_alta": d.get("candle_padroes_alta", []),
                 "candle_padroes_baixa": d.get("candle_padroes_baixa", []),
-                "candle_score":         d.get("candle_score", 0),
+                "candle_score": d.get("candle_score", 0),
             },
         ))
 

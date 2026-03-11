@@ -34,10 +34,13 @@ Mix base por cenário:
 """
 
 import asyncio
+import logging
 from typing import Optional, Dict
 
 from app.cerebro.especialistas import SugestaoMotor
 from app.data.bcb_client import get_selic, get_ipca
+
+logger = logging.getLogger("apex.motor_rf")
 
 # ── Constantes FALLBACK (usadas SOMENTE quando BCB offline) ──────────────────
 _SELIC_FALLBACK = 14.75   # % a.a. — atualizar periodicamente
@@ -125,18 +128,13 @@ async def rodar(
     mix: Optional[Dict[str, float]] = None,
     estrategia: str = "CORE",
     n_ativos: int = 3,
+    macro_context: object | None = None,
 ) -> list[SugestaoMotor]:
     """
-    Aloca o capital em renda fixa seguindo o mix adequado ao cenário.
+    Aloca o capital em renda fixa com IA decidindo o mix SELIC/IPCA+/PRÉ.
 
-    Args:
-        capital:    Capital em R$ disponível para o módulo Renda Fixa.
-        mix:        Sobrescreve o mix padrão ({ticker: pct}) — soma deve ser 1.0.
-        estrategia: Perfil do investidor (RENDA prioriza IPCA+; ALPHA reduz RF).
-        n_ativos:   Máximo de vértices (padrão: 3 — SELIC, IPCA, PRÉ).
-
-    Returns:
-        Lista de SugestaoMotor, um por vértice de renda fixa.
+    A IA analisa: ciclo Selic, IPCA projetado, curva de juros, regime macro.
+    Fallback: mix estático por perfil se IA não disponível.
     """
     if capital < 500:
         return []
@@ -148,32 +146,97 @@ async def rodar(
     )
     selic_atual = float(selic_live) if isinstance(selic_live, (int, float)) else _SELIC_FALLBACK
     ipca_atual  = float(ipca_live)  if isinstance(ipca_live,  (int, float)) else _IPCA_FALLBACK
-    # IPCA Focus ~= IPCA 12m com pequeno delta (sem ação de agente só no Focus)
-    # Usamos o IPCA realizado como proxy conservador do Focus
-    ipca_focus_atual = round(ipca_atual * 0.95, 2)  # 5% abaixo do realizado como estimativa do Focus
-    # PRÉ 2 anos: aprox Selic + spread de 0.5-1.0% como proxy (sem série BCB direta)
+    ipca_focus_atual = round(ipca_atual * 0.95, 2)
     pre_2y = round(selic_atual + 0.5, 2) if selic_atual > 0 else _PRE_2Y_FALLBACK
-    alocacao = mix or dict(_MIX_BASE)
 
-    # Ajuste por perfil
+    # ── Candidatos RF para IA ─────────────────────────────────────────────
+    candidatos_enriched = [
+        {
+            "ticker": "RF-SELIC", "nome": "Renda Fixa — Pós-Fixado (Selic)", "tipo": "RF",
+            "preco": 1.0,
+            "taxa_referencia_aa": selic_atual,
+            "descricao": "Tesouro Selic / CDB DI / LCI DI",
+            "liquidez": "D+0 a D+1 (alta liquidez)",
+            "risco": "baixíssimo — soberano",
+            "dados_extras": {"taxa_referencia_aa": selic_atual, "liquidez": "D+0 a D+1"},
+        },
+        {
+            "ticker": "RF-IPCA", "nome": "Renda Fixa — IPCA+ (indexado inflação)", "tipo": "RF",
+            "preco": 1.0,
+            "taxa_referencia_aa": round(ipca_focus_atual + 6.5, 2),
+            "descricao": "Tesouro IPCA+ 2029 / CRI IPCA / CRA IPCA",
+            "liquidez": "D+2 (via mercado secundário ou vencimento)",
+            "risco": "baixo — soberano ou crédito high grade",
+            "ipca_projetado": ipca_focus_atual,
+            "spread_real": 6.5,
+            "dados_extras": {"taxa_referencia_aa": round(ipca_focus_atual + 6.5, 2), "liquidez": "D+2"},
+        },
+        {
+            "ticker": "RF-PRE", "nome": "Renda Fixa — Prefixado", "tipo": "RF",
+            "preco": 1.0,
+            "taxa_referencia_aa": pre_2y,
+            "descricao": "Tesouro Prefixado 2027 / CDB Pré / LCA Pré",
+            "liquidez": "D+2 (via mercado secundário ou vencimento)",
+            "risco": "baixo — soberano | risco de marcação a mercado",
+            "dados_extras": {"taxa_referencia_aa": pre_2y, "liquidez": "D+2"},
+        },
+    ]
+
+    # ── Fallback estático ─────────────────────────────────────────────────
+    fallback_alocacao = mix or dict(_MIX_BASE)
     if estrategia == "RENDA":
-        # Renda: mais IPCA+ pois quer rendimento real consistente
-        alocacao = {"RF-SELIC": 0.40, "RF-IPCA": 0.45, "RF-PRE": 0.15}
+        fallback_alocacao = {"RF-SELIC": 0.40, "RF-IPCA": 0.45, "RF-PRE": 0.15}
     elif estrategia == "ALPHA":
-        # Alpha: RF é o 'colchão' — tudo em Selic para máxima liquidez
-        alocacao = {"RF-SELIC": 0.80, "RF-IPCA": 0.20, "RF-PRE": 0.00}
-        alocacao = {k: v for k, v in alocacao.items() if v > 0}
+        fallback_alocacao = {"RF-SELIC": 0.80, "RF-IPCA": 0.20, "RF-PRE": 0.00}
+        fallback_alocacao = {k: v for k, v in fallback_alocacao.items() if v > 0}
 
+    fallback = _construir_saida_rf(fallback_alocacao, capital, selic_atual, ipca_focus_atual, pre_2y)
+
+    # ── Obter resumo macro ────────────────────────────────────────────────
+    macro_resumo = ""
+    if macro_context and hasattr(macro_context, "resumo_texto"):
+        macro_resumo = macro_context.resumo_texto()
+    else:
+        try:
+            from app.cerebro.macro import montar_macro
+            ctx = await montar_macro()
+            macro_resumo = ctx.resumo_texto()
+        except Exception:
+            macro_resumo = "Dados macro indisponíveis."
+
+    # ── Chamar IA especialista ────────────────────────────────────────────
+    from app.cerebro.especialistas._ai_motor import selecionar_com_ia
+    from app.cerebro.prompts import build_motor_prompt
+
+    resultado = await selecionar_com_ia(
+        modulo="renda_fixa",
+        candidatos_enriched=candidatos_enriched,
+        macro_resumo=macro_resumo,
+        estrategia=estrategia,
+        capital=capital,
+        motor_system_prompt=build_motor_prompt("renda_fixa"),
+        n_ativos=n_ativos,
+        max_tokens=2000,
+        fallback_candidatos=fallback,
+    )
+
+    return resultado if resultado else fallback
+
+
+def _construir_saida_rf(
+    alocacao: dict, capital: float,
+    selic_atual: float, ipca_focus_atual: float, pre_2y: float,
+) -> list[SugestaoMotor]:
+    """Constrói lista SugestaoMotor a partir de uma alocação RF."""
     saida: list[SugestaoMotor] = []
 
     for ticker, pct in alocacao.items():
         if pct <= 0 or ticker not in _RF_INFO:
             continue
 
-        info     = _RF_INFO[ticker]
-        valor    = round(capital * pct, 2)
+        info   = _RF_INFO[ticker]
+        valor  = round(capital * pct, 2)
 
-        # Taxa de referência com valores live do BCB
         if ticker == "RF-SELIC":
             taxa_ref = selic_atual
         elif ticker == "RF-IPCA":
@@ -192,15 +255,15 @@ async def rodar(
             justificativa=_justificativa_rf(ticker, pct, selic_atual, ipca_focus_atual, pre_2y),
             score=pct * 100,
             dados_extras={
-                "taxa_referencia_aa":     taxa_ref,
-                "peso_pct":               pct * 100,
-                "descricao":              info["descricao"],
-                "liquidez":              info["liquidez"],
-                "risco":                 info["risco"],
+                "taxa_referencia_aa": taxa_ref,
+                "peso_pct": pct * 100,
+                "descricao": info["descricao"],
+                "liquidez": info["liquidez"],
+                "risco": info["risco"],
                 "rendimento_mensal_est": round(valor * taxa_ref / 100 / 12, 2),
-                "rendimento_anual_est":  round(valor * taxa_ref / 100, 2),
-                "selic_atual":           selic_atual,
-                "ipca_focus_12m":        ipca_focus_atual,
+                "rendimento_anual_est": round(valor * taxa_ref / 100, 2),
+                "selic_atual": selic_atual,
+                "ipca_focus_12m": ipca_focus_atual,
             },
         ))
 

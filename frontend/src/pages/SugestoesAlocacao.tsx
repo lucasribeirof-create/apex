@@ -8,10 +8,11 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   BrainCircuit, Check, X, ChevronRight, Loader2,
   FlaskConical, AlertTriangle, RefreshCw, TrendingUp,
-  ShieldAlert, Sparkles, ArrowRightLeft,
+  ShieldAlert, Sparkles, ArrowRightLeft, Download,
 } from 'lucide-react'
 import api from '@/services/api'
 import { useStore } from '@/store/useStore'
+import { useCostEstimates } from '@/hooks/useCostEstimates'
 import ThinkingSteps from '@/components/ThinkingSteps'
 
 interface Sugestao {
@@ -137,6 +138,8 @@ export default function SugestoesAlocacao() {
   const navigate = useNavigate()
   const location = useLocation()
   const { setPortfolios, setPortfolioAtivo } = useStore()
+  const { format: fmtCost } = useCostEstimates()
+  const portfolioCost = fmtCost('sugerir_portfolio')
 
   // Recebe portfolio_id e modo via state de navegação
   const { portfolioId, modo = 'inicial' } = (location.state as {
@@ -323,14 +326,106 @@ export default function SugestoesAlocacao() {
               {modo === 'rebalanceamento' ? 'Aprovação de ajustes sugeridos pela IA' : 'Revise e aprove a alocação inicial'}
             </p>
           </div>
-          <button
-            onClick={() => carregarSugestoes(true)}
-            title="Recalcular com dados atuais (pode demorar 2-5 min)"
-            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
-            style={{ background: 'rgba(255,152,0,0.08)', color: '#FF9800', border: '1px solid rgba(255,152,0,0.2)' }}
-          >
-            <RefreshCw size={12} /> Atualizar dados
-          </button>
+          <div className="ml-auto flex items-center gap-2">
+            {gestorAnalise && (
+              <button
+                title="Download como HTML"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
+                style={{ background: 'rgba(255,255,255,0.05)', color: '#94a3b8', border: '1px solid #1e293b' }}
+                onClick={() => {
+                  const dateStr = new Date().toLocaleDateString('pt-BR')
+                  const ga = gestorAnalise!
+                  // Build suggestions grouped by module
+                  let sugHtml = ''
+                  const aprovadas = sugestoes.filter(s => s.aprovada)
+                  const porMod: Record<string, typeof aprovadas> = {}
+                  for (const s of aprovadas) {
+                    const m = s.item.modulo
+                    if (!porMod[m]) porMod[m] = []
+                    porMod[m].push(s)
+                  }
+                  for (const [mod, items] of Object.entries(porMod)) {
+                    sugHtml += `<h3 style="color:#FF9800;text-transform:uppercase;font-size:13px;margin:20px 0 8px">${mod} (${items.length} ativo${items.length > 1 ? 's' : ''})</h3>`
+                    for (const s of items) {
+                      const just = (s.item.justificativa || '')
+                        .replace(/\*\*(.*?)\*\*/g, '<strong style="color:#f1f5f9">$1</strong>')
+                        .replace(/\n/g, '<br/>')
+                      sugHtml += `<div style="border-left:3px solid #1e293b;padding:8px 12px;margin-bottom:10px;background:rgba(255,255,255,0.02);border-radius:0 8px 8px 0">`
+                      sugHtml += `<div style="display:flex;justify-content:space-between;align-items:center"><strong style="color:#f1f5f9;font-size:14px">${s.item.ticker}</strong><span style="color:#00E676;font-family:monospace">R$ ${s.item.valor_total.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span></div>`
+                      sugHtml += `<div style="color:#64748b;font-size:11px;margin:2px 0">${s.item.nome} · ${s.item.tipo} · ${s.item.quantidade} un × R$ ${s.item.preco_atual.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</div>`
+                      if (just) sugHtml += `<div style="color:#94a3b8;font-size:12px;margin-top:6px;line-height:1.6">${just}</div>`
+                      sugHtml += '</div>'
+                    }
+                  }
+                  // CEO analysis
+                  const analiseHtml = (ga.analise || '')
+                    .replace(/\*\*(.*?)\*\*/g, '<strong style="color:#f1f5f9">$1</strong>')
+                    .replace(/\n{2,}/g, '</p><p style="margin:0 0 10px">')
+                    .replace(/\n/g, '<br/>')
+                  const alertasHtml = ga.alertas.length > 0
+                    ? '<h3 style="color:#FF5252;font-size:13px;margin:16px 0 6px">Alertas</h3><ul>' + ga.alertas.map(a => `<li style="color:#ef4444;font-size:12px;margin-bottom:4px">${a}</li>`).join('') + '</ul>'
+                    : ''
+                  const ajustesHtml = ga.ajustes_realizados.length > 0
+                    ? '<h3 style="color:#64748b;font-size:13px;margin:16px 0 6px">Ajustes Realizados</h3><ul>' + ga.ajustes_realizados.map(a => `<li style="color:#94a3b8;font-size:12px;margin-bottom:4px">${a}</li>`).join('') + '</ul>'
+                    : ''
+                  const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rebalanceamento APEX — ${dateStr}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0e17; color: #e2e8f0; max-width: 720px; margin: 0 auto; padding: 40px 24px; line-height: 1.7; font-size: 14px; }
+    h1 { color: #FF9800; font-size: 22px; margin-bottom: 4px; }
+    h2 { color: #FF9800; font-size: 16px; margin: 20px 0 8px; }
+    h3 { color: #FF9800; font-size: 14px; margin: 16px 0 6px; }
+    strong { color: #f1f5f9; }
+    hr { border: none; border-top: 1px solid #1e293b; margin: 20px 0; }
+    li { margin-left: 16px; }
+    .badge { display: inline-block; font-size: 10px; padding: 2px 8px; border-radius: 4px; font-family: monospace; }
+    .footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #1e293b; color: #475569; font-size: 11px; text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>🧠 Sugestão de Rebalanceamento APEX</h1>
+  <div style="color:#64748b;font-size:13px;margin-bottom:4px">${dateStr} · Score: <span style="color:${ga.score_portfolio >= 75 ? '#00E676' : ga.score_portfolio >= 50 ? '#FF9800' : '#FF5252'};font-weight:bold">${ga.score_portfolio}/100</span> · Regime: ${ga.regime} · ${ga.usou_ia ? '<span class="badge" style="background:rgba(170,0,255,0.12);color:#AA00FF">IA</span>' : '<span class="badge" style="background:rgba(100,116,139,0.12);color:#64748b">Algorítmico</span>'}</div>
+  <div style="display:flex;gap:12px;margin:16px 0">
+    <div style="flex:1;background:#0d1117;border:1px solid #1e293b;border-radius:8px;padding:10px;text-align:center"><div style="color:#475569;font-size:10px;text-transform:uppercase;font-family:monospace">Capital Total</div><div style="color:#94a3b8;font-weight:bold;font-family:monospace">R$ ${capitalTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</div></div>
+    <div style="flex:1;background:#0d1117;border:1px solid #1e293b;border-radius:8px;padding:10px;text-align:center"><div style="color:#475569;font-size:10px;text-transform:uppercase;font-family:monospace">Total Aprovado</div><div style="color:#00E676;font-weight:bold;font-family:monospace">R$ ${totalAprovado.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</div></div>
+  </div>
+  <hr>
+  <h2>Análise do Gestor</h2>
+  <p style="line-height:1.8">${analiseHtml}</p>
+  ${alertasHtml}
+  ${ajustesHtml}
+  <hr>
+  <h2>Sugestões (${aprovadas.length} ativos)</h2>
+  ${sugHtml}
+  <div class="footer">APEX Manager · Gerado automaticamente</div>
+</body>
+</html>`
+                  const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url
+                  a.download = `rebalanceamento-apex-${dateStr.replace(/\//g, '-')}.html`
+                  a.click()
+                  URL.revokeObjectURL(url)
+                }}
+              >
+                <Download size={12} /> Baixar
+              </button>
+            )}
+            <button
+              onClick={() => carregarSugestoes(true)}
+              title="Recalcular com dados atuais (pode demorar 2-5 min)"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
+              style={{ background: 'rgba(255,152,0,0.08)', color: '#FF9800', border: '1px solid rgba(255,152,0,0.2)' }}
+            >
+              <RefreshCw size={12} /> Atualizar dados
+              {portfolioCost && <span style={{ fontSize: 9, color: '#b45309', opacity: 0.7 }}>{portfolioCost}</span>}
+            </button>
+          </div>
         </div>
         {/* Observação só aparece quando gestor_analise não está disponível */}
         {observacao && !gestorAnalise && (
@@ -413,6 +508,22 @@ export default function SugestoesAlocacao() {
             </div>
           )}
 
+          {/* Retry IA — quando fallback algorítmico em rebalanceamento */}
+          {!gestorAnalise.usou_ia && modo === 'rebalanceamento' && (
+            <div className="px-4 py-3" style={{ borderTop: '1px solid rgba(255,152,0,0.1)' }}>
+              <button
+                onClick={() => carregarSugestoes(true)}
+                disabled={carregando}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-medium transition-colors"
+                style={{ background: 'rgba(255,152,0,0.12)', color: '#FF9800', border: '1px solid rgba(255,152,0,0.3)' }}
+              >
+                <BrainCircuit size={14} />
+                {carregando ? 'Processando...' : 'Tentar análise com IA'}
+                {portfolioCost && <span style={{ fontSize: 9, color: '#b45309', opacity: 0.7 }}>{portfolioCost}</span>}
+              </button>
+            </div>
+          )}
+
           {/* Ajustes realizados */}
           {gestorAnalise.ajustes_realizados.length > 0 && (
             <div className="px-4 pb-3 pt-1 space-y-1"
@@ -477,6 +588,7 @@ export default function SugestoesAlocacao() {
             title="Gerar novas sugestões"
           >
             <RefreshCw size={11} /> Regerar
+            {portfolioCost && <span style={{ fontSize: 9, color: '#475569', opacity: 0.7 }}>{portfolioCost}</span>}
           </button>
         </div>
       </motion.div>
@@ -564,9 +676,13 @@ export default function SugestoesAlocacao() {
                         </div>
                       </div>
                       {s.item.justificativa && (
-                        <p className="text-[11px] mt-1.5 leading-relaxed" style={{ color: '#475569' }}>
-                          {s.item.justificativa}
-                        </p>
+                        <div className="text-xs mt-2 leading-relaxed whitespace-pre-line" style={{ color: '#94a3b8' }}>
+                          {s.item.justificativa.split(/\*\*(.*?)\*\*/g).map((part: string, i: number) =>
+                            i % 2 === 1
+                              ? <strong key={i} style={{ color: '#e2e8f0' }}>{part}</strong>
+                              : <span key={i}>{part}</span>
+                          )}
+                        </div>
                       )}
                       <DadosExtrasCard modulo={s.item.modulo} extras={s.item.dados_extras} />
                     </div>

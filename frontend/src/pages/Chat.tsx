@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Send, MessageSquare, Wand2, X, Check, AlertTriangle, Trash2, Zap } from 'lucide-react'
 import { useStore, ChatMessage, ChatRegularMessage, ChatProposalMessage, ChatProposalAction } from '@/store/useStore'
 import api from '@/services/api'
+import { useCostEstimates } from '@/hooks/useCostEstimates'
 
 // ─── Usage extraction ────────────────────────────────────────────────────────
 interface UsageInfo { in: number; out: number; cost: number; provider: string; model: string }
@@ -224,6 +225,8 @@ export default function ChatPage() {
   const setChatMessages = useStore((s) => s.setChatMessages)
   const clearChat       = useStore((s) => s.clearChat)
   const addTokenUsage   = useStore((s) => s.addTokenUsage)
+  const { format: fmtCost } = useCostEstimates()
+  const chatCost = fmtCost('chat')
   const [streamingText, setStreamingText] = useState('')
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -568,6 +571,7 @@ export default function ChatPage() {
         >
           <Send size={16} style={{ color: input.trim() && !loading ? '#0a0e17' : '#64748b' }} />
         </button>
+        {chatCost && <span style={{ fontSize: 10, color: '#475569', flexShrink: 0 }}>{chatCost}</span>}
       </div>
     </div>
   )

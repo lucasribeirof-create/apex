@@ -23,7 +23,7 @@ class NovaPosicao(BaseModel):
     ticker: str
     nome: str | None = None
     tipo: str                   # ACAO | FII | ETF | BDR | RF | OPCAO | CAIXA | DIVIDENDO
-    modulo: str                 # momentum | wheel | etfs | fiis | renda_fixa | alpha | dividendos | caixa
+    modulo: str                 # momentum | wheel | etfs | fiis | renda_fixa | alpha | dividendos | teses | caixa
     quantidade: float
     preco_medio: float
     stop_loss: float | None = None
@@ -36,6 +36,10 @@ class NovaPosicao(BaseModel):
     # RF
     indexador: str | None = None
     taxa: float | None = None
+    # Teses
+    tese: str | None = None
+    mercado: str | None = None        # B3 | BDR | NYSE | NASDAQ | AMEX
+    moeda: str | None = None          # BRL | USD
 
     @field_validator('ticker')
     @classmethod
@@ -279,6 +283,14 @@ def adicionar_posicao(body: NovaPosicao, user_id: Optional[int] = Depends(get_us
         indexador=body.indexador,
         taxa=body.taxa,
     )
+    # Teses-specific fields
+    if body.modulo == "teses":
+        posicao.tese = body.tese
+        posicao.mercado = body.mercado or "B3"
+        posicao.moeda = body.moeda or "BRL"
+        if posicao.moeda == "USD":
+            posicao.preco_medio_usd = body.preco_medio
+            posicao.valor_investido_usd = valor_investido
     if data_entrada:
         posicao.data_entrada = data_entrada
         posicao.data_abertura = data_entrada
@@ -297,6 +309,20 @@ def adicionar_posicao(body: NovaPosicao, user_id: Optional[int] = Depends(get_us
         taxas=0.0,
         observacao="Compra inicial (posição criada manualmente)",
     ))
+
+    # Para teses: cria aporte inicial também
+    if body.modulo == "teses":
+        from app.models import Aporte
+        db.add(Aporte(
+            position_id=posicao.id,
+            data=data_entrada or datetime.now(timezone.utc),
+            quantidade=body.quantidade,
+            preco=body.preco_medio,
+            moeda=posicao.moeda or "BRL",
+            valor_total=valor_investido,
+            nota="Aporte inicial",
+        ))
+
     db.commit()
     db.refresh(posicao)
 
@@ -591,6 +617,242 @@ def atualizar_alocacao(body: AtualizarAlocacao, user_id: Optional[int] = Depends
             "caixa": portfolio.alvo_caixa,
         },
     }
+
+
+# ─── Configurar Rebalanceamento (Wizard) ─────────────────────────────────────
+
+class ConfigurarRebalanceBody(BaseModel):
+    estrategia: str                        # CORE | ALPHA | RENDA | CUSTOM
+    score_perfil: int                      # 0-15
+    objetivo: str | None = None            # crescimento | renda_passiva | preservacao | equilibrio
+    horizonte: str | None = None           # ate_2anos | 2_5anos | 5_10anos | mais_10anos
+    descricao: str | None = None           # Texto livre: expectativas do investidor
+    alocacao: dict[str, float]             # {etfs: 30, fiis: 15, ...}
+
+
+@router.patch("/configurar-rebalance")
+def configurar_rebalance(
+    body: ConfigurarRebalanceBody,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Salva configuração de estratégia + perfil + alocação antes do rebalanceamento.
+    Chamado pelo RebalanceWizard.
+    """
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    if body.estrategia not in ESTRATEGIAS_VALIDAS:
+        raise HTTPException(status_code=400, detail=f"Estratégia inválida: {body.estrategia}")
+
+    total = sum(body.alocacao.values())
+    if not (99.0 <= total <= 101.0):
+        raise HTTPException(status_code=400, detail=f"Alocação deve somar 100%. Atual: {total:.1f}%")
+
+    # Salvar perfil do usuário
+    user.estrategia = body.estrategia
+    user.onboarding_score = max(0, min(15, body.score_perfil))
+    if body.objetivo:
+        user.objetivo_tipo = body.objetivo
+    if body.horizonte:
+        user.objetivo_prazo = body.horizonte
+    if body.descricao is not None:
+        user.objetivo_descricao = body.descricao[:2000] if body.descricao else None
+
+    # Salvar alvos de alocação no portfólio
+    for modulo, valor in body.alocacao.items():
+        col = f"alvo_{modulo}"
+        if hasattr(portfolio, col):
+            setattr(portfolio, col, round(valor, 1))
+
+    db.commit()
+
+    # Invalidar cache de sugestões
+    _portfolio_cache.delete(f"sugerir_portfolio:{portfolio.id}")
+
+    return {
+        "ok": True,
+        "estrategia": user.estrategia,
+        "score_perfil": user.onboarding_score,
+        "alocacao": {
+            "etfs": portfolio.alvo_etfs,
+            "fiis": portfolio.alvo_fiis,
+            "renda_fixa": portfolio.alvo_renda_fixa,
+            "momentum": portfolio.alvo_momentum,
+            "wheel": portfolio.alvo_wheel,
+            "alpha": portfolio.alvo_alpha,
+            "dividendos": portfolio.alvo_dividendos,
+            "caixa": portfolio.alvo_caixa,
+        },
+    }
+
+
+# ─── AI-suggested allocation ─────────────────────────────────────────────────
+
+class SugerirAlocacaoBody(BaseModel):
+    objetivo: str
+    horizonte: str
+    risco: str
+    descricao: str | None = None
+    posicoes: list[dict] | None = None  # [{modulo, valor_atual}]
+
+
+@router.post("/sugerir-alocacao")
+async def sugerir_alocacao(
+    body: SugerirAlocacaoBody,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Usa IA para sugerir alocação personalizada com base no perfil do investidor,
+    cenário macro e posições existentes.
+    """
+    from app.cerebro.client import chat, is_ai_configured
+    from app.data.cache import cache as _global_cache
+    import json
+
+    if not is_ai_configured():
+        raise HTTPException(status_code=503, detail="IA não configurada")
+
+    # Carregar dados macro do cache
+    macro_resumo = ""
+    regime_cached = _global_cache.get("market:regime")
+    if regime_cached:
+        macro_resumo += f"Regime: {regime_cached.get('regime', 'MISTO')}. "
+        macro_resumo += f"Motivo: {regime_cached.get('motivo', '')}. "
+        flags = regime_cached.get('flags', [])
+        if flags:
+            macro_resumo += f"Sinais: {', '.join(flags[:5])}. "
+
+    try:
+        from app.cerebro.macro import montar_macro
+        macro_ctx = await montar_macro()
+        if macro_ctx:
+            macro_resumo += macro_ctx.resumo_texto()[:1500]
+    except Exception:
+        pass
+
+    # Resumo das posições existentes
+    posicoes_txt = ""
+    if body.posicoes:
+        total = sum(p.get("valor_atual", 0) for p in body.posicoes)
+        if total > 0:
+            por_mod: dict[str, float] = {}
+            for p in body.posicoes:
+                mod = p.get("modulo", "caixa")
+                por_mod[mod] = por_mod.get(mod, 0) + p.get("valor_atual", 0)
+            posicoes_txt = "Alocação ATUAL da carteira:\n"
+            for mod, val in sorted(por_mod.items(), key=lambda x: -x[1]):
+                posicoes_txt += f"  - {mod}: R${val:,.0f} ({val/total*100:.0f}%)\n"
+
+    objetivo_map = {
+        "crescimento": "Crescimento de capital",
+        "renda_passiva": "Renda passiva (dividendos/FIIs/juros)",
+        "preservacao": "Preservação de patrimônio",
+        "equilibrio": "Equilíbrio entre crescimento e renda",
+    }
+    risco_map = {
+        "conservador": "Conservador (max -10%)",
+        "moderado": "Moderado (aceita -15% a -20%)",
+        "agressivo": "Agressivo (aceita -30%)",
+        "muito_agressivo": "Muito agressivo (queda é oportunidade)",
+    }
+    horizonte_map = {
+        "ate_2anos": "Até 2 anos",
+        "2_5anos": "2 a 5 anos",
+        "5_10anos": "5 a 10 anos",
+        "mais_10anos": "10+ anos",
+    }
+
+    system = """Você é o CIO do APEX — gestor profissional de carteiras.
+Sua tarefa: recomendar a ALOCAÇÃO PERCENTUAL ideal entre 8 módulos de investimento.
+
+Módulos disponíveis:
+- etfs: ETFs diversificados (renda variável internacional/nacional)
+- fiis: Fundos Imobiliários (renda passiva + valorização)
+- renda_fixa: Renda Fixa (Selic, IPCA+, Prefixado)
+- momentum: Ações de momentum técnico (alto risco, rotação ativa)
+- wheel: Estratégia de opções Wheel (premium selling)
+- alpha: Stock picking fundamentalista (valor / crescimento)
+- dividendos: Ações pagadoras de dividendos consistentes
+- caixa: Reserva de oportunidade/proteção
+
+REGRAS:
+1. Os 8 módulos DEVEM somar EXATAMENTE 100.
+2. Cada valor deve ser múltiplo de 5 (0, 5, 10, 15...).
+3. Sua sugestão deve refletir o cenário MACRO ATUAL + perfil do investidor.
+4. Se macro é hostil (risk-off): mais caixa + renda_fixa, menos momentum/alpha.
+5. Se investidor quer renda: mais fiis + dividendos + renda_fixa.
+6. Se investidor quer crescimento agressivo: mais momentum + alpha + etfs.
+7. Considere a carteira ATUAL do investidor — mudanças drásticas sem razão macro forte não fazem sentido.
+8. REGRA CRÍTICA — DESCRIÇÃO DO INVESTIDOR TEM PRIORIDADE: Se o investidor expressou preferência EXPLÍCITA por módulos específicos na descrição (ex: "só ETFs", "sem ações", "quero FIIs e renda fixa", "não quero opções"), RESPEITE essa preferência ACIMA de qualquer sugestão genérica de perfil. Módulos que o investidor NÃO quer = 0%. Concentre o capital nos módulos desejados.
+
+Retorne APENAS JSON válido, sem markdown, sem texto antes/depois:
+{"etfs": N, "fiis": N, "renda_fixa": N, "momentum": N, "wheel": N, "alpha": N, "dividendos": N, "caixa": N, "racional": "Explique em 4-6 linhas: (1) a lógica macro que guiou a alocação, (2) por que cada módulo com peso >0 foi escolhido e nessa proporção, (3) o que está sendo protegido ou buscado. Se o investidor especificou preferências na descrição, explique como foram respeitadas. Use dados concretos do cenário quando disponíveis."}"""
+
+    user_msg = f"""PERFIL DO INVESTIDOR:
+- Objetivo: {objetivo_map.get(body.objetivo, body.objetivo)}
+- Tolerância a risco: {risco_map.get(body.risco, body.risco)}
+- Horizonte: {horizonte_map.get(body.horizonte, body.horizonte)}
+"""
+    if body.descricao:
+        user_msg += (
+            f"\n⚠️ DESCRIÇÃO DO INVESTIDOR (PRIORIDADE MÁXIMA — respeite estas preferências acima de tudo):\n"
+            f"\"{body.descricao[:2000]}\"\n"
+        )
+    if posicoes_txt:
+        user_msg += f"\n{posicoes_txt}\n"
+    if macro_resumo:
+        user_msg += f"\nCENÁRIO MACRO ATUAL:\n{macro_resumo}\n"
+
+    user_msg += "\nCom base em TUDO acima, sugira a alocação ideal. Retorne APENAS o JSON."
+
+    try:
+        resposta = await chat(system=system, messages=[{"role": "user", "content": user_msg}], max_tokens=500)
+
+        # Parse JSON — tolerante a markdown
+        txt = resposta.strip()
+        if txt.startswith("```"):
+            txt = txt.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        data = json.loads(txt)
+
+        modulos = ["etfs", "fiis", "renda_fixa", "momentum", "wheel", "alpha", "dividendos", "caixa"]
+        alocacao = {}
+        for m in modulos:
+            alocacao[m] = max(0, min(100, int(data.get(m, 0))))
+
+        # Ajustar para somar 100
+        total = sum(alocacao.values())
+        if total != 100:
+            diff = 100 - total
+            alocacao["caixa"] = max(0, alocacao["caixa"] + diff)
+
+        return {
+            "alocacao": alocacao,
+            "racional": data.get("racional", ""),
+        }
+    except Exception as e:
+        logger.warning("sugerir-alocacao: IA falhou (%s), retornando preset", e)
+        # Fallback: preset mecânico
+        from app.api.routes.onboarding import _get_alocacao
+        risco_score = {"conservador": 2, "moderado": 5, "agressivo": 8, "muito_agressivo": 11}
+        horiz_score = {"ate_2anos": 0, "2_5anos": 1, "5_10anos": 2, "mais_10anos": 4}
+        score = min(15, risco_score.get(body.risco, 5) + horiz_score.get(body.horizonte, 1))
+        if body.objetivo == "renda_passiva":
+            est = "RENDA"
+        elif score >= 11:
+            est = "ALPHA"
+        else:
+            est = "CORE"
+        preset = _get_alocacao(est)
+        return {"alocacao": preset, "racional": f"Sugestão baseada no perfil {est} (fallback)."}
 
 
 # ─── Multi-Portfolio: listagem, ativação, criação ─────────────────────────────
@@ -1222,7 +1484,7 @@ async def sugerir_portfolio(
     from app.cerebro.especialistas import prefetch as motor_prefetch
     from app.cerebro.especialistas.watchlist import (
         FIIS_WATCHLIST_FLAT, DIVIDENDOS_WATCHLIST, MOMENTUM_WATCHLIST,
-        WHEEL_WATCHLIST, ALPHA_WATCHLIST,
+        WHEEL_WATCHLIST, ALPHA_WATCHLIST, ETFS_WATCHLIST_FLAT,
     )
 
     user = (db.query(User).filter(User.id == user_id).first() if user_id
@@ -1306,9 +1568,29 @@ async def sugerir_portfolio(
     except Exception as _ks_err:
         logger.debug("sugerir-portfolio: kill switch check falhou (%s) — prosseguindo", _ks_err)
 
+    # ── Notícias frescas — CEO Brain precisa de contexto real (não cache stale) ──
+    _noticias_frescas: str = ""
+    try:
+        from app.data.news_collector import coletar_noticias as _coletar_news
+        from app.data.web_search import buscar_macro_web as _buscar_macro
+        from app.data.cache import cache as _news_cache
+        _news_cache.delete("news:snapshot")
+        _news_snap, _macro_web = await asyncio.gather(
+            _coletar_news(), _buscar_macro(), return_exceptions=True,
+        )
+        _partes: list[str] = []
+        if not isinstance(_news_snap, Exception) and _news_snap:
+            _partes.append(_news_snap.para_prompt(max_brasil=8, max_global=6, max_geo=4))
+        if not isinstance(_macro_web, Exception) and _macro_web:
+            _partes.append(str(_macro_web))
+        _noticias_frescas = "\n\n".join(_partes)
+    except Exception as _nw_err:
+        logger.debug("sugerir-portfolio: notícias frescas falharam (%s) — CEO opera sem news", _nw_err)
+
     # Pre-fetch: busca dados de mercado UMA VEZ antes de disparar os motores
     # Isso evita que 7 motores chamem yfinance para os mesmos tickers
     _all_tickers: set[str] = set()
+    if cap_etfs > 0:       _all_tickers.update(ETFS_WATCHLIST_FLAT)
     if cap_fiis > 0:       _all_tickers.update(FIIS_WATCHLIST_FLAT)
     if cap_dividendos > 0: _all_tickers.update(DIVIDENDOS_WATCHLIST)
     if cap_momentum > 0:   _all_tickers.update(MOMENTUM_WATCHLIST)
@@ -1320,12 +1602,17 @@ async def sugerir_portfolio(
         except Exception as _pf_err:
             logger.warning("sugerir-portfolio: prefetch falhou (%s) — motores usarão fallback direto", _pf_err)
 
-    # Tickers já em carteira: motores não devem sugeri-los de novo
+    # Tickers já em carteira
     _posicoes_db = db.query(Position).filter(
         Position.portfolio_id == portfolio.id,
         Position.ativa == True,
     ).all() if portfolio else []
-    _excluir_tickers = [p.ticker for p in _posicoes_db if p.ticker and p.ticker != "CAIXA"]
+    # No rebalanceamento, motores devem poder reavaliar ativos existentes (manter/aumentar/trocar)
+    # Na montagem inicial, evita duplicar ativos que já estão em carteira
+    if body.modo == "rebalanceamento":
+        _excluir_tickers: list[str] = []
+    else:
+        _excluir_tickers = [p.ticker for p in _posicoes_db if p.ticker and p.ticker != "CAIXA"]
 
     tarefas: list = []
     labels:  list = []
@@ -1333,6 +1620,7 @@ async def sugerir_portfolio(
     # ── Ranking setorial (Fase 2 — bonus/penalty nos motores equity) ──────
     _ranking_setorial = None
     _regime = "NEUTRO"
+    _macro_ctx = None
     try:
         from app.cerebro.setor import montar_ranking
         from app.cerebro.macro import montar_macro
@@ -1363,25 +1651,25 @@ async def sugerir_portfolio(
     }
 
     if cap_etfs > 0:
-        tarefas.append(motor_etfs.rodar(cap_etfs, estrategia=estrategia))
+        tarefas.append(motor_etfs.rodar(cap_etfs, estrategia=estrategia, macro_context=_macro_ctx))
         labels.append("etfs")
     if cap_fiis > 0:
-        tarefas.append(motor_fiis.rodar(cap_fiis, estrategia=estrategia, excluir_tickers=_excluir_tickers))
+        tarefas.append(motor_fiis.rodar(cap_fiis, estrategia=estrategia, excluir_tickers=_excluir_tickers, macro_context=_macro_ctx))
         labels.append("fiis")
     if cap_rf > 0:
-        tarefas.append(motor_renda_fixa.rodar(cap_rf, estrategia=estrategia))
+        tarefas.append(motor_renda_fixa.rodar(cap_rf, estrategia=estrategia, macro_context=_macro_ctx))
         labels.append("renda_fixa")
     if cap_momentum > 0:
-        tarefas.append(motor_momentum.rodar(cap_momentum, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial, **_sizing_kwargs))
+        tarefas.append(motor_momentum.rodar(cap_momentum, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial, macro_context=_macro_ctx, **_sizing_kwargs))
         labels.append("momentum")
     if cap_wheel > 0:
-        tarefas.append(motor_wheel.rodar(cap_wheel, excluir_tickers=_excluir_tickers, tickers_carteira=_excluir_tickers))
+        tarefas.append(motor_wheel.rodar(cap_wheel, excluir_tickers=_excluir_tickers, tickers_carteira=_excluir_tickers, macro_context=_macro_ctx))
         labels.append("wheel")
     if cap_alpha > 0:
-        tarefas.append(motor_alpha.rodar(cap_alpha, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial, **_sizing_kwargs))
+        tarefas.append(motor_alpha.rodar(cap_alpha, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial, macro_context=_macro_ctx, **_sizing_kwargs))
         labels.append("alpha")
     if cap_dividendos > 0:
-        tarefas.append(motor_dividendos.rodar(cap_dividendos, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial, **_sizing_kwargs))
+        tarefas.append(motor_dividendos.rodar(cap_dividendos, excluir_tickers=_excluir_tickers, ranking_setorial=_ranking_setorial, macro_context=_macro_ctx, **_sizing_kwargs))
         labels.append("dividendos")
 
     # Teses: módulo de convicção manual — capital é reservado e exibido para entrada manual
@@ -1449,6 +1737,8 @@ async def sugerir_portfolio(
         score_perfil=_score_perfil,
         contexto=_ctx_cerebro,
         modo=body.modo,
+        descricao_investidor=getattr(user, "objetivo_descricao", None),
+        noticias_frescas=_noticias_frescas or None,
     )
 
     # ── Converte sugestões assinadas pelo CEO → dict compatível com o frontend ──

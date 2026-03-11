@@ -34,6 +34,7 @@ Dados extras por sugestão:
 import io
 import zipfile
 import asyncio
+import logging
 from datetime import date, timedelta
 from typing import Optional
 
@@ -46,6 +47,8 @@ from app.cerebro.especialistas import SugestaoMotor
 from app.cerebro.especialistas.watchlist import WHEEL_WATCHLIST
 from app.cerebro.especialistas import prefetch as _pf
 from app.data.bcb_client import get_selic
+
+logger = logging.getLogger("apex.motor_wheel")
 
 # ── Parâmetros ───────────────────────────────────────────────────────────────
 _CDI_FALLBACK          = 14.75   # % a.a. — somente quando BCB offline
@@ -761,6 +764,7 @@ async def rodar(
     n_ativos: int = 3,
     excluir_tickers: list[str] | None = None,
     tickers_carteira: list[str] | None = None,
+    macro_context: object | None = None,
 ) -> list[SugestaoMotor]:
     """
     Roda o motor de Opções sobre a watchlist e retorna os melhores candidatos.
@@ -866,10 +870,81 @@ async def rodar(
     selecionados: list[dict] = []
     for c in candidatos:
         key = f"{c['ticker']}_{c['estrategia']}"
-        if key not in vistos and len(selecionados) < n_ativos:
+        if key not in vistos and len(selecionados) < n_ativos * 2:  # more for AI to pick from
             vistos.add(key)
             selecionados.append(c)
 
+    if not selecionados:
+        return []
+
+    # ── Fallback algorítmico (top-N diretamente) ─────────────────────────
+    fallback = _construir_saida_wheel(selecionados[:n_ativos], capital)
+
+    # ── Enriquecer candidatos para IA ─────────────────────────────────────
+    candidatos_enriched = []
+    for c in selecionados:
+        opcao = c["opcao"]
+        ind = c["ind"]
+        candidatos_enriched.append({
+            "ticker": c["ticker"],
+            "nome": f"{c['ticker']} — {c['estrategia']} {opcao['codigo']}",
+            "tipo": "ACAO",
+            "preco": c["preco"],
+            "estrategia_opcao": c["estrategia"],
+            "tipo_opcao": c["tipo_opcao"],
+            "strike": float(opcao["strike"]),
+            "vencimento": str(opcao["vencimento"]),
+            "dias_uteis": int(opcao["dias"]),
+            "retorno_anual_pct": float(opcao.get("retorno_anual", 0)),
+            "multiplo_cdi": float(opcao.get("multiplo_cdi", 0)),
+            "dist_otm_pct": float(opcao.get("dist_pct", 0)),
+            "rsi": ind["rsi"],
+            "dist_mm200_pct": ind["dist_mm200"],
+            "momentum_20d": ind["momentum20"],
+            "score_algoritmico": c["score_total"],
+            "razoes_setup": c.get("razoes_setup", []),
+            "dados_extras": {
+                "estrategia": c["estrategia"],
+                "opcao_sugerida": str(opcao["codigo"]),
+                "strike": float(opcao["strike"]),
+                "vencimento": str(opcao["vencimento"]),
+                "rsi": ind["rsi"],
+            },
+        })
+
+    # ── Obter resumo macro ────────────────────────────────────────────────
+    macro_resumo = ""
+    if macro_context and hasattr(macro_context, "resumo_texto"):
+        macro_resumo = macro_context.resumo_texto()
+    else:
+        try:
+            from app.cerebro.macro import montar_macro
+            ctx = await montar_macro()
+            macro_resumo = ctx.resumo_texto()
+        except Exception:
+            macro_resumo = "Dados macro indisponíveis."
+
+    # ── Chamar IA especialista ────────────────────────────────────────────
+    from app.cerebro.especialistas._ai_motor import selecionar_com_ia
+    from app.cerebro.prompts import build_motor_prompt
+
+    resultado_ia = await selecionar_com_ia(
+        modulo="wheel",
+        candidatos_enriched=candidatos_enriched,
+        macro_resumo=macro_resumo,
+        estrategia="ALPHA",
+        capital=capital,
+        motor_system_prompt=build_motor_prompt("wheel"),
+        n_ativos=n_ativos,
+        max_tokens=3000,
+        fallback_candidatos=fallback,
+    )
+
+    return resultado_ia if resultado_ia else fallback
+
+
+def _construir_saida_wheel(selecionados: list[dict], capital: float) -> list[SugestaoMotor]:
+    """Construir SugestaoMotor list a partir de candidatos já selecionados."""
     if not selecionados:
         return []
 

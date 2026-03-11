@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { RefreshCw, Sun, TrendingUp, TrendingDown, Download } from 'lucide-react'
 import api from '@/services/api'
 import { useStore } from '@/store/useStore'
+import { useCostEstimates } from '@/hooks/useCostEstimates'
 import ThinkingSteps from '@/components/ThinkingSteps'
 
 interface BriefingData {
@@ -43,6 +44,8 @@ function RegimeBadge({ regime }: { regime: string }) {
 
 export default function BriefingPage() {
   const { userId } = useStore()
+  const { format: fmtCost } = useCostEstimates()
+  const briefingCost = fmtCost('briefing')
   const [briefing, setBriefing] = useState<BriefingData | null>(null)
   const [macro, setMacro] = useState<MacroData | null>(null)
   const [loading, setLoading] = useState(false)
@@ -74,10 +77,9 @@ export default function BriefingPage() {
         if (macroRes.data) setMacro(macroRes.data)
         setInitialCheck(false)
       } catch {
-        // 404 = nenhum briefing hoje — inicia geração automática
+        // 404 = nenhum briefing hoje — mostra tela para gerar manualmente
         api.get('/market/macro').catch(() => null).then((r: any) => { if (r?.data) setMacro(r.data) })
         setInitialCheck(false)
-        streamBriefing(false)
       }
     }
     checkExisting()
@@ -275,6 +277,7 @@ export default function BriefingPage() {
             >
               <RefreshCw size={16} className={(loading || isStreaming) ? 'animate-spin' : ''} />
               {(loading || isStreaming) ? 'Gerando...' : 'Atualizar'}
+              {!loading && !isStreaming && briefingCost && <span className="text-[10px]" style={{ color: '#64748b' }}>{briefingCost}</span>}
             </button>
           </div>
         )}
@@ -304,6 +307,7 @@ export default function BriefingPage() {
           <button onClick={() => streamBriefing(false)} className="btn-primary flex items-center gap-2 text-sm px-6 py-2.5">
             <Sun size={15} />
             Gerar Morning Call
+            {briefingCost && <span className="text-[10px]" style={{ color: 'rgba(10,14,23,0.5)' }}>{briefingCost}</span>}
           </button>
         </motion.div>
       )}
@@ -416,9 +420,9 @@ export default function BriefingPage() {
               <span className="text-xs font-mono" style={{ color: '#00E676' }}>gerando ao vivo</span>
             </div>
           </div>
-          {/* Texto streamado — sem markdown (pode estar incompleto) */}
+          {/* Texto streamado — formatado ao vivo */}
           <div ref={streamedRef} className="text-sm leading-relaxed overflow-y-auto" style={{ color: '#f1f5f9', maxHeight: '60vh' }}>
-            {streamedText}
+            {renderText(streamedText)}
             {/* cursor piscante */}
             <span className="inline-block w-0.5 h-4 ml-0.5 align-middle animate-pulse" style={{ background: '#00E676' }} />
           </div>
