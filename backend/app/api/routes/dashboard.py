@@ -36,6 +36,21 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
             portfolio.patrimonio_mes_inicio = portfolio.patrimonio_total or 0.0
         db.commit()
 
+    # Inicializar patrimônio de referência se ainda for 0 (1º acesso)
+    _pat_changed = False
+    pat_total = portfolio.patrimonio_total or 0.0
+    if not portfolio.patrimonio_ontem and pat_total > 0:
+        portfolio.patrimonio_ontem = pat_total
+        _pat_changed = True
+    if not portfolio.patrimonio_mes_inicio and pat_total > 0:
+        portfolio.patrimonio_mes_inicio = pat_total
+        _pat_changed = True
+    if not portfolio.patrimonio_inicio and pat_total > 0:
+        portfolio.patrimonio_inicio = pat_total
+        _pat_changed = True
+    if _pat_changed:
+        db.commit()
+
     # Buscar posições ativas
     posicoes = db.query(Position).filter(
         Position.portfolio_id == portfolio.id,
@@ -126,6 +141,30 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
     # Dados macro
     macro_br, macro_global = await get_macro_br(), await get_macro_global()
 
+    # ── Renda mensal projetada ─────────────────────────────────────────────────
+    # Estima dividendos/proventos mensais usando DY das cotações BRAPI
+    renda_anual_projetada = 0.0
+    valor_investido_total = 0.0
+    for p in posicoes:
+        vi = p.valor_investido or 0.0
+        valor_investido_total += vi
+        cot = cotacoes.get(p.ticker, {})
+        dy = cot.get("dividendYield")  # decimal (ex: 0.08 = 8%)
+        if dy and p.tipo in ("ACAO", "FII", "BDR"):
+            preco = cot.get("regularMarketPrice", p.preco_atual or p.preco_medio)
+            renda_anual_projetada += preco * p.quantidade * (dy if dy < 1 else dy / 100)
+        elif p.tipo == "RF" and p.preco_atual and p.quantidade:
+            # Renda fixa: estimativa conservadora = Selic × valor / 100
+            _selic = macro_br.get("selic") or 0
+            renda_anual_projetada += p.preco_atual * p.quantidade * _selic / 100
+
+    renda_mes = round(renda_anual_projetada / 12, 2) if renda_anual_projetada > 0 else None
+    yoc = round(renda_anual_projetada / valor_investido_total * 100, 2) if valor_investido_total > 0 and renda_anual_projetada > 0 else None
+
+    # P&L do dia em reais
+    pat_ontem = portfolio.patrimonio_ontem or patrimonio_atual
+    var_dia_reais = round(patrimonio_atual - pat_ontem, 2)
+
     return {
         "user": {"nome": user.name, "estrategia": user.estrategia},
         "patrimonio": {
@@ -134,6 +173,7 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
             "var_dia_pct": round(
                 (patrimonio_atual / portfolio.patrimonio_ontem - 1) * 100, 2
             ) if portfolio.patrimonio_ontem else 0,
+            "var_dia_reais": var_dia_reais,
             "var_mes_pct": round(
                 (patrimonio_atual / portfolio.patrimonio_mes_inicio - 1) * 100, 2
             ) if portfolio.patrimonio_mes_inicio else 0,
@@ -141,6 +181,12 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
             "total_pct": round(
                 (patrimonio_atual / portfolio.patrimonio_inicio - 1) * 100, 2
             ) if portfolio.patrimonio_inicio else 0,
+            "valor_investido_total": round(valor_investido_total, 2),
+        },
+        "renda": {
+            "renda_mes": renda_mes,
+            "renda_anual_projetada": round(renda_anual_projetada, 2) if renda_anual_projetada > 0 else None,
+            "yoc": yoc,
         },
         "alocacao": {
             "atual": alocacao_atual,

@@ -1,6 +1,10 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
-import { TrendingUp, Activity, DollarSign, Calendar, BarChart2, Globe, Shield, FileText, AlertTriangle } from 'lucide-react'
+import {
+  TrendingUp, DollarSign, Globe,
+  Shield, FileText, AlertTriangle, RefreshCw, Zap, ArrowUpRight,
+  ArrowDownRight, Crosshair
+} from 'lucide-react'
 import api from '@/services/api'
 import { useStore } from '@/store/useStore'
 
@@ -33,8 +37,19 @@ function fmt(v: number) {
   return v.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
 }
 
-function fmtPct(v: number) {
-  return `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`
+function fmtR$(v: number) {
+  return `R$ ${v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+function Skeleton({ className = '', h = 'h-24' }: { className?: string; h?: string }) {
+  return (
+    <div className={`apex-card ${h} ${className} animate-pulse`} style={{ background: 'rgba(30,41,59,0.5)' }}>
+      <div className="p-5 space-y-3">
+        <div className="h-3 w-24 rounded" style={{ background: '#1e293b' }} />
+        <div className="h-6 w-32 rounded" style={{ background: '#1e293b' }} />
+      </div>
+    </div>
+  )
 }
 
 export default function DashboardPage() {
@@ -45,39 +60,51 @@ export default function DashboardPage() {
   const [macroData, setMacroData] = useState<any>(null)
   const [tesesData, setTesesData] = useState<any>(null)
   const [stressData, setStressData] = useState<any>(null)
+  const [perfData, setPerfData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [v2Loading, setV2Loading] = useState({ macro: true, teses: true, stress: true, perf: true })
 
-  useEffect(() => {
-    async function load() {
-      try {
-        const [dashRes, regimeRes] = await Promise.all([
-          api.get('/dashboard/'),
-          api.get('/market/regime'),
-        ])
-        setDash(dashRes.data)
-        setRegime(regimeRes.data)
+  async function loadDashboard() {
+    setLoading(true)
+    setError(null)
+    setV2Loading({ macro: true, teses: true, stress: true, perf: true })
+    try {
+      const [dashRes, regimeRes] = await Promise.all([
+        api.get('/dashboard/'),
+        api.get('/market/regime'),
+      ])
+      setDash(dashRes.data)
+      setRegime(regimeRes.data)
 
-        // V2 endpoints — load in background
-        api.get('/dashboard/macro').then(r => setMacroData(r.data)).catch(e => console.warn('Dashboard macro:', e))
-        api.get('/dashboard/teses').then(r => setTesesData(r.data)).catch(e => console.warn('Dashboard teses:', e))
-        api.get('/dashboard/stress').then(r => setStressData(r.data)).catch(e => console.warn('Dashboard stress:', e))
-      } catch (err) {
-        console.error('Dashboard load error:', err)
-      } finally {
-        setLoading(false)
-      }
+      // V2 endpoints — load in background
+      api.get('/dashboard/macro').then(r => setMacroData(r.data)).catch(e => console.warn('Dashboard macro:', e)).finally(() => setV2Loading(s => ({ ...s, macro: false })))
+      api.get('/dashboard/teses').then(r => setTesesData(r.data)).catch(e => console.warn('Dashboard teses:', e)).finally(() => setV2Loading(s => ({ ...s, teses: false })))
+      api.get('/dashboard/stress').then(r => setStressData(r.data)).catch(e => console.warn('Dashboard stress:', e)).finally(() => setV2Loading(s => ({ ...s, stress: false })))
+      api.get('/dashboard/performance').then(r => setPerfData(r.data)).catch(e => console.warn('Dashboard perf:', e)).finally(() => setV2Loading(s => ({ ...s, perf: false })))
+    } catch (err: any) {
+      console.error('Dashboard load error:', err)
+      setError(err?.response?.data?.detail || 'Erro ao carregar dashboard')
+    } finally {
+      setLoading(false)
     }
-    load()
-  }, [])
+  }
+
+  useEffect(() => { loadDashboard() }, [])
 
   // Dados derivados
   const patrimonio = dash?.patrimonio?.atual ?? 0
   const varDia = dash?.patrimonio?.var_dia_pct ?? 0
+  const varDiaReais = dash?.patrimonio?.var_dia_reais ?? 0
   const varMes = dash?.patrimonio?.var_mes_pct ?? null
   const totalPct = dash?.patrimonio?.total_pct ?? 0
-  const rendaMes = dash?.macro?.renda_mes ?? null
+  const rendaMes = dash?.renda?.renda_mes ?? null
+  const rendaAnual = dash?.renda?.renda_anual_projetada ?? null
+  const yoc = dash?.renda?.yoc ?? null
   const selic = dash?.macro?.selic
   const ibov = dash?.macro?.ibov
+  const valorInvestido = dash?.patrimonio?.valor_investido_total ?? 0
+  const plTotal = patrimonio - valorInvestido
 
   const alocacaoAtual: Record<string, number> = dash?.alocacao?.atual ?? {}
   const alocacaoAlvo: Record<string, number> = dash?.alocacao?.alvo ?? {}
@@ -95,36 +122,37 @@ export default function DashboardPage() {
   const regimeColor = REGIME_COLORS[regimeNome] ?? '#FFD740'
   const regimeMotivo: string = regime?.motivo ?? '–'
 
-  const metrics = [
-    {
-      label: 'Patrimônio Total',
-      value: loading ? '–' : `R$ ${fmt(patrimonio)}`,
-      change: loading ? '' : `${fmtPct(varDia)} hoje`,
-      positive: varDia >= 0,
-      icon: DollarSign,
-    },
-    {
-      label: 'Retorno no Mês',
-      value: loading ? '–' : (varMes != null ? fmtPct(varMes) : '–'),
-      change: selic != null ? `Selic ${selic.toFixed(2)}% a.a.` : 'Selic –',
-      positive: (varMes ?? 0) >= 0,
-      icon: TrendingUp,
-    },
-    {
-      label: 'Retorno Total',
-      value: loading ? '–' : fmtPct(totalPct),
-      change: ibov != null ? `IBOV ${fmtPct(ibov)}` : 'vs IBOV –',
-      positive: totalPct >= 0,
-      icon: Activity,
-    },
-    {
-      label: 'Renda do Mês',
-      value: rendaMes != null ? `R$ ${fmt(rendaMes)}` : '–',
-      change: 'Dividendos + FIIs',
-      positive: true,
-      icon: Calendar,
-    },
-  ]
+  // Top Movers — gainers & losers
+  const posicoes: any[] = dash?.posicoes ?? []
+  const tradeable = posicoes.filter((p: any) => p.tipo !== 'CAIXA' && p.tipo !== 'RF')
+  const sorted = [...tradeable].sort((a: any, b: any) => b.pl_percentual - a.pl_percentual)
+  const topGainers = sorted.slice(0, 3).filter((p: any) => p.pl_percentual > 0)
+  const topLosers = sorted.slice(-3).reverse().filter((p: any) => p.pl_percentual < 0)
+
+  // Alertas consolidados
+  const alertas: { tipo: 'danger' | 'warning' | 'info'; texto: string }[] = []
+  const desvios = dash?.alocacao?.desvios ?? {}
+  for (const [mod, dev] of Object.entries(desvios) as any) {
+    if (dev.semaforo === 'vermelho') {
+      const lbl = MODULE_LABELS[mod]?.label ?? mod
+      alertas.push({ tipo: 'danger', texto: `${lbl}: desvio de ${dev.desvio > 0 ? '+' : ''}${dev.desvio.toFixed(1)}% da meta` })
+    }
+  }
+  for (const p of posicoes) {
+    if (p.stop_loss && p.preco_atual) {
+      const dist = ((p.preco_atual - p.stop_loss) / p.preco_atual) * 100
+      if (dist > 0 && dist < 5) {
+        alertas.push({ tipo: 'warning', texto: `${p.ticker}: apenas ${dist.toFixed(1)}% acima do stop (R$${p.stop_loss.toFixed(2)})` })
+      } else if (dist <= 0) {
+        alertas.push({ tipo: 'danger', texto: `${p.ticker}: ABAIXO do stop loss (R$${p.stop_loss.toFixed(2)})` })
+      }
+    }
+  }
+  if (tesesData?.alertas?.length > 0) {
+    for (const a of tesesData.alertas.slice(0, 3)) {
+      alertas.push({ tipo: 'warning', texto: a })
+    }
+  }
 
   if (loading) {
     return (
@@ -137,14 +165,37 @@ export default function DashboardPage() {
     )
   }
 
+  if (error) {
+    return (
+      <div className="p-8 flex items-center justify-center h-64">
+        <div className="flex flex-col items-center gap-4">
+          <AlertTriangle size={32} style={{ color: '#FF5252' }} />
+          <p className="text-sm" style={{ color: '#94a3b8' }}>{error}</p>
+          <button
+            onClick={loadDashboard}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all"
+            style={{ background: 'rgba(0,230,118,0.1)', color: '#00E676', border: '1px solid rgba(0,230,118,0.2)' }}
+          >
+            <RefreshCw size={14} /> Tentar novamente
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="p-8 space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold" style={{ color: '#f1f5f9' }}>Dashboard</h1>
-        <p className="text-sm mt-1" style={{ color: '#64748b' }}>
-          {new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold" style={{ color: '#f1f5f9' }}>Dashboard</h1>
+          <p className="text-sm mt-1" style={{ color: '#64748b' }}>
+            {new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}
+          </p>
+        </div>
+        <button onClick={loadDashboard} className="p-2 rounded-lg transition-all hover:scale-105" style={{ background: 'rgba(100,116,139,0.1)' }} title="Atualizar">
+          <RefreshCw size={16} style={{ color: '#64748b' }} />
+        </button>
       </div>
 
       {/* RENDA Strategy: yield metrics */}
@@ -152,7 +203,7 @@ export default function DashboardPage() {
         <motion.div
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2 }}
+          transition={{ delay: 0.15 }}
           className="rounded-xl p-5 space-y-4"
           style={{ background: 'rgba(0,191,165,0.04)', border: '1px solid rgba(0,191,165,0.15)' }}
         >
@@ -161,9 +212,9 @@ export default function DashboardPage() {
           </div>
           <div className="grid grid-cols-3 gap-4">
             {[
-              { label: 'Renda Mensal Projetada', value: rendaMes != null ? `R$ ${fmt(rendaMes)}` : '–', sub: 'Dividendos + JCP + FIIs', color: '#00BFA5' },
-              { label: 'Yield on Cost', value: '–', sub: 'Sobre preço médio', color: '#00BFA5' },
-              { label: 'Cobertura da Meta', value: '–', sub: 'Aguardando meta configurada', color: '#FFD740' },
+              { label: 'Renda Mensal Projetada', value: rendaMes != null ? fmtR$(rendaMes) : '–', sub: 'Dividendos + JCP + FIIs', color: '#00BFA5' },
+              { label: 'Yield on Cost', value: yoc != null && yoc > 0 ? `${yoc.toFixed(2)}%` : '–', sub: 'Sobre preço médio', color: '#00BFA5' },
+              { label: 'Renda Anual Projetada', value: rendaAnual != null ? fmtR$(rendaAnual) : '–', sub: 'Projeção 12 meses', color: '#00BFA5' },
             ].map((item) => (
               <div key={item.label} className="rounded-lg p-4" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
                 <p className="text-xs font-mono uppercase tracking-wider mb-2" style={{ color: '#64748b' }}>{item.label}</p>
@@ -177,44 +228,129 @@ export default function DashboardPage() {
 
       {/* Metric Cards */}
       <div className="grid grid-cols-4 gap-4">
-        {metrics.map((m, i) => (
-          <motion.div
-            key={m.label}
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: i * 0.08 }}
-            className="apex-card p-5"
-          >
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>{m.label}</span>
-              <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'rgba(0, 230, 118, 0.08)' }}>
-                <m.icon size={15} style={{ color: '#00E676' }} />
-              </div>
+        {/* Patrimônio */}
+        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }} className="apex-card p-5">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>Patrimônio</span>
+            <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'rgba(0,230,118,0.08)' }}>
+              <DollarSign size={15} style={{ color: '#00E676' }} />
             </div>
-            <p className="text-xl font-bold font-data" style={{ color: '#f1f5f9' }}>{m.value}</p>
-            <p className="text-xs mt-1" style={{ color: m.positive ? '#00E676' : '#FF5252' }}>{m.change}</p>
-          </motion.div>
-        ))}
+          </div>
+          <p className="text-xl font-bold font-data" style={{ color: '#f1f5f9' }}>R$ {fmt(patrimonio)}</p>
+          <p className="text-xs mt-1" style={{ color: varDiaReais >= 0 ? '#00E676' : '#FF5252' }}>
+            {varDiaReais >= 0 ? '+' : ''}{fmtR$(varDiaReais)} hoje ({varDia >= 0 ? '+' : ''}{varDia.toFixed(2)}%)
+          </p>
+        </motion.div>
+
+        {/* Retorno Mês */}
+        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="apex-card p-5">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>Retorno Mês</span>
+            <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'rgba(0,230,118,0.08)' }}>
+              <TrendingUp size={15} style={{ color: '#00E676' }} />
+            </div>
+          </div>
+          <p className="text-xl font-bold font-data" style={{ color: '#f1f5f9' }}>{(varMes ?? 0) >= 0 ? '+' : ''}{(varMes ?? 0).toFixed(2)}%</p>
+          <p className="text-xs mt-1" style={{ color: '#64748b' }}>vs CDI: –</p>
+        </motion.div>
+
+        {/* P&L Total */}
+        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }} className="apex-card p-5">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>P&L Total</span>
+            <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: plTotal >= 0 ? 'rgba(0,230,118,0.08)' : 'rgba(255,82,82,0.08)' }}>
+              {plTotal >= 0 ? <ArrowUpRight size={15} style={{ color: '#00E676' }} /> : <ArrowDownRight size={15} style={{ color: '#FF5252' }} />}
+            </div>
+          </div>
+          <p className="text-xl font-bold font-data" style={{ color: plTotal >= 0 ? '#00E676' : '#FF5252' }}>
+            {plTotal >= 0 ? '+' : ''}{fmtR$(plTotal)}
+          </p>
+          <p className="text-xs mt-1" style={{ color: '#64748b' }}>
+            Investido: R$ {fmt(valorInvestido)}
+          </p>
+        </motion.div>
+
+        {/* Renda Projetada (ou Retorno Acumulado para CRESCIMENTO) */}
+        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className="apex-card p-5">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>
+              {strategyType === 'RENDA' ? 'Renda / Mês' : 'Retorno Total'}
+            </span>
+            <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'rgba(0,230,118,0.08)' }}>
+              <Zap size={15} style={{ color: '#00E676' }} />
+            </div>
+          </div>
+          <p className="text-xl font-bold font-data" style={{ color: '#f1f5f9' }}>
+            {strategyType === 'RENDA' ? (rendaMes != null ? fmtR$(rendaMes) : '–') : `${totalPct.toFixed(2)}%`}
+          </p>
+          <p className="text-xs mt-1" style={{ color: '#64748b' }}>
+            {strategyType === 'RENDA' ? (yoc > 0 ? `YoC: ${yoc.toFixed(2)}%` : 'YoC: –') : 'Desde o início'}
+          </p>
+        </motion.div>
       </div>
 
       <div className="grid grid-cols-3 gap-4">
-        {/* Performance Chart */}
+        {/* Performance & Top Movers */}
         <motion.div
           className="apex-card p-5 col-span-2"
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3 }}
+          transition={{ delay: 0.25 }}
         >
           <div className="flex items-center justify-between mb-5">
-            <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>PERFORMANCE DESDE O INÍCIO</h3>
+            <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>PERFORMANCE & TOP MOVERS</h3>
           </div>
-          <div className="flex flex-col items-center justify-center h-[200px] gap-3" style={{ color: '#475569' }}>
-            <BarChart2 size={36} style={{ color: '#1e293b' }} />
-            <p className="text-xs font-mono text-center" style={{ color: '#475569' }}>
-              Histórico de performance em construção
-              <br />
-              <span style={{ color: '#334155' }}>Dados disponíveis após 1º mês de operação</span>
-            </p>
+          <div className="grid grid-cols-2 gap-6">
+            {/* Trading Stats */}
+            <div className="space-y-3">
+              <p className="text-xs font-mono uppercase tracking-wider" style={{ color: '#475569' }}>Estatísticas de Trading</p>
+              {perfData ? (
+                <div className="space-y-2">
+                  {[
+                    { label: 'Win Rate', value: `${(perfData.win_rate ?? 0).toFixed(1)}%`, color: (perfData.win_rate ?? 0) >= 50 ? '#00E676' : '#FF5252' },
+                    { label: 'Trades Totais', value: `${perfData.total_operacoes ?? 0}`, color: '#f1f5f9' },
+                    { label: 'Resultado Líquido', value: fmtR$(perfData.resultado_liquido ?? 0), color: (perfData.resultado_liquido ?? 0) >= 0 ? '#00E676' : '#FF5252' },
+                    { label: 'Risk/Reward', value: `${(perfData.risk_reward ?? 0).toFixed(2)}`, color: (perfData.risk_reward ?? 0) >= 1.5 ? '#00E676' : '#FFD740' },
+                  ].map(s => (
+                    <div key={s.label} className="flex items-center justify-between rounded-lg p-2.5" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
+                      <span className="text-xs" style={{ color: '#94a3b8' }}>{s.label}</span>
+                      <span className="text-sm font-bold font-data" style={{ color: s.color }}>{s.value}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="space-y-2">{[1,2,3,4].map(i => <Skeleton key={i} className="h-10 rounded-lg" />)}</div>
+              )}
+            </div>
+
+            {/* Top Movers */}
+            <div className="space-y-3">
+              <p className="text-xs font-mono uppercase tracking-wider" style={{ color: '#475569' }}>Top Movers</p>
+              {topGainers.length > 0 || topLosers.length > 0 ? (
+                <div className="space-y-2">
+                  {topGainers.map((p: any) => (
+                    <div key={p.ticker} className="flex items-center justify-between rounded-lg p-2.5" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
+                      <div className="flex items-center gap-2">
+                        <ArrowUpRight size={12} style={{ color: '#00E676' }} />
+                        <span className="text-xs font-mono" style={{ color: '#f1f5f9' }}>{p.ticker}</span>
+                      </div>
+                      <span className="text-xs font-bold font-data" style={{ color: '#00E676' }}>+{p.pl_percentual?.toFixed(1)}%</span>
+                    </div>
+                  ))}
+                  {topLosers.map((p: any) => (
+                    <div key={p.ticker} className="flex items-center justify-between rounded-lg p-2.5" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
+                      <div className="flex items-center gap-2">
+                        <ArrowDownRight size={12} style={{ color: '#FF5252' }} />
+                        <span className="text-xs font-mono" style={{ color: '#f1f5f9' }}>{p.ticker}</span>
+                      </div>
+                      <span className="text-xs font-bold font-data" style={{ color: '#FF5252' }}>{p.pl_percentual?.toFixed(1)}%</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs" style={{ color: '#475569' }}>Nenhuma posição em carteira</p>
+              )}
+            </div>
           </div>
         </motion.div>
 
@@ -223,7 +359,7 @@ export default function DashboardPage() {
           className="apex-card p-5"
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.4 }}
+          transition={{ delay: 0.3 }}
         >
           <h3 className="text-sm font-medium mb-5" style={{ color: '#94a3b8' }}>ALOCAÇÃO</h3>
           <div className="space-y-3">
@@ -259,22 +395,54 @@ export default function DashboardPage() {
         className="apex-card p-4 flex items-center gap-3"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
-        transition={{ delay: 0.5 }}
+        transition={{ delay: 0.35 }}
       >
         <div className="w-2.5 h-2.5 rounded-full animate-pulse" style={{ background: regimeColor }} />
         <span className="text-sm font-mono" style={{ color: regimeColor }}>{regimeNome}</span>
         <span className="text-sm" style={{ color: '#64748b' }}>{regimeMotivo}</span>
       </motion.div>
 
-      {/* ── Dashboard V2 — Painéis enriquecidos ────────────────────── */}
-
-      {/* Painel Macro */}
-      {macroData && (
+      {/* Alertas Consolidados */}
+      {alertas.length > 0 && (
         <motion.div
           className="apex-card p-5"
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.6 }}
+          transition={{ delay: 0.4 }}
+        >
+          <div className="flex items-center gap-2 mb-4">
+            <Crosshair size={16} style={{ color: '#FF5252' }} />
+            <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>ALERTAS</h3>
+            <span className="text-xs px-2 py-0.5 rounded-full font-mono" style={{ background: 'rgba(255,82,82,0.1)', color: '#FF5252' }}>{alertas.length}</span>
+          </div>
+          <div className="space-y-2">
+            {alertas.slice(0, 8).map((a, i) => (
+              <div key={i} className="flex items-start gap-2 text-xs rounded-lg p-2.5" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
+                <AlertTriangle size={12} className="mt-0.5 shrink-0" style={{ color: a.tipo === 'danger' ? '#FF5252' : '#FFD740' }} />
+                <span style={{ color: a.tipo === 'danger' ? '#FF5252' : '#FFD740' }}>{a.texto}</span>
+              </div>
+            ))}
+          </div>
+        </motion.div>
+      )}
+
+      {/* Painel Macro */}
+      {v2Loading ? (
+        <motion.div className="apex-card p-5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.45 }}>
+          <div className="flex items-center gap-2 mb-4">
+            <Globe size={16} style={{ color: '#00B0FF' }} />
+            <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>PAINEL MACRO</h3>
+          </div>
+          <div className="grid grid-cols-5 gap-3">
+            {[1,2,3,4,5].map(i => <Skeleton key={i} className="h-16 rounded-lg" />)}
+          </div>
+        </motion.div>
+      ) : macroData && (
+        <motion.div
+          className="apex-card p-5"
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.45 }}
         >
           <div className="flex items-center gap-2 mb-4">
             <Globe size={16} style={{ color: '#00B0FF' }} />
@@ -330,12 +498,22 @@ export default function DashboardPage() {
 
       <div className="grid grid-cols-2 gap-4">
         {/* Teses de Investimento */}
-        {tesesData && tesesData.total > 0 && (
+        {v2Loading ? (
+          <motion.div className="apex-card p-5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.5 }}>
+            <div className="flex items-center gap-2 mb-4">
+              <FileText size={16} style={{ color: '#AA00FF' }} />
+              <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>TESES DE INVESTIMENTO</h3>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              {[1,2,3].map(i => <Skeleton key={i} className="h-20 rounded-lg" />)}
+            </div>
+          </motion.div>
+        ) : tesesData && tesesData.total > 0 && (
           <motion.div
             className="apex-card p-5"
             initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.7 }}
+            transition={{ delay: 0.5 }}
           >
             <div className="flex items-center gap-2 mb-4">
               <FileText size={16} style={{ color: '#AA00FF' }} />
@@ -371,12 +549,22 @@ export default function DashboardPage() {
         )}
 
         {/* Stress Test */}
-        {stressData && Array.isArray(stressData) && stressData.length > 0 && (
+        {v2Loading ? (
+          <motion.div className="apex-card p-5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.55 }}>
+            <div className="flex items-center gap-2 mb-4">
+              <Shield size={16} style={{ color: '#FF6D00' }} />
+              <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>STRESS TEST</h3>
+            </div>
+            <div className="space-y-2">
+              {[1,2,3].map(i => <Skeleton key={i} className="h-10 rounded-lg" />)}
+            </div>
+          </motion.div>
+        ) : stressData && Array.isArray(stressData) && stressData.length > 0 && (
           <motion.div
             className="apex-card p-5"
             initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.8 }}
+            transition={{ delay: 0.55 }}
           >
             <div className="flex items-center gap-2 mb-4">
               <Shield size={16} style={{ color: '#FF6D00' }} />
