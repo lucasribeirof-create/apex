@@ -213,7 +213,7 @@ async def gerar_briefing_portfolio(portfolio_id: int, db: Session) -> str | None
     conteudo = await chat(
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
-        max_tokens=2000,
+        max_tokens=4000,
     )
 
     # Salvar no banco
@@ -425,7 +425,7 @@ async def gerar_briefing_portfolio_stream(portfolio_id: int, db: Session):
     async for chunk in chat_stream(
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
-        max_tokens=2000,
+        max_tokens=4000,
     ):
         conteudo += chunk
         yield (chunk, None)

@@ -33,6 +33,7 @@ class ResultadoGestorGeral:
     ajustes_realizados: list[str]         # O que mudou vs. sugestão original dos motores
     score_portfolio: int                  # Score 0-100 do portfólio final
     usou_ia: bool = True                  # False = fallback algorítmico
+    ia_erro: str = ""                     # Mensagem específica quando IA falha (rate limit, créditos, etc.)
 
 
 # ─── Entry point público ──────────────────────────────────────────────────────
@@ -87,7 +88,7 @@ async def analisar(
     except Exception as e:
         logger.error("gestor_geral: IA falhou — %s: %s", type(e).__name__, e, exc_info=True)
         _reason = "config" if "não configurada" in str(e) else "error"
-        return _fallback_algoritmico(candidatos_prep, capital, estrategia, regime, reason=_reason)
+        return _fallback_algoritmico(candidatos_prep, capital, estrategia, regime, reason=_reason, erro_detalhe=str(e))
 
 
 # ─── Pré-processamento ────────────────────────────────────────────────────────
@@ -744,6 +745,7 @@ def _fallback_algoritmico(
     estrategia: str,
     regime: str,
     reason: str = "unknown",
+    erro_detalhe: str = "",
 ) -> ResultadoGestorGeral:
     """
     Fallback quando a IA não está disponível.
@@ -785,7 +787,7 @@ def _fallback_algoritmico(
     _reason_msg = {
         "timeout": "A análise com IA excedeu o tempo limite. Clique em 'Atualizar dados' para tentar novamente com a IA.",
         "config":  "IA não configurada. Vá em Configurações → IA para ativar a análise inteligente.",
-        "error":   "A IA encontrou um erro ao processar. Clique em 'Atualizar dados' para tentar novamente.",
+        "error":   erro_detalhe if erro_detalhe else "A IA encontrou um erro ao processar. Clique em 'Atualizar dados' para tentar novamente.",
     }.get(reason, "Análise detalhada indisponível (IA não configurada ou timeout).")
 
     analise = (
@@ -808,6 +810,7 @@ def _fallback_algoritmico(
         ajustes_realizados=ajustes,
         score_portfolio=_score_fallback(sugestoes, capital, regime),
         usou_ia=False,
+        ia_erro=erro_detalhe if erro_detalhe else _reason_msg,
     )
 
 

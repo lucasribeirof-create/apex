@@ -9,7 +9,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   X, ChevronRight, ChevronLeft, Target, Shield, Clock,
   SlidersHorizontal, Loader2, TrendingUp, Wallet, Landmark, Zap,
-  MessageSquare, Brain, AlertTriangle, Settings,
+  MessageSquare, Brain, AlertTriangle, Settings, RefreshCw,
 } from 'lucide-react'
 import api from '@/services/api'
 import { useStore } from '@/store/useStore'
@@ -133,6 +133,7 @@ export default function RebalanceWizard({ onClose, positions, portfolioId }: Reb
   const [saving, setSaving] = useState(false)
   const [loadingAI, setLoadingAI] = useState(false)
   const [aiFailed, setAiFailed] = useState(false)
+  const [aiErro, setAiErro] = useState('')
   const [racional, setRacional] = useState('')
   const [aiSuggestion, setAiSuggestion] = useState<Record<string, number> | null>(null)
   const [erro, setErro] = useState<string | null>(null)
@@ -217,10 +218,16 @@ export default function RebalanceWizard({ onClose, positions, portfolioId }: Reb
         setAiSuggestion({ ...data.alocacao })
       }
       if (data.racional) setRacional(data.racional)
+      // Backend retornou preset com aviso de erro da IA
+      if (data.ia_erro) {
+        setAiErro(data.ia_erro)
+        setAiFailed(true)
+      }
       setLoadingAI(false)
       setStep('alocacao')
     } catch (e: any) {
       setLoadingAI(false)
+      setAiErro(e?.response?.data?.detail || e?.message || 'Erro desconhecido')
       setAiFailed(true)
     }
   }
@@ -232,7 +239,7 @@ export default function RebalanceWizard({ onClose, positions, portfolioId }: Reb
 
   const handleGoToSettings = () => {
     onClose()
-    navigate('/configuracoes')
+    navigate('/settings')
   }
 
   const next = () => {
@@ -330,11 +337,15 @@ export default function RebalanceWizard({ onClose, positions, portfolioId }: Reb
                   <AlertTriangle size={28} style={{ color: '#FF5252' }} />
                 </div>
                 <p className="text-sm font-semibold text-white">A IA não conseguiu analisar</p>
+                {aiErro && (
+                  <p className="text-xs text-center max-w-xs leading-relaxed px-3 py-2 rounded-lg" style={{ color: '#FF8A80', background: 'rgba(255,82,82,0.08)', border: '1px solid rgba(255,82,82,0.15)' }}>
+                    {aiErro}
+                  </p>
+                )}
                 <p className="text-xs text-center max-w-xs leading-relaxed" style={{ color: '#64748b' }}>
-                  Pode ser que a chave de API esteja inválida, sem créditos, ou o serviço esteja fora do ar.
-                  Você pode continuar com a alocação padrão ou ir às configurações para ajustar a IA.
+                  Você pode continuar com a alocação padrão, tentar novamente ou ir às configurações.
                 </p>
-                <div className="flex gap-3 mt-2">
+                <div className="flex gap-3 mt-2 flex-wrap justify-center">
                   <button
                     onClick={handleUsePreset}
                     className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold transition-all"
@@ -342,6 +353,14 @@ export default function RebalanceWizard({ onClose, positions, portfolioId }: Reb
                   >
                     <SlidersHorizontal size={14} />
                     Usar preset {estrategia}
+                  </button>
+                  <button
+                    onClick={() => { setAiFailed(false); setAiErro(''); fetchAISuggestion() }}
+                    className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold transition-all"
+                    style={{ background: 'rgba(68,138,255,0.1)', color: '#448AFF', border: '1px solid rgba(68,138,255,0.25)' }}
+                  >
+                    <RefreshCw size={14} />
+                    Tentar novamente
                   </button>
                   <button
                     onClick={handleGoToSettings}

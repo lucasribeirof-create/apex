@@ -36,6 +36,7 @@ interface GestorAnalise {
   score_portfolio: number
   usou_ia: boolean
   regime: string
+  ia_erro?: string
 }
 
 // Componente de badges com dados operacionais extras por módulo
@@ -137,7 +138,7 @@ function fmt(v: number) {
 export default function SugestoesAlocacao() {
   const navigate = useNavigate()
   const location = useLocation()
-  const { setPortfolios, setPortfolioAtivo } = useStore()
+  const { portfolioAtivo, setPortfolios, setPortfolioAtivo } = useStore()
   const { format: fmtCost } = useCostEstimates()
   const portfolioCost = fmtCost('sugerir_portfolio')
 
@@ -156,6 +157,9 @@ export default function SugestoesAlocacao() {
   const [gestorAnalise, setGestorAnalise] = useState<GestorAnalise | null>(null)
   const [aplicando, setAplicando] = useState(false)
   const [erroAplicar, setErroAplicar] = useState<string | null>(null)
+  const [criandoSimulada, setCriandoSimulada] = useState(false)
+  const [simuladaCriada, setSimuladaCriada] = useState(false)
+  const [portfolioTipo, setPortfolioTipo] = useState<'real' | 'simulada' | 'tese'>(portfolioAtivo?.tipo ?? 'real')
 
   useEffect(() => {
     if (!portfolioId) {
@@ -180,6 +184,7 @@ export default function SugestoesAlocacao() {
       setCapitalRestante(data.capital_restante)
       setObservacao(data.observacao)
       setGestorAnalise(data.gestor_analise ?? null)
+      setPortfolioTipo(data.portfolio_tipo ?? portfolioAtivo?.tipo ?? 'real')
       setSugestoes(data.sugestoes.map((s: Sugestao) => ({ item: s, aprovada: true })))
     } catch (e: any) {
       setErroCarregamento(e?.response?.data?.detail ?? 'Erro ao gerar sugestões. Tente novamente.')
@@ -508,9 +513,15 @@ export default function SugestoesAlocacao() {
             </div>
           )}
 
-          {/* Retry IA — quando fallback algorítmico em rebalanceamento */}
-          {!gestorAnalise.usou_ia && modo === 'rebalanceamento' && (
+          {/* Aviso IA — motivo específico do fallback */}
+          {!gestorAnalise.usou_ia && (
             <div className="px-4 py-3" style={{ borderTop: '1px solid rgba(255,152,0,0.1)' }}>
+              {gestorAnalise.ia_erro && (
+                <p className="text-xs mb-2" style={{ color: '#FF9800' }}>
+                  <AlertTriangle size={11} className="inline mr-1" style={{ verticalAlign: '-1px' }} />
+                  {gestorAnalise.ia_erro}
+                </p>
+              )}
               <button
                 onClick={() => carregarSugestoes(true)}
                 disabled={carregando}
@@ -724,24 +735,136 @@ export default function SugestoesAlocacao() {
           className="flex-1 py-3 rounded-xl text-sm transition-all"
           style={{ color: '#64748b', border: '1px solid #1e293b', background: 'rgba(255,255,255,0.02)' }}
         >
-          Decidir depois
+          {portfolioTipo === 'real' ? 'Voltar' : 'Decidir depois'}
         </button>
-        <button
-          onClick={confirmar}
-          disabled={aplicando}
-          className="flex-[2] py-3 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2"
-          style={{
-            background: aplicando ? 'rgba(255,255,255,0.03)' : 'rgba(255,152,0,0.15)',
-            border: `1px solid ${aplicando ? '#1e293b' : 'rgba(255,152,0,0.4)'}`,
-            color: aplicando ? '#475569' : '#FF9800',
-          }}
-        >
-          {aplicando
-            ? <><Loader2 size={15} className="animate-spin" /> Aplicando...</>
-            : <><FlaskConical size={15} /> Confirmar {qtdAprovadas} posição{qtdAprovadas !== 1 ? 'ões' : ''} <ChevronRight size={15} /></>
-          }
-        </button>
+
+        {/* Criar Simulada — só para carteira real */}
+        {portfolioTipo === 'real' && (
+          <button
+            onClick={async () => {
+              setCriandoSimulada(true)
+              try {
+                const aprovadas = sugestoes.filter(s => s.aprovada).map(s => ({
+                  ticker: s.item.ticker,
+                  nome: s.item.nome,
+                  tipo: s.item.tipo,
+                  modulo: s.item.modulo,
+                  quantidade: s.item.quantidade,
+                  preco_atual: s.item.preco_atual,
+                  valor_total: s.item.valor_total,
+                  score: s.item.score ?? 0,
+                  justificativa: s.item.justificativa,
+                  dados_extras: s.item.dados_extras,
+                }))
+                if (aprovadas.length === 0) {
+                  setErroAplicar('Aprove ao menos uma sugestão para criar a simulada.')
+                  return
+                }
+                await api.post('/portfolio/criar-simulada-from-sugestoes', {
+                  nome: `Simulada IA ${new Date().toLocaleDateString('pt-BR')}`,
+                  sugestoes: aprovadas,
+                  capital_caixa: Math.round(capitalCaixa * 100) / 100,
+                })
+                setSimuladaCriada(true)
+                const rl = await api.get('/portfolio/listar')
+                setPortfolios(rl.data)
+              } catch (e: any) {
+                setErroAplicar(e?.response?.data?.detail ?? 'Erro ao criar carteira simulada.')
+              } finally {
+                setCriandoSimulada(false)
+              }
+            }}
+            disabled={criandoSimulada || simuladaCriada}
+            className="flex-1 py-3 rounded-xl text-sm transition-all flex items-center justify-center gap-2"
+            style={{
+              background: simuladaCriada ? 'rgba(0,230,118,0.08)' : 'rgba(100,255,218,0.08)',
+              border: `1px solid ${simuladaCriada ? 'rgba(0,230,118,0.3)' : 'rgba(100,255,218,0.25)'}`,
+              color: simuladaCriada ? '#00E676' : '#64FFDA',
+            }}
+          >
+            {criandoSimulada
+              ? <><Loader2 size={14} className="animate-spin" /> Criando...</>
+              : simuladaCriada
+                ? <><Check size={14} /> Simulada criada!</>
+                : <><FlaskConical size={14} /> Criar Simulada</>
+            }
+          </button>
+        )}
+
+        {/* Carteira real: baixar plano | Carteira simulada: aplicar posições */}
+        {portfolioTipo === 'real' ? (
+          <button
+            onClick={() => {
+              const aprovadas = sugestoes.filter(s => s.aprovada)
+              if (aprovadas.length === 0) return
+              const dateStr = new Date().toLocaleDateString('pt-BR')
+              let txt = `PLANO DE REBALANCEAMENTO APEX — ${dateStr}\n`
+              txt += `Estratégia: ${gestorAnalise?.regime ?? ''}\n`
+              txt += `Capital: R$ ${fmt(capitalTotal)}\n\n`
+              txt += '━'.repeat(60) + '\n\n'
+              aprovadas.forEach(s => {
+                txt += `${s.item.ticker} (${s.item.modulo.toUpperCase()})\n`
+                txt += `  Tipo: ${s.item.tipo} | Qtd: ${s.item.quantidade} | Preço: R$ ${s.item.preco_atual.toFixed(2)} | Total: R$ ${fmt(s.item.valor_total)}\n`
+                txt += `  ${s.item.justificativa}\n\n`
+              })
+              if (capitalCaixa > 0.5) {
+                txt += `CAIXA: R$ ${fmt(capitalCaixa)}\n\n`
+              }
+              if (gestorAnalise?.analise) {
+                txt += '━'.repeat(60) + '\n'
+                txt += `ANÁLISE DO GESTOR:\n${gestorAnalise.analise}\n`
+              }
+              const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' })
+              const url = URL.createObjectURL(blob)
+              const a = document.createElement('a')
+              a.href = url
+              a.download = `plano-rebalanceamento-${dateStr.replace(/\//g, '-')}.txt`
+              a.click()
+              URL.revokeObjectURL(url)
+            }}
+            className="flex-[2] py-3 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2"
+            style={{
+              background: 'rgba(255,152,0,0.15)',
+              border: '1px solid rgba(255,152,0,0.4)',
+              color: '#FF9800',
+            }}
+          >
+            <Download size={15} /> Baixar Plano ({qtdAprovadas} posição{qtdAprovadas !== 1 ? 'ões' : ''})
+          </button>
+        ) : (
+          <button
+            onClick={confirmar}
+            disabled={aplicando}
+            className="flex-[2] py-3 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2"
+            style={{
+              background: aplicando ? 'rgba(255,255,255,0.03)' : 'rgba(255,152,0,0.15)',
+              border: `1px solid ${aplicando ? '#1e293b' : 'rgba(255,152,0,0.4)'}`,
+              color: aplicando ? '#475569' : '#FF9800',
+            }}
+          >
+            {aplicando
+              ? <><Loader2 size={15} className="animate-spin" /> Aplicando...</>
+              : <><Check size={15} /> Aplicar {qtdAprovadas} posição{qtdAprovadas !== 1 ? 'ões' : ''} <ChevronRight size={15} /></>
+            }
+          </button>
+        )}
       </div>
+
+      {/* Toast simulada criada */}
+      <AnimatePresence>
+        {simuladaCriada && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-5 py-3 rounded-xl text-sm"
+            style={{ background: '#0f172a', border: '1px solid rgba(100,255,218,0.3)', color: '#64FFDA' }}
+          >
+            <FlaskConical size={15} />
+            Carteira simulada criada! Troque no seletor lateral para acompanhar.
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

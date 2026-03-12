@@ -9,8 +9,34 @@ from app.data import get_quotes, get_macro_br, get_macro_global, get_history_glo
 from app.data.cache import cache as _market_cache
 from app.core.regime import calcular_regime
 from app.logger import logger
+from fastapi.responses import JSONResponse
+import json
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+
+
+class _NumpySafeEncoder(json.JSONEncoder):
+    """JSON encoder que converte tipos numpy para tipos Python nativos."""
+    def default(self, obj):
+        try:
+            import numpy as np
+            if isinstance(obj, np.bool_):
+                return bool(obj)
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+        except ImportError:
+            pass
+        return super().default(obj)
+
+
+def _sanitize(obj):
+    """Serializa via JSON com encoder numpy-safe e retorna dict limpo."""
+    return json.loads(json.dumps(obj, cls=_NumpySafeEncoder, default=str))
+    return obj
 
 
 @router.get("/")
@@ -127,7 +153,7 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
         if ibov_data and len(ibov_data) >= 50:
             closes = [r["close"] for r in ibov_data if r.get("close") is not None]
             _res = calcular_regime(closes, macro_context=macro_ctx)
-            regime_atual = str(_res.regime)
+            regime_atual = _res.regime.value if hasattr(_res.regime, 'value') else str(_res.regime)
             regime_info = _res
             _market_cache.set(_REGIME_KEY, _res, ttl=3600)
         else:
@@ -161,26 +187,47 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
     renda_mes = round(renda_anual_projetada / 12, 2) if renda_anual_projetada > 0 else None
     yoc = round(renda_anual_projetada / valor_investido_total * 100, 2) if valor_investido_total > 0 and renda_anual_projetada > 0 else None
 
-    # P&L do dia em reais
-    pat_ontem = portfolio.patrimonio_ontem or patrimonio_atual
-    var_dia_reais = round(patrimonio_atual - pat_ontem, 2)
+    # ── Retornos baseados em P&L real (não patrimônio delta, que infla com depósitos) ──
+    # Variação diária: usa regularMarketChangePercent da BRAPI por posição
+    var_dia_reais = 0.0
+    for p_data in posicoes_data:
+        cot = cotacoes.get(p_data["ticker"], {})
+        change_pct = cot.get("regularMarketChangePercent", 0) or 0
+        # change_pct vem em % (ex: 2.5 = +2.5%)
+        var_dia_reais += p_data["valor_atual"] * change_pct / 100
+    var_dia_reais = round(var_dia_reais, 2)
+    var_dia_pct = round(var_dia_reais / patrimonio_atual * 100, 2) if patrimonio_atual > 0 else 0
 
-    return {
+    # Retorno total e mensal baseados em P&L / valor investido
+    pl_total = patrimonio_atual - valor_investido_total
+    total_pct = round(pl_total / valor_investido_total * 100, 2) if valor_investido_total > 0 else 0
+
+    # Retorno no mês: se temos patrimonio_mes_inicio E valor investido não mudou muito, usa delta
+    # Caso contrário, usa P&L total como proxy (mais seguro que % inflado por depósitos)
+    var_mes_pct = total_pct  # fallback: retorno total
+    if portfolio.patrimonio_mes_inicio and portfolio.patrimonio_mes_inicio > 0:
+        mes_pct_raw = (patrimonio_atual / portfolio.patrimonio_mes_inicio - 1) * 100
+        # Se o retorno mensal parece razoável (<50%), usa; senão houve depósito
+        if abs(mes_pct_raw) < 50:
+            var_mes_pct = round(mes_pct_raw, 2)
+
+    # vs CDI: CDI mensal estimado a partir da Selic
+    _selic_anual = macro_br.get("selic") or 0
+    cdi_mes_pct = round(((1 + _selic_anual / 100) ** (1 / 12) - 1) * 100, 2) if _selic_anual > 0 else None
+    vs_cdi = round(var_mes_pct - cdi_mes_pct, 2) if cdi_mes_pct is not None and var_mes_pct is not None else None
+
+    resp = {
         "user": {"nome": user.name, "estrategia": user.estrategia},
         "patrimonio": {
             "atual": round(patrimonio_atual, 2),
             "ontem": portfolio.patrimonio_ontem,
-            "var_dia_pct": round(
-                (patrimonio_atual / portfolio.patrimonio_ontem - 1) * 100, 2
-            ) if portfolio.patrimonio_ontem else 0,
+            "var_dia_pct": var_dia_pct,
             "var_dia_reais": var_dia_reais,
-            "var_mes_pct": round(
-                (patrimonio_atual / portfolio.patrimonio_mes_inicio - 1) * 100, 2
-            ) if portfolio.patrimonio_mes_inicio else 0,
+            "var_mes_pct": var_mes_pct,
+            "cdi_mes_pct": cdi_mes_pct,
+            "vs_cdi": vs_cdi,
             "inicio": portfolio.patrimonio_inicio,
-            "total_pct": round(
-                (patrimonio_atual / portfolio.patrimonio_inicio - 1) * 100, 2
-            ) if portfolio.patrimonio_inicio else 0,
+            "total_pct": total_pct,
             "valor_investido_total": round(valor_investido_total, 2),
         },
         "renda": {
@@ -197,6 +244,7 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
         "posicoes": posicoes_data,
         "macro": {**macro_br, **macro_global},
     }
+    return JSONResponse(content=_sanitize(resp))
 
 
 def _calcular_alocacao_atual(posicoes: list[dict], patrimonio: float) -> dict:
@@ -231,16 +279,48 @@ async def get_macro_dashboard():
     try:
         from app.cerebro.macro import montar_macro
         macro = await montar_macro()
-        return {
+        return JSONResponse(content=_sanitize({
             "global": {
                 "treasury_10y": macro.treasury_10y,
+                "treasury_5y": macro.treasury_5y,
+                "treasury_30y": macro.treasury_30y,
+                "yield_spread_2y10y": macro.yield_spread_2y10y,
+                "yield_spread_2y30y": macro.yield_spread_2y30y,
                 "vix": macro.vix,
                 "dxy": macro.dxy,
                 "sp500": macro.sp500,
                 "sp500_var_pct": macro.sp500_var_pct,
+                "dow_jones": macro.dow_jones,
+                "dow_jones_var_pct": macro.dow_jones_var_pct,
                 "petroleo_wti": macro.petroleo_wti,
                 "petroleo_brent": macro.petroleo_brent,
                 "ouro": macro.ouro,
+                "sp500_futures": macro.sp500_futures,
+                "sp500_futures_var_pct": macro.sp500_futures_var_pct,
+                "nasdaq_futures": macro.nasdaq_futures,
+                "nasdaq_futures_var_pct": macro.nasdaq_futures_var_pct,
+                # Commodities
+                "cobre": macro.cobre,
+                "soja": macro.soja,
+                "milho": macro.milho,
+                "minerio_ferro": macro.minerio_ferro,
+                # Moedas cross
+                "usdjpy": macro.usdjpy,
+                "eurusd": macro.eurusd,
+                "usdcny": macro.usdcny,
+                # Credit
+                "hyg": macro.hyg,
+                "lqd": macro.lqd,
+                "credit_spread": macro.credit_spread,
+                # Sentiment
+                "btc": macro.btc,
+                "btc_var_pct": macro.btc_var_pct,
+                # China
+                "hang_seng": macro.hang_seng,
+                "hang_seng_var_pct": macro.hang_seng_var_pct,
+                # EWZ
+                "ewz": macro.ewz,
+                "ewz_var_pct": macro.ewz_var_pct,
             },
             "brasil": {
                 "selic": macro.selic,
@@ -252,10 +332,18 @@ async def get_macro_dashboard():
                 "dolar_var_pct": macro.dolar_var_pct,
                 "ibov": macro.ibov,
                 "ibov_var_pct": macro.ibov_var_pct,
+                "ifix": macro.ifix,
+                "ifix_var_pct": macro.ifix_var_pct,
+                # Curva DI
+                "di_1ano": macro.di_1ano,
+                "di_2anos": macro.di_2anos,
+                "di_3anos": macro.di_3anos,
+                "di_5anos": macro.di_5anos,
+                "inclinacao_di": macro.inclinacao_di,
             },
             "flags": macro.flags,
             "atualizado_em": macro.atualizado_em,
-        }
+        }))
     except Exception as e:
         logger.error("dashboard/macro falhou: %s", e)
         raise HTTPException(status_code=503, detail="Dados macro indisponíveis")
@@ -287,7 +375,7 @@ async def get_correlacao(user_id: Optional[int] = Depends(get_user_id), db: Sess
     try:
         from app.cerebro.risco import calcular_correlacao
         resultado = await calcular_correlacao(posicoes_dict)
-        return resultado
+        return JSONResponse(content=_sanitize(resultado))
     except Exception as e:
         logger.error("dashboard/correlacao falhou: %s", e)
         return {"matriz": {}, "clusters": [], "alertas": []}
@@ -308,7 +396,7 @@ async def get_teses_status(user_id: Optional[int] = Depends(get_user_id), db: Se
     try:
         from app.cerebro.teses import monitorar_teses
         status = await monitorar_teses(db, portfolio.id)
-        return status
+        return JSONResponse(content=_sanitize(status))
     except Exception as e:
         logger.error("dashboard/teses falhou: %s", e)
         return {"total": 0, "ativas": 0, "enfraquecidas": 0, "invalidadas": 0, "alertas": []}
@@ -328,7 +416,7 @@ def get_performance(periodo: int = 90, user_id: Optional[int] = Depends(get_user
 
     try:
         from app.cerebro.aprendizado import analisar_performance
-        return analisar_performance(db, portfolio.id, periodo_dias=periodo)
+        return JSONResponse(content=_sanitize(analisar_performance(db, portfolio.id, periodo_dias=periodo)))
     except Exception as e:
         logger.error("dashboard/performance falhou: %s", e)
         return {"total_trades": 0, "win_rate": 0, "rr_medio": 0}
@@ -360,7 +448,7 @@ async def get_stress_test(user_id: Optional[int] = Depends(get_user_id), db: Ses
 
     try:
         from app.cerebro.risco import stress_test
-        return await stress_test(posicoes_dict, patrimonio)
+        return JSONResponse(content=_sanitize(await stress_test(posicoes_dict, patrimonio)))
     except Exception as e:
         logger.error("dashboard/stress falhou: %s", e)
         return []

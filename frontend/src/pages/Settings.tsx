@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Settings, Trash2, AlertTriangle, X, Bot, CheckCircle, XCircle, Loader2, Zap, DollarSign } from 'lucide-react'
+import { Settings, Trash2, AlertTriangle, X, Bot, CheckCircle, XCircle, Loader2, Zap, DollarSign, Target, ChevronDown } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import { useNavigate } from 'react-router-dom'
 import api from '@/services/api'
@@ -91,6 +91,65 @@ export default function SettingsPage() {
   const [nameSuccess, setNameSuccess] = useState(false)
   useEffect(() => { setNameEdit(portfolioAtivo?.nome ?? '') }, [portfolioAtivo?.nome])
 
+  // ── Alocação Alvo ──────────────────────────────────────────────────────────
+  const MODULOS = [
+    { key: 'etfs', label: 'ETFs', color: '#00E676' },
+    { key: 'fiis', label: 'FIIs', color: '#00BFA5' },
+    { key: 'renda_fixa', label: 'Renda Fixa', color: '#1DE9B6' },
+    { key: 'momentum', label: 'Momentum', color: '#64FFDA' },
+    { key: 'wheel', label: 'Wheel', color: '#00B0FF' },
+    { key: 'alpha', label: 'Alpha', color: '#AA00FF' },
+    { key: 'dividendos', label: 'Dividendos', color: '#FFD740' },
+    { key: 'teses', label: 'Teses', color: '#FF6D00' },
+    { key: 'caixa', label: 'Caixa', color: '#475569' },
+  ] as const
+
+  const [alvo, setAlvo] = useState<Record<string, number>>({})
+  const [alvoOriginal, setAlvoOriginal] = useState<Record<string, number>>({})
+  const [alvoLoading, setAlvoLoading] = useState(true)
+  const [alvoSaving, setAlvoSaving] = useState(false)
+  const [alvoSuccess, setAlvoSuccess] = useState(false)
+  const [alvoError, setAlvoError] = useState('')
+
+  const loadAlvo = () => {
+    if (!portfolioAtivo?.id) return
+    setAlvoLoading(true)
+    api.get(`/portfolio/${portfolioAtivo.id}/alocacao-alvo`)
+      .then(r => { setAlvo(r.data); setAlvoOriginal(r.data) })
+      .catch(() => setAlvoError('Erro ao carregar metas'))
+      .finally(() => setAlvoLoading(false))
+  }
+  useEffect(() => { loadAlvo() }, [portfolioAtivo?.id])
+
+  const alvoTotal = Object.values(alvo).reduce((s, v) => s + (v || 0), 0)
+  const alvoDirty = JSON.stringify(alvo) !== JSON.stringify(alvoOriginal)
+  const alvoValid = Math.abs(alvoTotal - 100) <= 0.5
+
+  const handleAlvoChange = (key: string, val: string) => {
+    const n = parseFloat(val)
+    setAlvo(prev => ({ ...prev, [key]: isNaN(n) ? 0 : Math.max(0, Math.min(100, n)) }))
+    setAlvoError('')
+  }
+
+  const handleAlvoSave = async () => {
+    if (!portfolioAtivo?.id || !alvoValid) return
+    setAlvoSaving(true)
+    setAlvoError('')
+    setAlvoSuccess(false)
+    try {
+      const r = await api.put(`/portfolio/${portfolioAtivo.id}/alocacao-alvo`, alvo)
+      if (r.data.ok) {
+        setAlvoOriginal({ ...alvo })
+        setAlvoSuccess(true)
+        setTimeout(() => setAlvoSuccess(false), 2500)
+      }
+    } catch (e: any) {
+      setAlvoError(e?.response?.data?.detail ?? 'Erro ao salvar metas.')
+    } finally {
+      setAlvoSaving(false)
+    }
+  }
+
   const handleSaveName = async () => {
     const trimmed = nameEdit.trim()
     if (!trimmed) {
@@ -132,6 +191,60 @@ export default function SettingsPage() {
   const [clearStep, setClearStep] = useState<0 | 1>(0)
   const [clearing, setClearing] = useState(false)
   const [clearError, setClearError] = useState('')
+
+  // Apagar carteira individual
+  const [delPortStep, setDelPortStep] = useState<0 | 1 | 2>(0)
+  const [delPortId, setDelPortId] = useState<number | null>(null)
+  const [delPortConfirm, setDelPortConfirm] = useState('')
+  const [delPortLoading, setDelPortLoading] = useState(false)
+  const [delPortError, setDelPortError] = useState('')
+  const allPortfolios = useStore(s => s.portfolios)
+  const delPortSelected = allPortfolios.find(p => p.id === delPortId) ?? null
+
+  // Carrega lista de portfólios
+  useEffect(() => {
+    api.get('/portfolio/listar').then(r => setPortfolios(r.data)).catch(() => {})
+  }, [])
+
+  const handleDelPortStart = () => {
+    setDelPortStep(1)
+    setDelPortId(null)
+    setDelPortConfirm('')
+    setDelPortError('')
+  }
+  const handleDelPortCancel = () => {
+    setDelPortStep(0)
+    setDelPortId(null)
+    setDelPortConfirm('')
+    setDelPortError('')
+  }
+  const handleDelPortFinal = async () => {
+    if (!delPortSelected) return
+    if (delPortConfirm.trim().toLowerCase() !== delPortSelected.nome.toLowerCase()) {
+      setDelPortError('Nome não confere. Digite exatamente como aparece acima.')
+      return
+    }
+    setDelPortLoading(true)
+    setDelPortError('')
+    try {
+      const r = await api.delete(`/portfolio/${delPortSelected.id}`)
+      // Atualiza store
+      const updated = allPortfolios.filter(p => p.id !== delPortSelected.id)
+      setPortfolios(updated)
+      // Se era a ativa, atualiza para a nova ativa
+      if (portfolioAtivo?.id === delPortSelected.id) {
+        const novoAtivoId = r.data.novo_ativo_id
+        const nova = updated.find(p => p.id === novoAtivoId) ?? updated[0] ?? null
+        setPortfolioAtivo(nova)
+        window.dispatchEvent(new Event('portfolio-changed'))
+      }
+      setDelPortStep(0)
+    } catch (e: any) {
+      setDelPortError(e?.response?.data?.detail ?? 'Erro ao apagar carteira.')
+    } finally {
+      setDelPortLoading(false)
+    }
+  }
 
   const handleClearStart = () => { setClearStep(1); setClearError('') }
   const handleClearCancel = () => { setClearStep(0); setClearError('') }
@@ -234,6 +347,82 @@ export default function SettingsPage() {
           </button>
         </div>
         {nameError && <p className="text-sm mt-2" style={{ color: '#ef4444' }}>{nameError}</p>}
+      </div>
+
+      {/* Alocação Alvo */}
+      <div className="apex-card p-5 mb-8">
+        <div className="flex items-center gap-2 mb-3">
+          <Target size={15} style={{ color: '#00E676' }} />
+          <p className="text-xs font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>Alocação Alvo (Metas)</p>
+        </div>
+        <p className="text-xs mb-4" style={{ color: '#64748b' }}>
+          Defina a porcentagem-alvo de cada módulo. A soma deve totalizar 100%.
+        </p>
+
+        {alvoLoading ? (
+          <div className="flex items-center gap-2 py-4">
+            <Loader2 size={14} className="animate-spin" style={{ color: '#64748b' }} />
+            <span className="text-xs" style={{ color: '#64748b' }}>Carregando metas...</span>
+          </div>
+        ) : (
+          <>
+            <div className="space-y-2.5">
+              {MODULOS.map(m => (
+                <div key={m.key} className="flex items-center gap-3">
+                  <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: m.color }} />
+                  <span className="text-sm w-24 flex-shrink-0" style={{ color: '#cbd5e1' }}>{m.label}</span>
+                  <div className="flex-1 relative">
+                    <input
+                      type="range"
+                      min={0} max={100} step={0.5}
+                      value={alvo[m.key] ?? 0}
+                      onChange={e => handleAlvoChange(m.key, e.target.value)}
+                      className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
+                      style={{
+                        background: `linear-gradient(to right, ${m.color} 0%, ${m.color} ${alvo[m.key] ?? 0}%, #1e293b ${alvo[m.key] ?? 0}%, #1e293b 100%)`,
+                        accentColor: m.color,
+                      }}
+                    />
+                  </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    <input
+                      type="number"
+                      min={0} max={100} step={0.5}
+                      value={alvo[m.key] ?? 0}
+                      onChange={e => handleAlvoChange(m.key, e.target.value)}
+                      className="w-14 px-1.5 py-1 rounded text-xs font-mono text-right outline-none"
+                      style={{ background: '#0f172a', border: '1px solid #334155', color: '#f1f5f9' }}
+                    />
+                    <span className="text-[10px]" style={{ color: '#475569' }}>%</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Total + Save */}
+            <div className="flex items-center justify-between mt-4 pt-3" style={{ borderTop: '1px solid #1e293b' }}>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-mono" style={{ color: '#64748b' }}>Total:</span>
+                <span className="text-sm font-bold font-mono" style={{
+                  color: alvoValid ? '#00E676' : '#FF5252'
+                }}>
+                  {alvoTotal.toFixed(1)}%
+                </span>
+                {!alvoValid && <span className="text-[10px]" style={{ color: '#FF5252' }}>Deve somar 100%</span>}
+              </div>
+              <button
+                onClick={handleAlvoSave}
+                disabled={alvoSaving || !alvoDirty || !alvoValid}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ background: 'rgba(0,230,118,0.15)', color: '#00E676', border: '1px solid rgba(0,230,118,0.35)' }}
+              >
+                {alvoSaving ? <Loader2 size={14} className="animate-spin" /> : alvoSuccess ? <CheckCircle size={14} /> : null}
+                {alvoSaving ? 'Salvando...' : alvoSuccess ? 'Salvo' : 'Salvar metas'}
+              </button>
+            </div>
+            {alvoError && <p className="text-xs mt-2" style={{ color: '#ef4444' }}>{alvoError}</p>}
+          </>
+        )}
       </div>
 
       {/* AI provider */}
@@ -449,11 +638,139 @@ export default function SettingsPage() {
 
         <div className="my-4" style={{ height: '1px', background: 'rgba(239,68,68,0.1)' }} />
 
+        {/* Apagar carteira individual */}
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-sm font-medium mb-1" style={{ color: '#f1f5f9' }}>Apagar esta carteira</p>
+            <p className="text-sm font-medium mb-1" style={{ color: '#f1f5f9' }}>Apagar uma carteira</p>
             <p className="text-xs leading-relaxed" style={{ color: '#64748b' }}>
-              Remove permanentemente o usuário, portfólio, todas as posições e o histórico de briefings.
+              Escolha qual carteira deletar. Remove o portfólio, posições e histórico.
+              {allPortfolios.length <= 1 && <span style={{ color: '#ef4444' }}> Você precisa ter mais de uma carteira para usar esta opção.</span>}
+            </p>
+          </div>
+          {delPortStep === 0 && (
+            <button
+              onClick={handleDelPortStart}
+              disabled={allPortfolios.length <= 1}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium flex-shrink-0 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', color: '#ef4444' }}
+              onMouseEnter={(e) => { if (allPortfolios.length > 1) e.currentTarget.style.background = 'rgba(239,68,68,0.15)' }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(239,68,68,0.08)' }}
+            >
+              <Trash2 size={14} />
+              Apagar
+            </button>
+          )}
+        </div>
+
+        <AnimatePresence>
+          {delPortStep >= 1 && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mt-3 overflow-hidden"
+            >
+              <div className="rounded-lg p-4 space-y-3"
+                style={{ background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)' }}>
+
+                {/* Seletor de carteira */}
+                <p className="text-sm" style={{ color: '#f1f5f9' }}>Selecione a carteira a apagar:</p>
+                <div className="relative">
+                  <select
+                    value={delPortId ?? ''}
+                    onChange={e => { setDelPortId(Number(e.target.value) || null); setDelPortConfirm(''); setDelPortError(''); setDelPortStep(1) }}
+                    className="w-full appearance-none px-3 py-2 pr-8 rounded-lg text-sm outline-none cursor-pointer"
+                    style={{ background: '#0f172a', border: '1px solid #334155', color: '#f1f5f9' }}
+                  >
+                    <option value="">— Escolha —</option>
+                    {allPortfolios.map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.nome} ({p.tipo}){p.id === portfolioAtivo?.id ? ' ← ativa' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown size={14} className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: '#64748b' }} />
+                </div>
+
+                {/* Confirmação por nome */}
+                {delPortId && delPortStep >= 1 && (
+                  <>
+                    <button
+                      onClick={() => setDelPortStep(2)}
+                      disabled={!delPortId}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-semibold transition-all"
+                      style={{ background: '#ef4444', color: '#fff', display: delPortStep === 2 ? 'none' : undefined }}
+                    >
+                      Continuar
+                    </button>
+                  </>
+                )}
+
+                {delPortStep === 2 && delPortSelected && (
+                  <>
+                    <p className="text-sm" style={{ color: '#f1f5f9' }}>
+                      Para confirmar, digite o nome da carteira:{' '}
+                      <span className="font-mono font-semibold" style={{ color: '#ef4444' }}>{delPortSelected.nome}</span>
+                    </p>
+                    <input
+                      autoFocus
+                      value={delPortConfirm}
+                      onChange={e => { setDelPortConfirm(e.target.value); setDelPortError('') }}
+                      onKeyDown={e => e.key === 'Enter' && handleDelPortFinal()}
+                      placeholder={`Digite "${delPortSelected.nome}"`}
+                      className="apex-input w-full text-sm"
+                      style={{ borderColor: delPortError ? 'rgba(239,68,68,0.5)' : undefined }}
+                    />
+                    {delPortError && <p className="text-xs" style={{ color: '#ef4444' }}>{delPortError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleDelPortFinal}
+                        disabled={delPortLoading || !delPortConfirm.trim()}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-semibold transition-all"
+                        style={{
+                          background: delPortLoading || !delPortConfirm.trim() ? '#1e293b' : '#ef4444',
+                          color: delPortLoading || !delPortConfirm.trim() ? '#475569' : '#fff',
+                          cursor: delPortLoading || !delPortConfirm.trim() ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        <Trash2 size={13} />
+                        {delPortLoading ? 'Apagando...' : 'Apagar definitivamente'}
+                      </button>
+                      <button
+                        onClick={handleDelPortCancel}
+                        disabled={delPortLoading}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-all"
+                        style={{ background: 'rgba(100,116,139,0.1)', border: '1px solid #1e293b', color: '#94a3b8' }}
+                      >
+                        <X size={13} />
+                        Cancelar
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {delPortStep === 1 && !delPortId && (
+                  <button
+                    onClick={handleDelPortCancel}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-all"
+                    style={{ background: 'rgba(100,116,139,0.1)', border: '1px solid #1e293b', color: '#94a3b8' }}
+                  >
+                    <X size={13} />
+                    Cancelar
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <div className="my-4" style={{ height: '1px', background: 'rgba(239,68,68,0.1)' }} />
+
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium mb-1" style={{ color: '#f1f5f9' }}>Apagar conta completa</p>
+            <p className="text-xs leading-relaxed" style={{ color: '#64748b' }}>
+              Remove permanentemente o usuário <span className="font-semibold" style={{ color: '#94a3b8' }}>{userName}</span>, todos os portfólios, posições e histórico.
               Esta ação não pode ser desfeita.
             </p>
           </div>

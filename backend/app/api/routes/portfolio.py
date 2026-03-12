@@ -100,8 +100,18 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
     resultado = []
     preco_mudou = False
     for p in posicoes:
+        # RF e CAIXA: quantidade = valor nominal, preco fixo = 1.0 (sem cotação de mercado)
+        if p.tipo in ("RF", "CAIXA"):
+            preco_atual = p.preco_medio or 1.0
+            # Corrige dados corrompidos por refresh_prices anterior
+            if p.preco_atual != preco_atual:
+                p.preco_atual = preco_atual
+                p.valor_atual = round(preco_atual * p.quantidade, 2)
+                p.pl_reais = round(p.valor_atual - (p.valor_investido or 0), 2)
+                p.pl_percentual = round(p.pl_reais / p.valor_investido * 100, 2) if p.valor_investido else 0.0
+                preco_mudou = True
         cotacao = cotacoes.get(p.ticker, {})
-        preco_atual = cotacao.get("regularMarketPrice", p.preco_atual or p.preco_medio)
+        preco_atual = cotacao.get("regularMarketPrice", p.preco_atual or p.preco_medio) if p.tipo not in ("RF", "CAIXA") else preco_atual
         valor_atual = preco_atual * p.quantidade
         pl_reais = valor_atual - p.valor_investido
         pl_pct = (pl_reais / p.valor_investido * 100) if p.valor_investido > 0 else 0
@@ -512,21 +522,30 @@ async def refresh_prices(user_id: Optional[int] = Depends(get_user_id), db: Sess
     if not posicoes:
         return {"atualizadas": 0, "patrimonio_total": 0}
 
-    # Busca cotações em paralelo para todos os ativos
+    # Separa posições com cotação de mercado das sintéticas (RF, CAIXA)
+    _TIPOS_SEM_COTACAO = {"RF", "CAIXA"}
+    posicoes_mercado = [p for p in posicoes if p.tipo not in _TIPOS_SEM_COTACAO]
+    posicoes_sinteticas = [p for p in posicoes if p.tipo in _TIPOS_SEM_COTACAO]
+
+    # Busca cotações em paralelo apenas para ativos negociados em bolsa
     tarefas = [
         get_dados_tecnicos(
             p.ticker,
             getattr(p, "mercado", None) or "B3"
         )
-        for p in posicoes
+        for p in posicoes_mercado
     ]
     resultados = await asyncio.gather(*tarefas, return_exceptions=True)
 
     atualizadas = 0
     patrimonio = 0.0
 
-    for pos, resultado in zip(posicoes, resultados):
-        # Ignora erros ou ativos sem cotação disponível (RF, Opções, Caixa)
+    # RF e CAIXA: quantidade = valor nominal, preco = 1.0 (sem cotação externa)
+    for pos in posicoes_sinteticas:
+        patrimonio += (pos.valor_atual or pos.valor_investido or 0)
+
+    for pos, resultado in zip(posicoes_mercado, resultados):
+        # Ignora erros ou ativos sem cotação disponível
         if isinstance(resultado, Exception) or not isinstance(resultado, dict):
             patrimonio += (pos.valor_atual or pos.valor_investido or 0)
             continue
@@ -718,8 +737,17 @@ async def sugerir_alocacao(
     from app.data.cache import cache as _global_cache
     import json
 
+    # Se IA não está configurada, retorna preset direto (sem erro 503)
     if not is_ai_configured():
-        raise HTTPException(status_code=503, detail="IA não configurada")
+        try:
+            from app.api.routes.onboarding import _get_alocacao
+            risco_score = {"conservador": 2, "moderado": 5, "agressivo": 8, "muito_agressivo": 11}
+            horiz_score = {"ate_2anos": 0, "2_5anos": 1, "5_10anos": 2, "mais_10anos": 4}
+            sc = min(15, risco_score.get(body.risco, 5) + horiz_score.get(body.horizonte, 1))
+            est = "RENDA" if body.objetivo == "renda_passiva" else ("ALPHA" if sc >= 11 else "CORE")
+            return {"alocacao": _get_alocacao(est), "racional": f"Sugestão baseada no perfil {est} (sem IA configurada).", "ia_erro": "IA não configurada. Vá em Configurações para adicionar uma chave de API."}
+        except Exception:
+            return {"alocacao": {"etfs": 30, "fiis": 20, "renda_fixa": 20, "momentum": 10, "wheel": 0, "alpha": 5, "dividendos": 10, "caixa": 5}, "racional": "Alocação padrão (IA não configurada).", "ia_erro": "IA não configurada. Vá em Configurações para adicionar uma chave de API."}
 
     # Carregar dados macro do cache
     macro_resumo = ""
@@ -839,20 +867,25 @@ Retorne APENAS JSON válido, sem markdown, sem texto antes/depois:
             "racional": data.get("racional", ""),
         }
     except Exception as e:
-        logger.warning("sugerir-alocacao: IA falhou (%s), retornando preset", e)
+        erro_msg = str(e)
+        logger.warning("sugerir-alocacao: IA falhou (%s), retornando preset", erro_msg)
         # Fallback: preset mecânico
-        from app.api.routes.onboarding import _get_alocacao
-        risco_score = {"conservador": 2, "moderado": 5, "agressivo": 8, "muito_agressivo": 11}
-        horiz_score = {"ate_2anos": 0, "2_5anos": 1, "5_10anos": 2, "mais_10anos": 4}
-        score = min(15, risco_score.get(body.risco, 5) + horiz_score.get(body.horizonte, 1))
-        if body.objetivo == "renda_passiva":
-            est = "RENDA"
-        elif score >= 11:
-            est = "ALPHA"
-        else:
-            est = "CORE"
-        preset = _get_alocacao(est)
-        return {"alocacao": preset, "racional": f"Sugestão baseada no perfil {est} (fallback)."}
+        try:
+            from app.api.routes.onboarding import _get_alocacao
+            risco_score = {"conservador": 2, "moderado": 5, "agressivo": 8, "muito_agressivo": 11}
+            horiz_score = {"ate_2anos": 0, "2_5anos": 1, "5_10anos": 2, "mais_10anos": 4}
+            score = min(15, risco_score.get(body.risco, 5) + horiz_score.get(body.horizonte, 1))
+            if body.objetivo == "renda_passiva":
+                est = "RENDA"
+            elif score >= 11:
+                est = "ALPHA"
+            else:
+                est = "CORE"
+            preset = _get_alocacao(est)
+            return {"alocacao": preset, "racional": f"Sugestão baseada no perfil {est} (fallback).", "ia_erro": erro_msg}
+        except Exception as e2:
+            logger.error("sugerir-alocacao: fallback também falhou (%s)", e2)
+            return {"alocacao": {"etfs": 30, "fiis": 20, "renda_fixa": 20, "momentum": 10, "wheel": 0, "alpha": 5, "dividendos": 10, "caixa": 5}, "racional": "Alocação padrão.", "ia_erro": erro_msg}
 
 
 # ─── Multi-Portfolio: listagem, ativação, criação ─────────────────────────────
@@ -926,6 +959,110 @@ def atualizar_nome_portfolio_post(
 ):
     """Atualiza o nome de um portfólio (alias POST para compatibilidade)."""
     return _atualizar_nome_portfolio_impl(portfolio_id, body, user_id, db)
+
+
+# ── Alocação-alvo (metas) ─────────────────────────────────────────────────────
+
+class AlocacaoAlvoBody(BaseModel):
+    etfs: float = 0.0
+    fiis: float = 0.0
+    renda_fixa: float = 0.0
+    momentum: float = 0.0
+    wheel: float = 0.0
+    alpha: float = 0.0
+    dividendos: float = 0.0
+    teses: float = 0.0
+    caixa: float = 0.0
+
+    @field_validator("etfs", "fiis", "renda_fixa", "momentum", "wheel", "alpha", "dividendos", "teses", "caixa")
+    @classmethod
+    def between_0_100(cls, v: float) -> float:
+        if v < 0 or v > 100:
+            raise ValueError("Cada módulo deve estar entre 0% e 100%")
+        return round(v, 1)
+
+
+@router.put("/{portfolio_id}/alocacao-alvo")
+def atualizar_alocacao_alvo(
+    portfolio_id: int,
+    body: AlocacaoAlvoBody,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db)
+):
+    """Atualiza as metas de alocação-alvo do portfólio."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = db.query(Portfolio).filter(
+        Portfolio.id == portfolio_id,
+        Portfolio.user_id == user.id,
+    ).first()
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    total = body.etfs + body.fiis + body.renda_fixa + body.momentum + body.wheel + body.alpha + body.dividendos + body.teses + body.caixa
+    if abs(total - 100) > 0.5:
+        raise HTTPException(status_code=400, detail=f"A soma dos módulos deve ser 100%. Atual: {total:.1f}%")
+
+    portfolio.alvo_etfs = body.etfs
+    portfolio.alvo_fiis = body.fiis
+    portfolio.alvo_renda_fixa = body.renda_fixa
+    portfolio.alvo_momentum = body.momentum
+    portfolio.alvo_wheel = body.wheel
+    portfolio.alvo_alpha = body.alpha
+    portfolio.alvo_dividendos = body.dividendos
+    portfolio.alvo_teses = body.teses
+    portfolio.alvo_caixa = body.caixa
+    db.commit()
+
+    return {
+        "ok": True,
+        "alocacao_alvo": {
+            "etfs": portfolio.alvo_etfs,
+            "fiis": portfolio.alvo_fiis,
+            "renda_fixa": portfolio.alvo_renda_fixa,
+            "momentum": portfolio.alvo_momentum,
+            "wheel": portfolio.alvo_wheel,
+            "alpha": portfolio.alvo_alpha,
+            "dividendos": portfolio.alvo_dividendos,
+            "teses": portfolio.alvo_teses,
+            "caixa": portfolio.alvo_caixa,
+        },
+    }
+
+
+@router.get("/{portfolio_id}/alocacao-alvo")
+def get_alocacao_alvo(
+    portfolio_id: int,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db)
+):
+    """Retorna as metas de alocação-alvo do portfólio."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = db.query(Portfolio).filter(
+        Portfolio.id == portfolio_id,
+        Portfolio.user_id == user.id,
+    ).first()
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    return {
+        "etfs": portfolio.alvo_etfs or 0.0,
+        "fiis": portfolio.alvo_fiis or 0.0,
+        "renda_fixa": portfolio.alvo_renda_fixa or 0.0,
+        "momentum": portfolio.alvo_momentum or 0.0,
+        "wheel": portfolio.alvo_wheel or 0.0,
+        "alpha": portfolio.alvo_alpha or 0.0,
+        "dividendos": getattr(portfolio, "alvo_dividendos", 0.0) or 0.0,
+        "teses": getattr(portfolio, "alvo_teses", 0.0) or 0.0,
+        "caixa": portfolio.alvo_caixa or 0.0,
+    }
 
 
 @router.post("/ativar/{portfolio_id}")
@@ -1448,6 +1585,352 @@ async def criar_carteira_simulada_perfil(
     }
 
 
+# ─── Criar simulada a partir de sugestões da IA ──────────────────────────────
+
+class SugestaoSimuladaItem(BaseModel):
+    ticker: str
+    nome: str
+    tipo: str
+    modulo: str
+    quantidade: float
+    preco_atual: float
+    valor_total: float = 0.0
+    score: float | None = None
+    justificativa: str = ""
+    dados_extras: dict | None = None
+
+
+class CriarSimuladaFromSugestoesBody(BaseModel):
+    nome: str = "Simulada IA"
+    sugestoes: list[SugestaoSimuladaItem]
+    capital_caixa: float = 0.0
+
+
+@router.post("/criar-simulada-from-sugestoes")
+async def criar_simulada_from_sugestoes(
+    body: CriarSimuladaFromSugestoesBody,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Cria uma carteira simulada com as posições sugeridas pela IA.
+    NÃO ativa a carteira — o usuário continua na carteira real.
+    """
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio_real = get_portfolio_ativo(user, db)
+    if not portfolio_real:
+        raise HTTPException(status_code=404, detail="Portfólio de origem não encontrado")
+
+    # Calcula patrimônio a partir das sugestões
+    patrimonio = sum(s.preco_atual * s.quantidade for s in body.sugestoes) + body.capital_caixa
+
+    # Cria portfolio simulado com mesmos alvos do real
+    novo = Portfolio(
+        user_id=user.id,
+        nome=body.nome,
+        tipo="simulada",
+        patrimonio_total=round(patrimonio, 2),
+        patrimonio_inicio=round(patrimonio, 2),
+        alvo_etfs=portfolio_real.alvo_etfs,
+        alvo_fiis=portfolio_real.alvo_fiis,
+        alvo_renda_fixa=portfolio_real.alvo_renda_fixa,
+        alvo_momentum=portfolio_real.alvo_momentum,
+        alvo_wheel=portfolio_real.alvo_wheel,
+        alvo_alpha=portfolio_real.alvo_alpha,
+        alvo_dividendos=getattr(portfolio_real, "alvo_dividendos", 0.0) or 0.0,
+        alvo_teses=getattr(portfolio_real, "alvo_teses", 0.0) or 0.0,
+        alvo_caixa=portfolio_real.alvo_caixa,
+    )
+    db.add(novo)
+    db.flush()
+
+    # Cria posições a partir das sugestões
+    for s in body.sugestoes:
+        valor_inv = round(s.preco_atual * s.quantidade, 2)
+        pos = Position(
+            portfolio_id=novo.id,
+            ticker=s.ticker,
+            nome=s.nome,
+            tipo=s.tipo,
+            modulo=s.modulo,
+            quantidade=s.quantidade,
+            preco_medio=round(s.preco_atual, 2),
+            preco_atual=round(s.preco_atual, 2),
+            valor_investido=valor_inv,
+            valor_atual=valor_inv,
+            pl_reais=0.0,
+            pl_percentual=0.0,
+            apex_score=s.score,
+            moeda="BRL",
+            data_entrada=datetime.now(timezone.utc),
+        )
+        db.add(pos)
+
+    # Caixa (capital de sugestões rejeitadas ou sobra)
+    if body.capital_caixa > 0.5:
+        db.add(Position(
+            portfolio_id=novo.id,
+            ticker="CAIXA",
+            nome="Reserva de Liquidez",
+            tipo="CAIXA",
+            modulo="caixa",
+            quantidade=body.capital_caixa,
+            preco_medio=1.0,
+            preco_atual=1.0,
+            valor_investido=body.capital_caixa,
+            valor_atual=body.capital_caixa,
+            pl_reais=0.0,
+            pl_percentual=0.0,
+            moeda="BRL",
+            data_entrada=datetime.now(timezone.utc),
+        ))
+
+    db.commit()
+
+    return {
+        "mensagem": f"Carteira simulada '{body.nome}' criada com {len(body.sugestoes)} posições.",
+        "portfolio_id": novo.id,
+        "nome": body.nome,
+        "tipo": "simulada",
+        "patrimonio": round(patrimonio, 2),
+    }
+
+
+# ─── Rebalancear simulada com IA ─────────────────────────────────────────────
+
+@router.post("/{portfolio_id}/rebalancear-ia")
+async def rebalancear_simulada_ia(
+    portfolio_id: int,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Rebalanceia uma carteira simulada usando os motores de IA.
+    Desativa posições antigas e cria novas a partir das sugestões.
+    """
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = db.query(Portfolio).filter(
+        Portfolio.id == portfolio_id,
+        Portfolio.user_id == user.id,
+    ).first()
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+    if portfolio.tipo != "simulada":
+        raise HTTPException(status_code=400, detail="Apenas carteiras simuladas podem ser rebalanceadas pela IA.")
+
+    capital = portfolio.patrimonio_total or 0
+    if capital <= 0:
+        raise HTTPException(status_code=400, detail="Capital da carteira simulada é zero.")
+
+    # Atualiza preços das posições para calcular patrimônio real antes de rebalancear
+    posicoes_ativas = db.query(Position).filter(
+        Position.portfolio_id == portfolio.id,
+        Position.ativa == True,
+    ).all()
+
+    tickers_br = [p.ticker for p in posicoes_ativas if p.ticker != "CAIXA" and (p.moeda or "BRL") == "BRL"]
+    if tickers_br:
+        try:
+            cotacoes = await get_quotes(tickers_br)
+            patrimonio_atualizado = 0.0
+            for p in posicoes_ativas:
+                if p.ticker == "CAIXA":
+                    patrimonio_atualizado += p.valor_atual or p.quantidade or 0
+                    continue
+                preco = cotacoes.get(p.ticker, {}).get("price")
+                if preco and preco > 0:
+                    p.preco_atual = round(preco, 2)
+                    p.valor_atual = round(preco * p.quantidade, 2)
+                    p.pl_reais = round(p.valor_atual - (p.valor_investido or 0), 2)
+                    p.pl_percentual = round(p.pl_reais / p.valor_investido * 100, 2) if p.valor_investido else 0
+                patrimonio_atualizado += p.valor_atual or p.valor_investido or 0
+            capital = round(patrimonio_atualizado, 2)
+            portfolio.patrimonio_total = capital
+        except Exception as e:
+            logger.warning("rebalancear-ia: falha ao atualizar preços (%s) — usando patrimônio existente", e)
+
+    # Roda o motor de sugestões usando o endpoint existente internamente
+    from app.cerebro.especialistas import (
+        etfs as motor_etfs, fiis as motor_fiis, renda_fixa as motor_renda_fixa,
+        momentum as motor_momentum, wheel as motor_wheel, alpha as motor_alpha,
+        dividendos as motor_dividendos, prefetch as motor_prefetch,
+    )
+    from app.cerebro.especialistas.watchlist import (
+        FIIS_WATCHLIST_FLAT, DIVIDENDOS_WATCHLIST, MOMENTUM_WATCHLIST,
+        WHEEL_WATCHLIST, ALPHA_WATCHLIST, ETFS_WATCHLIST_FLAT,
+    )
+    from app.cerebro.especialistas import gestor_geral
+    from app.cerebro.contexto import montar_contexto
+    from app.cerebro.core import KillSwitch, CircuitBreaker
+    from app.data.cache import cache as _global_cache
+
+    estrategia = getattr(user, "estrategia", "CORE") or "CORE"
+
+    # Kill switch check
+    try:
+        _ks = KillSwitch.from_db(db)
+        if _ks.nivel >= 2:
+            raise HTTPException(status_code=503, detail=f"Kill Switch nível {_ks.nivel} ativo: {_ks.motivo}")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    # Alvos de alocação
+    alvos = {
+        "etfs": portfolio.alvo_etfs or 0,
+        "fiis": portfolio.alvo_fiis or 0,
+        "renda_fixa": portfolio.alvo_renda_fixa or 0,
+        "momentum": portfolio.alvo_momentum or 0,
+        "wheel": portfolio.alvo_wheel or 0,
+        "alpha": portfolio.alvo_alpha or 0,
+        "dividendos": getattr(portfolio, "alvo_dividendos", 0) or 0,
+        "teses": getattr(portfolio, "alvo_teses", 0) or 0,
+        "caixa": portfolio.alvo_caixa or 0,
+    }
+
+    # Capital para teses (reservado) — CEO não interfere
+    cap_teses = round(capital * (alvos["teses"] / 100), 2) if alvos["teses"] > 0 else 0
+    capital_ceo = round(capital - cap_teses, 2)
+
+    # Prefetch dados de mercado
+    try:
+        await motor_prefetch.prefetch_dados_mercado()
+    except Exception as e:
+        logger.warning("rebalancear-ia: prefetch falhou (%s)", e)
+
+    # Roda motores
+    MOTORES = {
+        "etfs":       (motor_etfs.motor_etfs,           ETFS_WATCHLIST_FLAT),
+        "fiis":       (motor_fiis.motor_fiis,           FIIS_WATCHLIST_FLAT),
+        "renda_fixa": (motor_renda_fixa.motor_renda_fixa, []),
+        "momentum":   (motor_momentum.motor_momentum,   MOMENTUM_WATCHLIST),
+        "wheel":      (motor_wheel.motor_wheel,         WHEEL_WATCHLIST),
+        "alpha":      (motor_alpha.motor_alpha,         ALPHA_WATCHLIST),
+        "dividendos": (motor_dividendos.motor_dividendos, DIVIDENDOS_WATCHLIST),
+    }
+
+    sugestoes_raw = []
+    labels = []
+    for modulo, (motor_fn, watchlist) in MOTORES.items():
+        alvo_pct = alvos.get(modulo, 0)
+        if alvo_pct <= 0:
+            continue
+        cap_modulo = round(capital_ceo * alvo_pct / 100, 2)
+        if cap_modulo < 50:
+            continue
+        try:
+            resultado = await motor_fn(capital=cap_modulo, watchlist=watchlist)
+            if resultado:
+                sugestoes_raw.extend(resultado)
+                labels.append(modulo)
+        except Exception as e:
+            logger.warning("rebalancear-ia: motor %s falhou (%s)", modulo, e)
+
+    if not sugestoes_raw:
+        raise HTTPException(status_code=422, detail="Nenhum motor gerou sugestões. Tente novamente mais tarde.")
+
+    # Contexto do cérebro
+    try:
+        ctx_cerebro = await montar_contexto(db, user_id=user.id)
+    except Exception:
+        ctx_cerebro = None
+
+    regime_cached = _global_cache.get("market:regime")
+    regime_str = str(regime_cached.get("regime", "MISTO")) if regime_cached else "MISTO"
+    score_perfil = getattr(user, "onboarding_score", None) or 7
+
+    # Gestor geral faz a curadoria final
+    resultado_ceo = await gestor_geral.analisar(
+        candidatos=sugestoes_raw,
+        capital=capital_ceo,
+        estrategia=estrategia,
+        regime=regime_str,
+        score_perfil=score_perfil,
+        contexto=ctx_cerebro,
+        modo="rebalanceamento",
+        descricao_investidor=getattr(user, "objetivo_descricao", None),
+    )
+
+    # Desativa todas as posições antigas
+    for p in posicoes_ativas:
+        p.ativa = False
+
+    # Cria novas posições
+    novas_posicoes = []
+    for s in resultado_ceo.sugestoes_finais:
+        valor_inv = round(s.preco_atual * s.quantidade, 2)
+        pos = Position(
+            portfolio_id=portfolio.id,
+            ticker=s.ticker,
+            nome=s.nome,
+            tipo=s.tipo,
+            modulo=s.modulo,
+            quantidade=s.quantidade,
+            preco_medio=round(s.preco_atual, 2),
+            preco_atual=round(s.preco_atual, 2),
+            valor_investido=valor_inv,
+            valor_atual=valor_inv,
+            pl_reais=0.0,
+            pl_percentual=0.0,
+            apex_score=s.score,
+            moeda="BRL",
+            data_entrada=datetime.now(timezone.utc),
+        )
+        db.add(pos)
+        novas_posicoes.append({
+            "ticker": s.ticker,
+            "nome": s.nome,
+            "modulo": s.modulo,
+            "quantidade": s.quantidade,
+            "preco_atual": s.preco_atual,
+            "valor_total": s.valor_total,
+            "score": s.score,
+        })
+
+    # Teses: capital reservado
+    if cap_teses > 0:
+        db.add(Position(
+            portfolio_id=portfolio.id,
+            ticker="TESES",
+            nome="Capital para Teses (Gestão Manual)",
+            tipo="CAIXA",
+            modulo="teses",
+            quantidade=cap_teses,
+            preco_medio=1.0,
+            preco_atual=1.0,
+            valor_investido=cap_teses,
+            valor_atual=cap_teses,
+            pl_reais=0.0,
+            pl_percentual=0.0,
+            moeda="BRL",
+            data_entrada=datetime.now(timezone.utc),
+        ))
+
+    # Atualiza patrimônio
+    novo_patrimonio = sum(s.preco_atual * s.quantidade for s in resultado_ceo.sugestoes_finais) + cap_teses
+    portfolio.patrimonio_total = round(novo_patrimonio, 2)
+
+    db.commit()
+
+    return {
+        "mensagem": f"Rebalanceamento concluído — {len(novas_posicoes)} novas posições.",
+        "portfolio_id": portfolio.id,
+        "patrimonio": round(novo_patrimonio, 2),
+        "posicoes": novas_posicoes,
+        "analise": resultado_ceo.analise,
+        "motores_executados": labels,
+    }
+
+
 # ─── Sugestão de portfólio completo via IA ────────────────────────────────────
 
 class SugerirPortfolioBody(BaseModel):
@@ -1796,7 +2279,9 @@ async def sugerir_portfolio(
             "score_portfolio":    resultado_ceo.score_portfolio,
             "usou_ia":            resultado_ceo.usou_ia,
             "regime":             _regime_str,
+            "ia_erro":            resultado_ceo.ia_erro,
         },
+        "portfolio_tipo":        portfolio.tipo,
     }
     _portfolio_cache.set(_CACHE_KEY, resultado, ttl=_CACHE_TTL)
     return resultado

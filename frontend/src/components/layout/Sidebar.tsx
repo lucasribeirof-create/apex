@@ -1,5 +1,5 @@
 import { NavLink, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Newspaper, TrendingUp, Search, MessageSquare, LogOut, RefreshCw, Settings, History } from 'lucide-react'
+import { LayoutDashboard, Newspaper, TrendingUp, Search, MessageSquare, LogOut, RefreshCw, Settings, History, Banknote } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import PortfolioSwitcher from '@/components/PortfolioSwitcher'
 import clsx from 'clsx'
@@ -8,6 +8,7 @@ const navItems = [
   { path: '/briefing', label: 'Briefing', icon: Newspaper },
   { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { path: '/positions', label: 'Posições', icon: TrendingUp },
+  { path: '/dividendos', label: 'Dividendos', icon: Banknote },
   { path: '/historico', label: 'Histórico', icon: History },
   { path: '/scanner', label: 'Scanner', icon: Search },
   { path: '/chat', label: 'Chat', icon: MessageSquare },

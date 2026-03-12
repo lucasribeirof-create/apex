@@ -37,12 +37,24 @@ async def chat_com_gestor(body: ChatMensagem, user_id: Optional[int] = Depends(g
         system = build_analyst_prompt(body.modulo.lower(), patrimonio=ctx.patrimonio_total)
 
     # Chat V2: injeta contexto enriquecido na mensagem do usuário
-    contexto_extra = _montar_contexto_chat(ctx, db)
+    contexto_extra = await _montar_contexto_chat(ctx, db)
     mensagem_user = body.mensagem
 
     # Detecta ticker na mensagem para enriquecer com web search + notícias
     import re as _re
+    # Tickers BR (PETR4, VALE3) e US (AAPL, MSFT, NVDA, etc.)
     _ticker_match = _re.findall(r'\b([A-Z]{4}\d{1,2}(?:\.SA)?)\b', body.mensagem.upper())
+    if not _ticker_match:
+        _ticker_match = _re.findall(r'\b([A-Z]{2,5})\b', body.mensagem.upper())
+        # Filtra palavras comuns que não são tickers
+        _stop_words = {'COMO', 'VOCE', 'PARA', 'MINHA', 'MINHA', 'QUAL', 'SOBRE', 'AINDA', 'MAIS',
+                        'PODE', 'QUER', 'DEVO', 'ESTA', 'ESSE', 'ESSA', 'ISSO', 'ELES', 'DELA',
+                        'DELE', 'OQUE', 'QUERO', 'ACHA', 'FAÇA', 'FACA', 'OLHE', 'VEJA', 'AQUI',
+                        'AGORA', 'HOJE', 'MEUS', 'SUAS', 'SERA', 'SAIR', 'ACHO', 'FAZER', 'POST',
+                        'BODY', 'TRUE', 'NULL', 'JSON', 'HTTP', 'CHAT', 'APEX', 'MODO', 'TIPO',
+                        'RISK', 'HIGH', 'LOW', 'SELL', 'BUY', 'HOLD', 'LONG', 'SHORT', 'STOP',
+                        'ALVO', 'RISCO', 'TESE', 'FIIS', 'ETFS'}
+        _ticker_match = [t for t in _ticker_match if t not in _stop_words and len(t) >= 2]
     web_extra = ""
     if _ticker_match:
         _ticker = _ticker_match[0]
@@ -74,7 +86,9 @@ async def chat_com_gestor(body: ChatMensagem, user_id: Optional[int] = Depends(g
     if contexto_extra or web_extra:
         mensagem_user = f"{body.mensagem}\n\n---\n[CONTEXTO AUTOMÁTICO — não mencione que recebeu isto]\n{contexto_extra}{web_extra}"
 
-    messages = body.historico + [{"role": "user", "content": mensagem_user}]
+    # Gestão de janela de contexto — mantém histórico dentro do budget de tokens
+    historico_trimmed = _trim_historico(body.historico)
+    messages = historico_trimmed + [{"role": "user", "content": mensagem_user}]
     tokens = 8000 if body.modulo else 4000
 
     async def gerador():
@@ -528,7 +542,26 @@ async def _build_context(db: Session, user_id: Optional[int] = None):
     return ctx, system
 
 
-def _montar_contexto_chat(ctx, db) -> str:
+def _trim_historico(historico: list[dict], max_chars: int = 80_000) -> list[dict]:
+    """Mantém as mensagens mais recentes dentro do budget de caracteres (~20K tokens)."""
+    if not historico:
+        return historico
+    total = sum(len(m.get("content", "")) for m in historico)
+    if total <= max_chars:
+        return historico
+    # Remove mensagens antigas mantendo as mais recentes
+    trimmed = []
+    running = 0
+    for msg in reversed(historico):
+        msg_len = len(msg.get("content", ""))
+        if running + msg_len > max_chars:
+            break
+        trimmed.insert(0, msg)
+        running += msg_len
+    return trimmed
+
+
+async def _montar_contexto_chat(ctx, db) -> str:
     """Monta contexto enriquecido para o Chat V2 — macro, teses, correlação, histórico + Cérebro completo."""
     partes = []
 
@@ -545,22 +578,17 @@ def _montar_contexto_chat(ctx, db) -> str:
     if macro_flags:
         partes.append("ALERTAS MACRO: " + " | ".join(macro_flags))
 
-    # Status das teses
+    # Status das teses (agora async — funciona corretamente)
     try:
         from app.cerebro.teses import monitorar_teses
-        import asyncio
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            pass  # monitorar é async, skip se não pudermos aguardar
-        else:
-            status = loop.run_until_complete(monitorar_teses(db, ctx.portfolio_id))
-            if status.get("total", 0) > 0:
-                teses_txt = f"TESES: {status['total']} total, {status.get('ativas', 0)} ativas"
-                if status.get("enfraquecidas"):
-                    teses_txt += f", {status['enfraquecidas']} enfraquecidas"
-                if status.get("alertas"):
-                    teses_txt += "\n  " + "\n  ".join(status["alertas"][:3])
-                partes.append(teses_txt)
+        status = await monitorar_teses(db, ctx.portfolio_id)
+        if status.get("total", 0) > 0:
+            teses_txt = f"TESES: {status['total']} total, {status.get('ativas', 0)} ativas"
+            if status.get("enfraquecidas"):
+                teses_txt += f", {status['enfraquecidas']} enfraquecidas"
+            if status.get("alertas"):
+                teses_txt += "\n  " + "\n  ".join(status["alertas"][:3])
+            partes.append(teses_txt)
     except Exception:
         pass
 

@@ -289,6 +289,66 @@ def _score_macro_alinhamento(setor: str, macro) -> tuple[int, list[str]]:
         elif setor in ("tecnologia", "consumo"):
             pontos -= 5
 
+    # ── Commodities (novos indicadores) ───────────────────────────────────
+    cobre = getattr(macro, "cobre", None)
+    soja = getattr(macro, "soja", None)
+    milho = getattr(macro, "milho", None)
+    minerio = getattr(macro, "minerio_ferro", None)
+
+    # Cobre alto = expansão industrial global
+    if cobre is not None:
+        if cobre > 4.5:
+            if setor in ("mineracao", "industrial"):
+                pontos += 10
+                motivos.append(f"Cobre alto (${cobre:.2f}/lb) sinaliza expansão global — favorece {setor}")
+        elif cobre < 3.5:
+            if setor in ("mineracao", "industrial"):
+                pontos -= 10
+                motivos.append(f"Cobre baixo (${cobre:.2f}/lb) sinaliza contração — pressiona {setor}")
+
+    # Soja/milho altos = bom para agro
+    if soja is not None:
+        if soja > 1400:
+            if setor == "agro":
+                pontos += 10
+                motivos.append(f"Soja em alta (${soja:.0f}/bu) favorece agro")
+        elif soja < 1000:
+            if setor == "agro":
+                pontos -= 10
+                motivos.append(f"Soja em baixa (${soja:.0f}/bu) pressiona agro")
+
+    # Curva DI (juros futuros) — novo indicador setorial
+    inclinacao_di = getattr(macro, "inclinacao_di", None)
+    if inclinacao_di is not None:
+        if inclinacao_di > 1.0:
+            # Mercado espera mais juros → bom pra financeiro, ruim pra imob/consumo
+            if setor == "financeiro":
+                pontos += 10
+                motivos.append(f"Curva DI inclinando (+{inclinacao_di:.1f}pp) — margem bancária deve subir")
+            elif setor in ("imobiliario", "consumo"):
+                pontos -= 10
+                motivos.append(f"Curva DI inclinando — mercado precifica mais juros, pressiona {setor}")
+        elif inclinacao_di < -1.0:
+            # Mercado espera queda de juros → bom pra imob/consumo, ruim pra financeiro
+            if setor in ("imobiliario", "consumo", "utilidades"):
+                pontos += 10
+                motivos.append(f"Curva DI invertendo ({inclinacao_di:.1f}pp) — mercado precifica queda de juros, favorece {setor}")
+            elif setor == "financeiro":
+                pontos -= 5
+                motivos.append("Curva DI invertendo — margem bancária pode cair")
+
+    # China (Hang Seng) — afeta mineração/agro diretamente
+    hang_seng_var = getattr(macro, "hang_seng_var_pct", None)
+    if hang_seng_var is not None:
+        if hang_seng_var < -2:
+            if setor in ("mineracao", "agro"):
+                pontos -= 10
+                motivos.append(f"Hang Seng caindo {hang_seng_var:.1f}% — risco China afeta exportadores de commodities")
+        elif hang_seng_var > 2:
+            if setor in ("mineracao", "agro"):
+                pontos += 5
+                motivos.append("China em alta — positivo para exportadores de commodities")
+
     return max(0, min(100, pontos)), motivos
 
 

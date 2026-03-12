@@ -11,7 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.config import APP_HOST, APP_PORT, DEBUG, BRIEFING_HOUR, BRIEFING_MINUTE
 from app.models import create_tables, migrate_db
 from app.tasks import tarefa_morning_briefing
-from app.api.routes import onboarding, dashboard, chat, briefing, portfolio, market, settings, scanner, teses, transacoes, watchlist
+from app.api.routes import onboarding, dashboard, chat, briefing, portfolio, market, settings, scanner, teses, transacoes, watchlist, dividendos
 
 # ─── Scheduler (APScheduler — substitui Celery/Redis nesta fase) ───────────────
 scheduler = AsyncIOScheduler()
@@ -71,6 +71,7 @@ app.include_router(scanner.router)
 app.include_router(teses.router)
 app.include_router(transacoes.router)
 app.include_router(watchlist.router)
+app.include_router(dividendos.router)
 
 
 @app.get("/health")

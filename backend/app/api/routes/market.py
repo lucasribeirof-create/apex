@@ -1,9 +1,29 @@
 """Rota de dados de mercado — cotações, busca, macro."""
+import json
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from app.data import get_quote, get_quotes, get_history, search_tickers, get_macro_br, get_macro_global
 from app.data.yfinance_client import get_history_global
 from app.data.cache import cache
 from app.core.regime import calcular_regime, get_acoes_permitidas_regime
+
+
+class _NumpySafeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        try:
+            import numpy as np
+            if isinstance(obj, np.bool_): return bool(obj)
+            if isinstance(obj, np.integer): return int(obj)
+            if isinstance(obj, np.floating): return float(obj)
+            if isinstance(obj, np.ndarray): return obj.tolist()
+        except ImportError:
+            pass
+        return super().default(obj)
+
+
+def _sanitize(obj):
+    return json.loads(json.dumps(obj, cls=_NumpySafeEncoder, default=str))
+
 
 router = APIRouter(prefix="/market", tags=["market"])
 
@@ -46,7 +66,7 @@ async def regime_mercado():
     cache_key = "market:regime"
     cached = cache.get(cache_key)
     if cached:
-        return cached
+        return JSONResponse(content=_sanitize(cached))
 
     data = await get_history_global("^BVSP", period="1y", interval="1d")
     if not data:
@@ -66,7 +86,7 @@ async def regime_mercado():
     acoes = get_acoes_permitidas_regime(resultado.regime)
 
     resposta = {
-        "regime": resultado.regime,
+        "regime": resultado.regime.value if hasattr(resultado.regime, 'value') else str(resultado.regime),
         "motivo": resultado.regime_motivo,
         "detalhes": resultado.detalhes,
         "sinais": resultado.sinais,
@@ -74,7 +94,7 @@ async def regime_mercado():
         "acoes": acoes,
     }
     cache.set(cache_key, resposta, ttl=TTL)
-    return resposta
+    return JSONResponse(content=_sanitize(resposta))
 
 
 @router.get("/cache/stats")

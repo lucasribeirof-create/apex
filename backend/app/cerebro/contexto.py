@@ -309,6 +309,55 @@ async def montar(
 
     macro = {**(macro_br or {}), **(macro_global or {})}
 
+    # Injetar campos do MacroContext no dict legado para uso nos prompts
+    if macro_context_obj:
+        _macro_fields = [
+            ("sp500_futures", "sp500_futures"),
+            ("sp500_futures_var_pct", "sp500_futures_variacao"),
+            ("nasdaq_futures", "nasdaq_futures"),
+            ("nasdaq_futures_var_pct", "nasdaq_futures_variacao"),
+            # Yield curve
+            ("treasury_5y", "treasury_5y"),
+            ("treasury_30y", "treasury_30y"),
+            ("yield_spread_2y10y", "yield_spread_2y10y"),
+            ("yield_spread_2y30y", "yield_spread_2y30y"),
+            # Commodities
+            ("cobre", "cobre"),
+            ("soja", "soja"),
+            ("milho", "milho"),
+            ("minerio_ferro", "minerio_ferro"),
+            # Moedas cross
+            ("usdjpy", "usdjpy"),
+            ("eurusd", "eurusd"),
+            ("usdcny", "usdcny"),
+            # Credit
+            ("hyg", "hyg"),
+            ("lqd", "lqd"),
+            ("credit_spread", "credit_spread"),
+            # Sentiment / Crypto
+            ("btc", "btc"),
+            ("btc_var_pct", "btc_var_pct"),
+            # China
+            ("hang_seng", "hang_seng"),
+            ("hang_seng_var_pct", "hang_seng_var_pct"),
+            # EWZ
+            ("ewz", "ewz"),
+            ("ewz_var_pct", "ewz_var_pct"),
+            # Brasil extras
+            ("ifix", "ifix"),
+            ("ifix_var_pct", "ifix_var_pct"),
+            # Curva DI
+            ("di_1ano", "di_1ano"),
+            ("di_2anos", "di_2anos"),
+            ("di_3anos", "di_3anos"),
+            ("di_5anos", "di_5anos"),
+            ("inclinacao_di", "inclinacao_di"),
+        ]
+        for attr, key in _macro_fields:
+            val = getattr(macro_context_obj, attr, None)
+            if val is not None:
+                macro[key] = val
+
     # ── Regime enriquecido (v2) ────────────────────────────────────────────
     from app.core.regime import RegimeInfo as _RegimeInfo
     regime_info_obj: Optional[_RegimeInfo] = None

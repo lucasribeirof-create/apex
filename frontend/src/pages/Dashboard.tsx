@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import {
   TrendingUp, DollarSign, Globe, Calendar,
-  Shield, FileText, AlertTriangle, RefreshCw, Zap, ArrowUpRight,
+  FileText, AlertTriangle, RefreshCw, Zap, ArrowUpRight,
   ArrowDownRight, Crosshair
 } from 'lucide-react'
 import api from '@/services/api'
@@ -59,29 +59,26 @@ export default function DashboardPage() {
   const [regime, setRegime] = useState<any>(null)
   const [macroData, setMacroData] = useState<any>(null)
   const [tesesData, setTesesData] = useState<any>(null)
-  const [stressData, setStressData] = useState<any>(null)
   const [perfData, setPerfData] = useState<any>(null)
   const [dividendosData, setDividendosData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [v2Loading, setV2Loading] = useState({ macro: true, teses: true, stress: true, perf: true, divs: true })
+  const [v2Loading, setV2Loading] = useState({ macro: true, teses: true, perf: true, divs: true })
 
   async function loadDashboard() {
     setLoading(true)
     setError(null)
-    setV2Loading({ macro: true, teses: true, stress: true, perf: true, divs: true })
+    setV2Loading({ macro: true, teses: true, perf: true, divs: true })
     try {
-      const [dashRes, regimeRes] = await Promise.all([
-        api.get('/dashboard/'),
-        api.get('/market/regime'),
-      ])
+      const dashRes = await api.get('/dashboard/')
       setDash(dashRes.data)
-      setRegime(regimeRes.data)
+
+      // Regime — não bloqueia o dashboard se falhar
+      api.get('/market/regime').then(r => setRegime(r.data)).catch(e => console.warn('Regime:', e))
 
       // V2 endpoints — load in background
       api.get('/dashboard/macro').then(r => setMacroData(r.data)).catch(e => console.warn('Dashboard macro:', e)).finally(() => setV2Loading(s => ({ ...s, macro: false })))
       api.get('/dashboard/teses').then(r => setTesesData(r.data)).catch(e => console.warn('Dashboard teses:', e)).finally(() => setV2Loading(s => ({ ...s, teses: false })))
-      api.get('/dashboard/stress').then(r => setStressData(r.data)).catch(e => console.warn('Dashboard stress:', e)).finally(() => setV2Loading(s => ({ ...s, stress: false })))
       api.get('/dashboard/performance').then(r => setPerfData(r.data)).catch(e => console.warn('Dashboard perf:', e)).finally(() => setV2Loading(s => ({ ...s, perf: false })))
       api.get('/dashboard/dividendos').then(r => setDividendosData(r.data)).catch(e => console.warn('Dashboard divs:', e)).finally(() => setV2Loading(s => ({ ...s, divs: false })))
     } catch (err: any) {
@@ -253,7 +250,12 @@ export default function DashboardPage() {
             </div>
           </div>
           <p className="text-xl font-bold font-data" style={{ color: '#f1f5f9' }}>{(varMes ?? 0) >= 0 ? '+' : ''}{(varMes ?? 0).toFixed(2)}%</p>
-          <p className="text-xs mt-1" style={{ color: '#64748b' }}>vs CDI: –</p>
+          <p className="text-xs mt-1" style={{ color: '#64748b' }}>
+            vs CDI: {dash?.patrimonio?.vs_cdi != null
+              ? <span style={{ color: dash.patrimonio.vs_cdi >= 0 ? '#00E676' : '#FF5252' }}>{dash.patrimonio.vs_cdi >= 0 ? '+' : ''}{dash.patrimonio.vs_cdi.toFixed(2)}pp</span>
+              : '–'}
+            {dash?.patrimonio?.cdi_mes_pct != null && <span> (CDI mês: {dash.patrimonio.cdi_mes_pct.toFixed(2)}%)</span>}
+          </p>
         </motion.div>
 
         {/* P&L Total */}
@@ -483,7 +485,7 @@ export default function DashboardPage() {
       )}
 
       {/* Painel Macro */}
-      {v2Loading ? (
+      {v2Loading.macro ? (
         <motion.div className="apex-card p-5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.45 }}>
           <div className="flex items-center gap-2 mb-4">
             <Globe size={16} style={{ color: '#00B0FF' }} />
@@ -505,23 +507,32 @@ export default function DashboardPage() {
             <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>PAINEL MACRO</h3>
           </div>
 
-          <div className="grid grid-cols-5 gap-3 mb-3">
+          <p className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: '#475569' }}>GLOBAL</p>
+          <div className="grid grid-cols-4 lg:grid-cols-7 gap-3 mb-4">
             {[
               { label: 'VIX', value: macroData.global?.vix, fmt: (v: number) => v?.toFixed(1), warn: (v: number) => v > 25 },
               { label: 'Treasury 10Y', value: macroData.global?.treasury_10y, fmt: (v: number) => `${v?.toFixed(2)}%` },
               { label: 'DXY', value: macroData.global?.dxy, fmt: (v: number) => v?.toFixed(2) },
+              { label: 'S&P 500', value: macroData.global?.sp500, fmt: (v: number) => fmt(v ?? 0), sub: macroData.global?.sp500_var_pct },
+              { label: 'Dow Jones', value: macroData.global?.dow_jones, fmt: (v: number) => fmt(v ?? 0), sub: macroData.global?.dow_jones_var_pct },
               { label: 'Petróleo WTI', value: macroData.global?.petroleo_wti, fmt: (v: number) => `$${v?.toFixed(0)}` },
               { label: 'Ouro', value: macroData.global?.ouro, fmt: (v: number) => `$${fmt(v ?? 0)}` },
             ].map(item => (
               <div key={item.label} className="rounded-lg p-3" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
-                <p className="text-xs font-mono uppercase tracking-wider mb-1" style={{ color: '#475569' }}>{item.label}</p>
-                <p className="text-lg font-bold font-data" style={{ color: item.warn?.(item.value) ? '#FF5252' : '#f1f5f9' }}>
+                <p className="text-[10px] font-mono uppercase tracking-wider mb-1" style={{ color: '#475569' }}>{item.label}</p>
+                <p className="text-base font-bold font-data" style={{ color: (item as any).warn?.(item.value) ? '#FF5252' : '#f1f5f9' }}>
                   {item.value != null ? item.fmt(item.value) : '–'}
                 </p>
+                {(item as any).sub != null && (
+                  <p className="text-[10px] font-mono mt-0.5" style={{ color: (item as any).sub >= 0 ? '#00E676' : '#FF5252' }}>
+                    {(item as any).sub >= 0 ? '+' : ''}{((item as any).sub as number).toFixed(2)}%
+                  </p>
+                )}
               </div>
             ))}
           </div>
 
+          <p className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: '#475569' }}>BRASIL</p>
           <div className="grid grid-cols-5 gap-3">
             {[
               { label: 'Selic', value: macroData.brasil?.selic, fmt: (v: number) => `${v?.toFixed(2)}%` },
@@ -531,8 +542,8 @@ export default function DashboardPage() {
               { label: 'IBOV', value: macroData.brasil?.ibov, fmt: (v: number) => fmt(v ?? 0) },
             ].map(item => (
               <div key={item.label} className="rounded-lg p-3" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
-                <p className="text-xs font-mono uppercase tracking-wider mb-1" style={{ color: '#475569' }}>{item.label}</p>
-                <p className="text-lg font-bold font-data" style={{ color: item.warn?.(item.value) ? '#FFD740' : '#f1f5f9' }}>
+                <p className="text-[10px] font-mono uppercase tracking-wider mb-1" style={{ color: '#475569' }}>{item.label}</p>
+                <p className="text-base font-bold font-data" style={{ color: item.warn?.(item.value) ? '#FFD740' : '#f1f5f9' }}>
                   {item.value != null ? item.fmt(item.value) : '–'}
                 </p>
               </div>
@@ -552,9 +563,9 @@ export default function DashboardPage() {
         </motion.div>
       )}
 
-      <div className="grid grid-cols-2 gap-4">
+      <div>
         {/* Teses de Investimento */}
-        {v2Loading ? (
+        {v2Loading.teses ? (
           <motion.div className="apex-card p-5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.5 }}>
             <div className="flex items-center gap-2 mb-4">
               <FileText size={16} style={{ color: '#AA00FF' }} />
@@ -601,45 +612,6 @@ export default function DashboardPage() {
                 ))}
               </div>
             )}
-          </motion.div>
-        )}
-
-        {/* Stress Test */}
-        {v2Loading ? (
-          <motion.div className="apex-card p-5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.55 }}>
-            <div className="flex items-center gap-2 mb-4">
-              <Shield size={16} style={{ color: '#FF6D00' }} />
-              <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>STRESS TEST</h3>
-            </div>
-            <div className="space-y-2">
-              {[1,2,3].map(i => <Skeleton key={i} className="h-10 rounded-lg" />)}
-            </div>
-          </motion.div>
-        ) : stressData && Array.isArray(stressData) && stressData.length > 0 && (
-          <motion.div
-            className="apex-card p-5"
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.55 }}
-          >
-            <div className="flex items-center gap-2 mb-4">
-              <Shield size={16} style={{ color: '#FF6D00' }} />
-              <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>STRESS TEST</h3>
-            </div>
-
-            <div className="space-y-2">
-              {stressData.map((cenario: any, i: number) => (
-                <div key={i} className="rounded-lg p-3 flex items-center justify-between" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
-                  <span className="text-xs font-mono" style={{ color: '#94a3b8' }}>{cenario.cenario}</span>
-                  <span className="text-sm font-bold font-data" style={{
-                    color: cenario.impacto_estimado_pct < -10 ? '#FF5252' :
-                           cenario.impacto_estimado_pct < -5 ? '#FFD740' : '#00E676'
-                  }}>
-                    {cenario.impacto_estimado_pct?.toFixed(1)}%
-                  </span>
-                </div>
-              ))}
-            </div>
           </motion.div>
         )}
       </div>

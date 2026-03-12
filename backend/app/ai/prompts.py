@@ -36,6 +36,8 @@ def build_portfolio_prompt(
     posicoes: list[dict],
     regime: str,
     macro: dict,
+    narrativa_macro: str = "",
+    macro_flags: list[str] | None = None,
 ) -> str:
     """
     Constrói o system prompt completo com contexto do portfólio.
@@ -50,6 +52,14 @@ def build_portfolio_prompt(
     elif estrategia == "ALPHA":
         regime_extra = "\n\nFoco ALPHA: pense em assimetria. O setup tem razão risco/retorno acima de 1:3? Se não tiver, não vale o risco em carteira concentrada. Identifique o catalisador específico e o prazo esperado. Sem catalisador claro, é especulação — não posição ALPHA."
 
+    narrativa_bloco = ""
+    if narrativa_macro:
+        narrativa_bloco = f"\n\nNarrativa macro (visão consolidada do Cérebro):\n{narrativa_macro[:1500]}"
+
+    flags_bloco = ""
+    if macro_flags:
+        flags_bloco = f"\n\nAlertas macro ativos: {' | '.join(macro_flags)}"
+
     return f"""{GESTOR_BASE}
 
 ---
@@ -62,7 +72,7 @@ Posições abertas:
 {posicoes_str}
 
 Macro atual:
-{macro_str}
+{macro_str}{narrativa_bloco}{flags_bloco}
 
 Regime: {regime}{regime_extra}
 
@@ -133,37 +143,55 @@ def build_briefing_prompt(
 
     data_str = f" | {data_hoje}" if data_hoje else ""
 
-    return f"""Você é o Gestor APEX. Produza o morning call do dia de forma COMPACTA e OBJETIVA.
-Máximo 250 palavras. Sem introduções, sem rodeios — dados e interpretação direto.
+    # Detectar horário de mercado para contextualizar dados
+    from datetime import datetime
+    agora = datetime.now()
+    hora = agora.hour
+    # B3 abre 10h, fecha 17h (horário de Brasília)
+    # Futuros US operam ~23h (18h-17h ET, ~19h-18h BRT)
+    if hora < 10:
+        mercado_status = "ATENÇÃO: Dados de IBOV e Dólar são do FECHAMENTO ANTERIOR (B3 ainda não abriu). Use os futuros americanos (ES=F, NQ=F) para inferir direção de abertura."
+    elif hora >= 18:
+        mercado_status = "Dados de IBOV e Dólar são do fechamento de hoje. Mercado brasileiro encerrado."
+    else:
+        mercado_status = "Dados em tempo real (mercado brasileiro aberto)."
 
-DADOS COLETADOS AGORA ({data_hoje or 'hoje'}):
+    return f"""Você é o Gestor APEX. Produza o morning call do dia de forma DENSA e OBJETIVA.
+Sem introduções, sem rodeios — dados e interpretação direto.
+
+{mercado_status}
+
+DADOS COLETADOS ({data_hoje or 'hoje'}):
 {macro_str} | Regime: {regime}
 
 PORTFÓLIO (referência para alertas):
 {portfolio_str}
 
-FORMATO OBRIGATÓRIO — 4 blocos exatos, sem adicionar nem remover:
+FORMATO OBRIGATÓRIO — use todas as seções abaixo:
 
-**MERCADO**
-• [Tom do dia em 1 linha: risk-on / risk-off / indeciso. S&P, Nasdaq, IBOV e dólar em números.]
-• [Driver global dominante hoje: Fed / macro EUA / China / geopolítica — qual é e o que significa.]{f"""
-• [BDRs/exterior: S&P e dólar impactam diretamente — sinalize direção.]""" if tem_internacional else ""}
+**SNAPSHOT DE ABERTURA**
+[Tom do dia em 2-3 linhas densas: risk-on / risk-off / indeciso. S&P, Nasdaq, IBOV e dólar em números. Se dados são do fechamento anterior, diga explicitamente "fechamento anterior" e use futuros para sinalizar direção de abertura.]
 
-**BRASIL**
+**MACRO GLOBAL**
+[Driver global dominante hoje e o que significa. DXY, VIX, petróleo, treasuries — o que está movendo. 2-3 parágrafos densos.]{f"""
+[BDRs/exterior: S&P e dólar impactam diretamente — sinalize direção.]""" if tem_internacional else ""}
+
+**MACRO BRASIL**
 • Câmbio: [comportado ou pressionado — razão em 1 linha.]
-• Juros DI: [abrindo ou fechando — o que o mercado está precificando e impacto em ações/FIIs.]{f"""
+• Curva de juros (DI): [abrindo ou fechando — o que o mercado está precificando.]{f"""
 • FIIs: [impacto direto da curva — positivo ou negativo.]""" if tem_fiis else ""}
 • IBOV: [setor líder hoje e por quê.]
 
-**AGENDA**
-• [Evento 1 desta semana que faz preço → expectativa e o que seria surpresa.]
-• [Evento 2 — se relevante. Omitir se não houver mais eventos.]
-{'• PORTFÓLIO: [ticker + evento + o que monitorar — só se houver urgência real. Omitir se não houver.]' if portfolio_str != 'Nenhuma posição aberta.' else ''}
+**CALENDÁRIO ECONÔMICO — HOJE E ESTA SEMANA**
+[Eventos com data, país, indicador, previsão e anterior. Só eventos que fazem preço.]
 
-**VIÉS APEX**
-[Comprador / Vendedor / Neutro] — [razão em até 12 palavras.]
+**ALERTA DE PORTFÓLIO**
+[Posições que merecem atenção: stops próximos, P&L expressivo (+/-), catalisadores iminentes. Seja específico com preço e %. Omitir se não houver alerta real.]
 
-Regras: bullets curtos, dados em números, zero floreio. Se não tiver dado, omite o bullet."""
+**VIÉS DO DIA**
+[Comprador / Vendedor / Neutro] — [razão em 1-2 linhas.]
+
+Regras: dados em números, zero floreio, opinião com convicção. Se dados são do fechamento anterior, SEMPRE indique isso ao citar IBOV/dólar. Use futuros (ES=F, NQ=F) quando disponíveis para inferir direção. Se não tiver dado, omite o bullet."""
 
 # ─── Helpers internos ─────────────────────────────────────────────────────────
 
@@ -215,8 +243,42 @@ def _formatar_macro(macro: dict) -> str:
         partes.append(f"Dólar: R$ {macro['dolar']:.2f} ({macro.get('dolar_variacao', 0):+.2f}%)")
     if macro.get("ibov"):
         partes.append(f"IBOV: {macro['ibov']:,.0f} pts ({macro.get('ibov_variacao', 0):+.2f}%)")
+    if macro.get("ifix"):
+        partes.append(f"IFIX: {macro['ifix']:,.0f} ({macro.get('ifix_variacao', 0):+.2f}%)")
     if macro.get("vix"):
         partes.append(f"VIX: {macro['vix']:.1f}")
     if macro.get("sp500"):
         partes.append(f"S&P500: {macro['sp500']:,.0f} ({macro.get('sp500_variacao', 0):+.2f}%)")
+    if macro.get("sp500_futures"):
+        partes.append(f"Futuros S&P500: {macro['sp500_futures']:,.0f} ({macro.get('sp500_futures_variacao', 0):+.2f}%)")
+    if macro.get("nasdaq_futures"):
+        partes.append(f"Futuros Nasdaq: {macro['nasdaq_futures']:,.0f} ({macro.get('nasdaq_futures_variacao', 0):+.2f}%)")
+    # Curva de juros
+    if macro.get("treasury_10y"):
+        partes.append(f"Treasury 10Y: {macro['treasury_10y']:.2f}%")
+    if macro.get("treasury_5y"):
+        partes.append(f"Treasury 5Y: {macro['treasury_5y']:.2f}%")
+    if macro.get("treasury_30y"):
+        partes.append(f"Treasury 30Y: {macro['treasury_30y']:.2f}%")
+    # Commodities
+    if macro.get("cobre"):
+        partes.append(f"Cobre: ${macro['cobre']:.2f}/lb")
+    if macro.get("soja"):
+        partes.append(f"Soja: ${macro['soja']:.0f}/bu")
+    if macro.get("milho"):
+        partes.append(f"Milho: ${macro['milho']:.0f}/bu")
+    # Curva DI
+    di_parts = []
+    for k, label in [("di_1ano", "1A"), ("di_2anos", "2A"), ("di_3anos", "3A"), ("di_5anos", "5A")]:
+        if macro.get(k):
+            di_parts.append(f"{label}:{macro[k]:.2f}%")
+    if di_parts:
+        partes.append(f"DI: {' '.join(di_parts)}")
+    # EWZ / BTC / Credit
+    if macro.get("ewz"):
+        partes.append(f"EWZ: ${macro['ewz']:.2f} ({macro.get('ewz_variacao', 0):+.2f}%)")
+    if macro.get("btc"):
+        partes.append(f"BTC: ${macro['btc']:,.0f}")
+    if macro.get("hang_seng"):
+        partes.append(f"HangSeng: {macro['hang_seng']:,.0f}")
     return " | ".join(partes) if partes else "Dados macro indisponíveis."

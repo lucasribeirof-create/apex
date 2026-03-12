@@ -8,9 +8,10 @@ from app.models.transacao import Transacao
 from app.models.tese_investimento import TeseInvestimento
 from app.models.trade_journal import TradeJournal
 from app.models.watchlist import Watchlist
+from app.models.dividend_event import DividendEvent
 
 __all__ = [
     "Base", "engine", "SessionLocal", "get_db", "create_tables", "migrate_db",
     "User", "Portfolio", "Position", "Briefing", "Aporte", "Transacao",
-    "TeseInvestimento", "TradeJournal", "Watchlist",
+    "TeseInvestimento", "TradeJournal", "Watchlist", "DividendEvent",
 ]

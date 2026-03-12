@@ -1,6 +1,6 @@
-﻿import { useState, useRef, useEffect } from 'react'
+﻿import { useState, useRef, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Send, MessageSquare, Wand2, X, Check, AlertTriangle, Trash2, Zap } from 'lucide-react'
+import { Send, MessageSquare, Wand2, X, Check, AlertTriangle, Trash2, Zap, Square, Copy, CheckCheck } from 'lucide-react'
 import { useStore, ChatMessage, ChatRegularMessage, ChatProposalMessage, ChatProposalAction } from '@/store/useStore'
 import api from '@/services/api'
 import { useCostEstimates } from '@/hooks/useCostEstimates'
@@ -26,27 +26,86 @@ function formatTokens(n: number): string {
   return String(n)
 }
 
-// ─── Markdown renderer ───────────────────────────────────────────────────────
+// ─── Copy button ─────────────────────────────────────────────────────────────
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = () => {
+    navigator.clipboard.writeText(text)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+  return (
+    <button onClick={handleCopy} className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-white/5"
+      title="Copiar resposta">
+      {copied ? <CheckCheck size={12} style={{ color: '#00E676' }} /> : <Copy size={12} style={{ color: '#64748b' }} />}
+    </button>
+  )
+}
+
+// ─── Markdown renderer (v2 — code blocks, tables, italic, numbered lists) ──
+
+function inlineFormat(text: string): React.ReactNode {
+  // Split by inline code first, then process bold/italic in non-code segments
+  const codeParts = text.split(/(`[^`]+`)/g)
+  return <>{codeParts.map((part, i) => {
+    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+      return <code key={i} className="px-1.5 py-0.5 rounded text-xs font-mono"
+        style={{ background: 'rgba(0,230,118,0.08)', color: '#00E676' }}>{part.slice(1, -1)}</code>
+    }
+    // Bold + italic
+    const segments = part.split(/(\*\*\*.*?\*\*\*|\*\*.*?\*\*|\*[^*]+\*)/g)
+    return <span key={i}>{segments.map((seg, j) => {
+      if (seg.startsWith('***') && seg.endsWith('***'))
+        return <strong key={j} style={{ color: '#f1f5f9', fontWeight: 600, fontStyle: 'italic' }}>{seg.slice(3, -3)}</strong>
+      if (seg.startsWith('**') && seg.endsWith('**'))
+        return <strong key={j} style={{ color: '#f1f5f9', fontWeight: 600 }}>{seg.slice(2, -2)}</strong>
+      if (seg.startsWith('*') && seg.endsWith('*') && seg.length > 2)
+        return <em key={j} style={{ color: '#cbd5e1' }}>{seg.slice(1, -1)}</em>
+      return <span key={j}>{seg}</span>
+    })}</span>
+  })}</>
+}
 
 function renderMarkdown(text: string): React.ReactNode[] {
   const lines = text.split('\n')
   const nodes: React.ReactNode[] = []
   let key = 0
+  let i = 0
 
-  const inlineFormat = (line: string): React.ReactNode => {
-    const parts = line.split(/(\*\*.*?\*\*)/g)
-    return <>{parts.map((part, i) =>
-      part.startsWith('**') && part.endsWith('**')
-        ? <strong key={i} style={{ color: '#f1f5f9', fontWeight: 600 }}>{part.slice(2, -2)}</strong>
-        : <span key={i}>{part}</span>
-    )}</>
-  }
-
-  for (let i = 0; i < lines.length; i++) {
+  while (i < lines.length) {
     const line = lines[i]
+
+    // Code block (```)
+    if (line.trim().startsWith('```')) {
+      const lang = line.trim().slice(3).trim()
+      const codeLines: string[] = []
+      i++
+      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+        codeLines.push(lines[i])
+        i++
+      }
+      i++ // skip closing ```
+      nodes.push(
+        <div key={key++} className="my-2 rounded-lg overflow-hidden" style={{ border: '1px solid #1e293b' }}>
+          {lang && <div className="px-3 py-1 text-[10px] font-mono" style={{ background: 'rgba(0,0,0,0.4)', color: '#64748b' }}>{lang}</div>}
+          <pre className="px-3 py-2 text-xs font-mono overflow-x-auto leading-relaxed" style={{ background: 'rgba(0,0,0,0.3)', color: '#e2e8f0' }}>
+            {codeLines.join('\n')}
+          </pre>
+        </div>
+      )
+      continue
+    }
+
+    // Empty line
     if (!line.trim()) {
       nodes.push(<div key={key++} className="h-2" />)
-    } else if (/^#{1,3} /.test(line)) {
+      i++
+      continue
+    }
+
+    // Headers
+    if (/^#{1,3} /.test(line)) {
       const level = (line.match(/^(#+) /) || ['', '#'])[1].length
       const content = line.replace(/^#+\s/, '')
       const sizes = ['text-base', 'text-sm', 'text-sm']
@@ -56,16 +115,88 @@ function renderMarkdown(text: string): React.ReactNode[] {
           {inlineFormat(content)}
         </p>
       )
-    } else if (/^[-•*] /.test(line)) {
+      i++
+      continue
+    }
+
+    // Blockquote
+    if (line.startsWith('> ')) {
+      nodes.push(
+        <div key={key++} className="my-1 pl-3 py-1" style={{ borderLeft: '2px solid #00E676', color: '#94a3b8' }}>
+          {inlineFormat(line.slice(2))}
+        </div>
+      )
+      i++
+      continue
+    }
+
+    // Table (detect by |)
+    if (line.includes('|') && line.trim().startsWith('|')) {
+      const tableRows: string[] = []
+      while (i < lines.length && lines[i].includes('|')) {
+        const row = lines[i].trim()
+        // Skip separator rows like |---|---|
+        if (!/^\|[\s-:|]+\|$/.test(row)) {
+          tableRows.push(row)
+        }
+        i++
+      }
+      if (tableRows.length > 0) {
+        const parseRow = (row: string) =>
+          row.split('|').filter(c => c.trim()).map(c => c.trim())
+        const header = parseRow(tableRows[0])
+        const body = tableRows.slice(1).map(parseRow)
+        nodes.push(
+          <div key={key++} className="my-2 overflow-x-auto rounded-lg" style={{ border: '1px solid #1e293b' }}>
+            <table className="w-full text-xs">
+              <thead>
+                <tr style={{ background: 'rgba(0,0,0,0.3)' }}>
+                  {header.map((h, hi) => <th key={hi} className="px-3 py-1.5 text-left font-semibold" style={{ color: '#00E676' }}>{h}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {body.map((row, ri) => (
+                  <tr key={ri} style={{ borderTop: '1px solid #1e293b' }}>
+                    {row.map((cell, ci) => <td key={ci} className="px-3 py-1.5" style={{ color: '#cbd5e1' }}>{inlineFormat(cell)}</td>)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      }
+      continue
+    }
+
+    // Numbered list
+    if (/^\d+\.\s/.test(line)) {
+      const num = line.match(/^(\d+)\.\s/)![1]
+      const content = line.replace(/^\d+\.\s/, '')
+      nodes.push(
+        <div key={key++} className="flex gap-2 my-0.5">
+          <span className="text-xs font-mono w-4 text-right flex-shrink-0" style={{ color: '#00E676' }}>{num}.</span>
+          <span>{inlineFormat(content)}</span>
+        </div>
+      )
+      i++
+      continue
+    }
+
+    // Unordered list
+    if (/^[-•*] /.test(line)) {
       nodes.push(
         <div key={key++} className="flex gap-2 my-0.5">
           <span style={{ color: '#00E676', flexShrink: 0 }}>•</span>
           <span>{inlineFormat(line.replace(/^[-•*] /, ''))}</span>
         </div>
       )
-    } else {
-      nodes.push(<p key={key++} className="leading-relaxed">{inlineFormat(line)}</p>)
+      i++
+      continue
     }
+
+    // Regular paragraph
+    nodes.push(<p key={key++} className="leading-relaxed">{inlineFormat(line)}</p>)
+    i++
   }
   return nodes
 }
@@ -233,6 +364,8 @@ export default function ChatPage() {
   const [proposalMode, setProposalMode] = useState(false)
   const [applyingIdx, setApplyingIdx] = useState<number | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
 
   // Helper that mirrors the setState(fn) pattern but writes to store
   const setMessages = (updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => {
@@ -244,6 +377,24 @@ export default function ChatPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, streamingText])
+
+  // Auto-resize textarea
+  const adjustTextarea = useCallback(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+  }, [])
+
+  useEffect(adjustTextarea, [input, adjustTextarea])
+
+  // Stop streaming
+  const stopStreaming = useCallback(() => {
+    if (abortRef.current) {
+      abortRef.current.abort()
+      abortRef.current = null
+    }
+  }, [])
 
   // â”€â”€â”€ Send normal message (streaming) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const sendMessage = async () => {
@@ -257,31 +408,44 @@ export default function ChatPage() {
     setLoading(true)
     setStreamingText('')
 
+    const controller = new AbortController()
+    abortRef.current = controller
+
     try {
       const resp = await fetch('/api/chat/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mensagem: input, historico }),
+        signal: controller.signal,
       })
       if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`)
 
       const reader = resp.body.getReader()
       const decoder = new TextDecoder()
       let full = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        full += decoder.decode(value, { stream: true })
-        setStreamingText(full)
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          full += decoder.decode(value, { stream: true })
+          setStreamingText(full)
+        }
+      } catch (e: any) {
+        if (e.name === 'AbortError') {
+          // User stopped generation — save partial text
+        } else throw e
       }
       const { cleanText, usage } = extractUsage(full)
       if (usage) addTokenUsage(usage.in, usage.out, usage.cost)
-      setMessages((m) => [...m, { role: 'assistant', content: cleanText, usage }])
-    } catch {
-      setMessages((m) => [...m, { role: 'assistant', content: 'Erro ao conectar com o gestor.' }])
+      setMessages((m) => [...m, { role: 'assistant', content: cleanText || full, usage }])
+    } catch (e: any) {
+      if (e.name !== 'AbortError') {
+        setMessages((m) => [...m, { role: 'assistant', content: 'Erro ao conectar com o gestor.' }])
+      }
     } finally {
       setLoading(false)
       setStreamingText('')
+      abortRef.current = null
     }
   }
 
@@ -459,7 +623,7 @@ export default function ChatPage() {
                 key={i}
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}
+                className={`flex gap-3 group ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}
               >
                 {msg.role === 'assistant' && (
                   <div className="w-7 h-7 rounded-xl flex items-center justify-center flex-shrink-0 mt-1" style={{ background: 'linear-gradient(135deg, #00E676, #00BFA5)' }}>
@@ -477,14 +641,19 @@ export default function ChatPage() {
                   {msg.role === 'user'
                     ? <span className="whitespace-pre-wrap">{msg.content}</span>
                     : <MessageText content={msg.content} />}
-                  {msg.role === 'assistant' && (msg as ChatRegularMessage).usage && (
-                    <div className="mt-1.5 text-[10px] flex items-center gap-1.5" style={{ color: '#475569' }}>
-                      <Zap size={9} />
-                      <span>{formatTokens((msg as ChatRegularMessage).usage!.in + (msg as ChatRegularMessage).usage!.out)} tokens</span>
-                      <span>•</span>
-                      <span>{(msg as ChatRegularMessage).usage!.cost > 0 ? `$${(msg as ChatRegularMessage).usage!.cost.toFixed(4)}` : 'grátis'}</span>
-                      <span>•</span>
-                      <span>{(msg as ChatRegularMessage).usage!.provider}</span>
+                  {msg.role === 'assistant' && (
+                    <div className="mt-1.5 flex items-center gap-2">
+                      {(msg as ChatRegularMessage).usage && (
+                        <div className="text-[10px] flex items-center gap-1.5" style={{ color: '#475569' }}>
+                          <Zap size={9} />
+                          <span>{formatTokens((msg as ChatRegularMessage).usage!.in + (msg as ChatRegularMessage).usage!.out)} tokens</span>
+                          <span>•</span>
+                          <span>{(msg as ChatRegularMessage).usage!.cost > 0 ? `$${(msg as ChatRegularMessage).usage!.cost.toFixed(4)}` : 'grátis'}</span>
+                          <span>•</span>
+                          <span>{(msg as ChatRegularMessage).usage!.provider}</span>
+                        </div>
+                      )}
+                      <CopyButton text={msg.content} />
                     </div>
                   )}
                 </div>
@@ -533,11 +702,11 @@ export default function ChatPage() {
       </AnimatePresence>
 
       {/* Input */}
-      <div className="flex gap-2 flex-shrink-0">
+      <div className="flex gap-2 flex-shrink-0 items-end">
         {/* Proposal mode toggle */}
         <button
           onClick={() => setProposalMode((v) => !v)}
-          title="Propor mudanÃ§a no portfÃ³lio"
+          title="Propor mudança no portfólio"
           disabled={loading}
           className="w-11 h-11 rounded-xl flex items-center justify-center transition-all flex-shrink-0"
           style={{
@@ -549,25 +718,49 @@ export default function ChatPage() {
           <Wand2 size={15} style={{ color: proposalMode ? '#00E676' : '#64748b' }} />
         </button>
 
-        <input
-          className="apex-input flex-1"
-          placeholder={proposalMode ? 'Descreva a mudanÃ§a que quer fazer...' : 'Pergunte ao gestor APEX...'}
+        <textarea
+          ref={textareaRef}
+          className="apex-input flex-1 resize-none"
+          placeholder={proposalMode ? 'Descreva a mudança que quer fazer...' : 'Pergunte ao gestor APEX...'}
           value={input}
+          rows={1}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
-          style={proposalMode ? { borderColor: 'rgba(0,230,118,0.2)' } : {}}
-        />
-        <button
-          onClick={handleSend}
-          disabled={!input.trim() || loading}
-          className="w-11 h-11 rounded-xl flex items-center justify-center transition-all flex-shrink-0"
-          style={{
-            background: input.trim() && !loading ? 'linear-gradient(135deg, #00E676, #00BFA5)' : '#1e293b',
-            cursor: input.trim() && !loading ? 'pointer' : 'not-allowed',
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              handleSend()
+            }
           }}
-        >
-          <Send size={16} style={{ color: input.trim() && !loading ? '#0a0e17' : '#64748b' }} />
-        </button>
+          style={{
+            ...(proposalMode ? { borderColor: 'rgba(0,230,118,0.2)' } : {}),
+            maxHeight: 160,
+            minHeight: 44,
+          }}
+        />
+
+        {/* Stop or Send button */}
+        {loading ? (
+          <button
+            onClick={stopStreaming}
+            className="w-11 h-11 rounded-xl flex items-center justify-center transition-all flex-shrink-0"
+            style={{ background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.3)', cursor: 'pointer' }}
+            title="Parar geração"
+          >
+            <Square size={14} style={{ color: '#ef4444' }} />
+          </button>
+        ) : (
+          <button
+            onClick={handleSend}
+            disabled={!input.trim()}
+            className="w-11 h-11 rounded-xl flex items-center justify-center transition-all flex-shrink-0"
+            style={{
+              background: input.trim() ? 'linear-gradient(135deg, #00E676, #00BFA5)' : '#1e293b',
+              cursor: input.trim() ? 'pointer' : 'not-allowed',
+            }}
+          >
+            <Send size={16} style={{ color: input.trim() ? '#0a0e17' : '#64748b' }} />
+          </button>
+        )}
         {chatCost && <span style={{ fontSize: 10, color: '#475569', flexShrink: 0 }}>{chatCost}</span>}
       </div>
     </div>
