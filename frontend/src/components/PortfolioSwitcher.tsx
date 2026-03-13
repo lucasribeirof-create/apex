@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ChevronDown, Plus, Copy, Layers, FlaskConical, Check, Lightbulb, Trash2 } from 'lucide-react'
+import { ChevronDown, Plus, Copy, Layers, FlaskConical, Check, Lightbulb, Trash2, Upload } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import api from '@/services/api'
 import { useStore, PortfolioInfo } from '@/store/useStore'
@@ -259,6 +259,16 @@ export default function PortfolioSwitcher({ onSwitch }: Props) {
                 >
                   <Plus size={12} />
                   Nova carteira simulada
+                </button>
+                <button
+                  onClick={() => { setOpen(false); navigate('/import') }}
+                  className="w-full flex items-center gap-2 px-3 py-2.5 text-xs transition-all"
+                  style={{ color: '#64748b', borderTop: '1px solid #1e293b' }}
+                  onMouseEnter={e => (e.currentTarget.style.color = '#42A5F5')}
+                  onMouseLeave={e => (e.currentTarget.style.color = '#64748b')}
+                >
+                  <Upload size={12} />
+                  Importar
                 </button>
               </>
             ) : criandoReal ? (

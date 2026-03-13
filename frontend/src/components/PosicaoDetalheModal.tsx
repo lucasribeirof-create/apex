@@ -10,6 +10,7 @@ import {
   Target, ShieldAlert, BarChart2, Pencil, Save, RotateCw, Download,
 } from 'lucide-react'
 import DOMPurify from 'dompurify'
+import { AreaChart, Area, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts'
 import api from '@/services/api'
 import AnaliseModal from '@/components/AnaliseModal'
 import { useCostEstimates } from '@/hooks/useCostEstimates'
@@ -41,6 +42,10 @@ export interface PositionDetalhe {
   analise_ia?: string | null
   analise_ia_at?: string | null
   justificativa_entrada?: string | null
+  dividendos_12m?: number
+  dy_12m?: number
+  proventos_acumulados?: number
+  ultimo_dividendo?: number
 }
 
 interface Transacao {
@@ -402,6 +407,8 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
   const [fundamentos, setFundamentos] = useState<Record<string, any> | null>(null)
   const [loadingFund, setLoadingFund] = useState(false)
   const fundLoadedRef = useRef<number | null>(null)
+  const [priceHistory, setPriceHistory] = useState<{ date: string; close: number }[]>([])
+  const priceHistLoadedRef = useRef<number | null>(null)
 
   // Edit mode
   const [editMode, setEditMode] = useState(false)
@@ -446,11 +453,13 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
   const plColor = position.pl_percentual > 0 ? '#00E676' : position.pl_percentual < 0 ? '#FF5252' : '#94a3b8'
   const plBg = position.pl_percentual > 0 ? 'rgba(0,230,118,0.08)' : position.pl_percentual < 0 ? 'rgba(255,82,82,0.08)' : 'rgba(148,163,184,0.08)'
 
-  // Reset fundamentos quando posição muda
+  // Reset fundamentos e priceHistory quando posição muda
   useEffect(() => {
     setFundamentos(null)
     setLoadingFund(false)
     fundLoadedRef.current = null
+    setPriceHistory([])
+    priceHistLoadedRef.current = null
   }, [position.id])
 
   // Carrega dados fundamentalistas ao abrir Resumo (lazy, 1x por posição)
@@ -465,6 +474,20 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
         .finally(() => setLoadingFund(false))
     }
   }, [tab, position.id])
+
+  // Carrega histórico de preços (3 meses) para mini-chart
+  useEffect(() => {
+    const tiposChart = ['ACAO', 'FII', 'ETF', 'BDR']
+    if (tab === 'resumo' && tiposChart.includes(position.tipo) && priceHistLoadedRef.current !== position.id) {
+      priceHistLoadedRef.current = position.id
+      api.get(`/market/history/${encodeURIComponent(position.ticker)}`, { params: { period: '3mo', interval: '1d' } })
+        .then(res => {
+          const data = res.data
+          if (Array.isArray(data)) setPriceHistory(data.map((d: any) => ({ date: d.date, close: d.close })))
+        })
+        .catch(() => setPriceHistory([]))
+    }
+  }, [tab, position.id, position.tipo, position.ticker])
 
   const loadTransacoes = async () => {
     setLoadingTx(true)
@@ -809,6 +832,63 @@ export default function PosicaoDetalheModal({ position, onClose, onUpdate }: Pro
                       )}
                     </div>
                   )}
+
+                  {/* Mini-chart de evolução 3 meses */}
+                  {['ACAO', 'FII', 'ETF', 'BDR'].includes(position.tipo) && priceHistory.length > 1 && (() => {
+                    const first = priceHistory[0].close
+                    const last = priceHistory[priceHistory.length - 1].close
+                    const isPositive = last >= first
+                    const strokeColor = isPositive ? '#00E676' : '#FF5252'
+                    const gradientId = `priceGrad_${position.id}`
+                    return (
+                      <div className="rounded-xl p-4" style={{ background: '#111827', border: '1px solid #1e293b' }}>
+                        <p className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: '#64748b' }}>📊 Evolução 3 Meses</p>
+                        <ResponsiveContainer width="100%" height={160}>
+                          <AreaChart data={priceHistory} margin={{ top: 4, right: 4, bottom: 0, left: 4 }}>
+                            <defs>
+                              <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stopColor={strokeColor} stopOpacity={0.3} />
+                                <stop offset="100%" stopColor={strokeColor} stopOpacity={0} />
+                              </linearGradient>
+                            </defs>
+                            <RechartsTooltip
+                              contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 11 }}
+                              labelStyle={{ color: '#94a3b8' }}
+                              formatter={(v: number) => [`R$ ${v.toFixed(2)}`, 'Preço']}
+                            />
+                            <Area type="monotone" dataKey="close" stroke={strokeColor} strokeWidth={2} fill={`url(#${gradientId})`} dot={false} />
+                          </AreaChart>
+                        </ResponsiveContainer>
+                      </div>
+                    )
+                  })()}
+
+                  {/* Proventos */}
+                  {['ACAO', 'FII', 'ETF', 'BDR'].includes(position.tipo) && (position.proventos_acumulados || position.dy_12m || position.ultimo_dividendo) ? (
+                    <div className="rounded-xl p-4" style={{ background: '#111827', border: '1px solid #1e293b' }}>
+                      <p className="text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: '#64748b' }}>💰 Proventos</p>
+                      <div className="grid grid-cols-3 gap-3">
+                        <div className="text-center">
+                          <p className="text-[10px] mb-1" style={{ color: '#94a3b8' }}>Acumulado</p>
+                          <p className="font-mono text-sm font-bold" style={{ color: '#00E676' }}>
+                            R$ {formatMoney(position.proventos_acumulados ?? 0)}
+                          </p>
+                        </div>
+                        <div className="text-center">
+                          <p className="text-[10px] mb-1" style={{ color: '#94a3b8' }}>DY 12m</p>
+                          <p className="font-mono text-sm font-bold" style={{ color: '#FFCA28' }}>
+                            {(position.dy_12m ?? 0).toFixed(1)}%
+                          </p>
+                        </div>
+                        <div className="text-center">
+                          <p className="text-[10px] mb-1" style={{ color: '#94a3b8' }}>Último/cota</p>
+                          <p className="font-mono text-sm font-bold" style={{ color: '#e2e8f0' }}>
+                            R$ {(position.ultimo_dividendo ?? 0).toFixed(4)}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
 
                   {/* Indicadores Fundamentalistas */}
                   {['ACAO', 'FII', 'ETF', 'BDR'].includes(position.tipo) && (

@@ -16,6 +16,7 @@ import SetupSimuladaPage from '@/pages/SetupSimulada'
 import SugestoesAlocacaoPage from '@/pages/SugestoesAlocacao'
 import HistoricoPage from '@/pages/Historico'
 import DividendosPage from '@/pages/Dividendos'
+import ImportPage from '@/pages/Import'
 
 type AppStatus = 'loading' | 'offline' | 'ai_missing' | 'ready'
 
@@ -214,6 +215,7 @@ function App() {
               <Route path="/sugestoes-alocacao" element={<SugestoesAlocacaoPage />} />
               <Route path="/historico" element={<HistoricoPage />} />
           <Route path="/dividendos" element={<DividendosPage />} />
+              <Route path="/import" element={<ImportPage />} />
               <Route path="*" element={<Navigate to="/briefing" replace />} />
             </Route>
           </>

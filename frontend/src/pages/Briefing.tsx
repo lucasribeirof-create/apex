@@ -83,14 +83,13 @@ export default function BriefingPage() {
       }
     }
     checkExisting()
+
+    const handler = () => checkExisting()
+    window.addEventListener('portfolio-changed', handler)
+    return () => window.removeEventListener('portfolio-changed', handler)
   }, [])
 
-  // Scroll automático durante streaming
-  useEffect(() => {
-    if (isStreaming && streamedRef.current) {
-      streamedRef.current.scrollTop = streamedRef.current.scrollHeight
-    }
-  }, [streamedText, isStreaming])
+  // (auto-scroll removido — usuário controla a rolagem)
 
   // Geração com streaming real — texto aparece token a token
   const streamBriefing = async (force = false) => {

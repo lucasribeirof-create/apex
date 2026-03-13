@@ -3,8 +3,12 @@ import { motion } from 'framer-motion'
 import {
   TrendingUp, DollarSign, Globe, Calendar,
   FileText, AlertTriangle, RefreshCw, Zap, ArrowUpRight,
-  ArrowDownRight, Crosshair
+  ArrowDownRight, Crosshair, Download
 } from 'lucide-react'
+import {
+  PieChart, Pie, Cell, ResponsiveContainer, Tooltip as ReTooltip,
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Legend,
+} from 'recharts'
 import api from '@/services/api'
 import { useStore } from '@/store/useStore'
 
@@ -64,6 +68,14 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [v2Loading, setV2Loading] = useState({ macro: true, teses: true, perf: true, divs: true })
+  const [retornoPeriodo, setRetornoPeriodo] = useState<string>('total')
+  const [retornoData, setRetornoData] = useState<any>(null)
+  const [evolucaoData, setEvolucaoData] = useState<any[]>([])
+  const [correlacaoData, setCorrelacaoData] = useState<any>(null)
+  const [v3Loading, setV3Loading] = useState({ evolucao: true, correlacao: true })
+  const [moversPeriodo, setMoversPeriodo] = useState<string>('dia')
+  const [moversApiData, setMoversApiData] = useState<any[]>([])
+  const [moversApiLoading, setMoversApiLoading] = useState(false)
 
   async function loadDashboard() {
     setLoading(true)
@@ -81,6 +93,11 @@ export default function DashboardPage() {
       api.get('/dashboard/teses').then(r => setTesesData(r.data)).catch(e => console.warn('Dashboard teses:', e)).finally(() => setV2Loading(s => ({ ...s, teses: false })))
       api.get('/dashboard/performance').then(r => setPerfData(r.data)).catch(e => console.warn('Dashboard perf:', e)).finally(() => setV2Loading(s => ({ ...s, perf: false })))
       api.get('/dashboard/dividendos').then(r => setDividendosData(r.data)).catch(e => console.warn('Dashboard divs:', e)).finally(() => setV2Loading(s => ({ ...s, divs: false })))
+
+      // V3 endpoints — analytics
+      setV3Loading({ evolucao: true, correlacao: true })
+      api.get('/portfolio/evolucao').then(r => { if (Array.isArray(r.data) && r.data.length >= 2) setEvolucaoData(r.data) }).catch(() => {}).finally(() => setV3Loading(s => ({ ...s, evolucao: false })))
+      api.get('/dashboard/correlacao').then(r => setCorrelacaoData(r.data)).catch(() => {}).finally(() => setV3Loading(s => ({ ...s, correlacao: false })))
     } catch (err: any) {
       console.error('Dashboard load error:', err)
       setError(err?.response?.data?.detail || 'Erro ao carregar dashboard')
@@ -90,6 +107,13 @@ export default function DashboardPage() {
   }
 
   useEffect(() => { loadDashboard() }, [])
+
+  // Recarrega ao trocar carteira
+  useEffect(() => {
+    const handler = () => loadDashboard()
+    window.addEventListener('portfolio-changed', handler)
+    return () => window.removeEventListener('portfolio-changed', handler)
+  }, [])
 
   // Dados derivados
   const patrimonio = dash?.patrimonio?.atual ?? 0
@@ -121,12 +145,58 @@ export default function DashboardPage() {
   const regimeColor = REGIME_COLORS[regimeNome] ?? '#FFD740'
   const regimeMotivo: string = regime?.motivo ?? '–'
 
-  // Top Movers — gainers & losers
+  // Top Movers — usa variação diária, total, ou período via API
   const posicoes: any[] = dash?.posicoes ?? []
   const tradeable = posicoes.filter((p: any) => p.tipo !== 'CAIXA' && p.tipo !== 'RF')
-  const sorted = [...tradeable].sort((a: any, b: any) => b.pl_percentual - a.pl_percentual)
-  const topGainers = sorted.slice(0, 3).filter((p: any) => p.pl_percentual > 0)
-  const topLosers = sorted.slice(-3).reverse().filter((p: any) => p.pl_percentual < 0)
+  const hasVarDia = tradeable.some((p: any) => p.var_dia_pct != null && p.var_dia_pct !== 0)
+
+  // Carrega movers de período via API
+  useEffect(() => {
+    if (moversPeriodo === 'dia' || moversPeriodo === 'total') return
+    setMoversApiLoading(true)
+    api.get(`/dashboard/movers?periodo=${moversPeriodo}`)
+      .then(r => setMoversApiData(r.data?.movers ?? []))
+      .catch(() => setMoversApiData([]))
+      .finally(() => setMoversApiLoading(false))
+  }, [moversPeriodo])
+
+  const moversLabel = { dia: 'Dia', '1m': '1M', '3m': '3M', '6m': '6M', '1a': '1A', total: 'Total' }[moversPeriodo] ?? moversPeriodo
+
+  // Compute gainers/losers based on active period
+  const { topGainers, topLosers } = (() => {
+    if (moversPeriodo === 'dia' || moversPeriodo === 'total') {
+      const key = moversPeriodo === 'dia' ? 'var_dia_pct' : 'pl_percentual'
+      const sorted = [...tradeable].sort((a: any, b: any) => (b[key] ?? 0) - (a[key] ?? 0))
+      return {
+        topGainers: sorted.slice(0, 3).filter((p: any) => (p[key] ?? 0) > 0).map((p: any) => ({ ticker: p.ticker, var_pct: p[key] ?? 0 })),
+        topLosers: sorted.slice(-3).reverse().filter((p: any) => (p[key] ?? 0) < 0).map((p: any) => ({ ticker: p.ticker, var_pct: p[key] ?? 0 })),
+      }
+    }
+    // API-based periods
+    const sorted = [...moversApiData].sort((a: any, b: any) => (b.var_pct ?? 0) - (a.var_pct ?? 0))
+    return {
+      topGainers: sorted.slice(0, 3).filter((m: any) => (m.var_pct ?? 0) > 0),
+      topLosers: sorted.slice(-3).reverse().filter((m: any) => (m.var_pct ?? 0) < 0),
+    }
+  })()
+
+  // Alocação por tipo (ACAO, FII, ETF, BDR, RF, etc.)
+  const TIPO_COLORS: Record<string, string> = {
+    ACAO: '#1DE9B6', FII: '#00BFA5', ETF: '#00E676', BDR: '#64FFDA',
+    RF: '#FFD740', OPCAO: '#FF9800', CAIXA: '#475569', FUNDO: '#AB47BC',
+  }
+
+  const tipoAllocation = (() => {
+    const byTipo: Record<string, number> = {}
+    for (const p of posicoes) {
+      byTipo[p.tipo] = (byTipo[p.tipo] || 0) + (p.valor_atual || 0)
+    }
+    const total = Object.values(byTipo).reduce((a, b) => a + b, 0)
+    if (total <= 0) return []
+    return Object.entries(byTipo)
+      .map(([tipo, val]) => ({ tipo, valor: val, pct: (val / total) * 100, color: TIPO_COLORS[tipo] || '#94a3b8' }))
+      .sort((a, b) => b.valor - a.valor)
+  })()
 
   // Alertas consolidados
   const alertas: { tipo: 'danger' | 'warning' | 'info'; texto: string }[] = []
@@ -192,9 +262,37 @@ export default function DashboardPage() {
             {new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}
           </p>
         </div>
-        <button onClick={loadDashboard} className="p-2 rounded-lg transition-all hover:scale-105" style={{ background: 'rgba(100,116,139,0.1)' }} title="Atualizar">
-          <RefreshCw size={16} style={{ color: '#64748b' }} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => {
+              const lines = [
+                `Dashboard APEX — ${new Date().toLocaleDateString('pt-BR')}`,
+                `Patrimônio: R$ ${patrimonio.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`,
+                `Var Dia: ${varDia >= 0 ? '+' : ''}${varDia.toFixed(2)}%`,
+                `Retorno Total: ${totalPct.toFixed(2)}%`,
+                `P&L: R$ ${plTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`,
+                '',
+                'Ticker,Tipo,Módulo,Valor Atual,P&L %,Var Dia %',
+                ...posicoes.map((p: any) => `${p.ticker},${p.tipo},${p.modulo},${(p.valor_atual || 0).toFixed(2)},${(p.pl_percentual || 0).toFixed(2)},${(p.var_dia_pct || 0).toFixed(2)}`),
+              ]
+              const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' })
+              const url = URL.createObjectURL(blob)
+              const a = document.createElement('a')
+              a.href = url
+              a.download = `dashboard_${new Date().toISOString().slice(0, 10)}.csv`
+              a.click()
+              URL.revokeObjectURL(url)
+            }}
+            className="p-2 rounded-lg transition-all hover:scale-105"
+            style={{ background: 'rgba(100,116,139,0.1)' }}
+            title="Exportar CSV"
+          >
+            <Download size={16} style={{ color: '#64748b' }} />
+          </button>
+          <button onClick={loadDashboard} className="p-2 rounded-lg transition-all hover:scale-105" style={{ background: 'rgba(100,116,139,0.1)' }} title="Atualizar">
+            <RefreshCw size={16} style={{ color: '#64748b' }} />
+          </button>
+        </div>
       </div>
 
       {/* RENDA Strategy: yield metrics */}
@@ -249,7 +347,7 @@ export default function DashboardPage() {
               <TrendingUp size={15} style={{ color: '#00E676' }} />
             </div>
           </div>
-          <p className="text-xl font-bold font-data" style={{ color: '#f1f5f9' }}>{(varMes ?? 0) >= 0 ? '+' : ''}{(varMes ?? 0).toFixed(2)}%</p>
+          <p className="text-xl font-bold font-data" style={{ color: '#f1f5f9' }}>{varMes != null ? `${varMes >= 0 ? '+' : ''}${varMes.toFixed(2)}%` : '–'}</p>
           <p className="text-xs mt-1" style={{ color: '#64748b' }}>
             vs CDI: {dash?.patrimonio?.vs_cdi != null
               ? <span style={{ color: dash.patrimonio.vs_cdi >= 0 ? '#00E676' : '#FF5252' }}>{dash.patrimonio.vs_cdi >= 0 ? '+' : ''}{dash.patrimonio.vs_cdi.toFixed(2)}pp</span>
@@ -274,9 +372,9 @@ export default function DashboardPage() {
           </p>
         </motion.div>
 
-        {/* Renda Projetada (ou Retorno Acumulado para CRESCIMENTO) */}
+        {/* Retorno — com filtro de período */}
         <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className="apex-card p-5">
-          <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>
               {strategyType === 'RENDA' ? 'Renda / Mês' : 'Retorno Total'}
             </span>
@@ -284,11 +382,58 @@ export default function DashboardPage() {
               <Zap size={15} style={{ color: '#00E676' }} />
             </div>
           </div>
+          {strategyType !== 'RENDA' && (
+            <div className="flex gap-1 mb-2">
+              {[
+                { k: 'total', l: 'Total' },
+                { k: '1m', l: '1M' },
+                { k: '3m', l: '3M' },
+                { k: '6m', l: '6M' },
+                { k: '1a', l: '1A' },
+              ].map(({ k, l }) => (
+                <button
+                  key={k}
+                  onClick={() => {
+                    setRetornoPeriodo(k)
+                    if (k !== 'total') {
+                      api.get('/dashboard/retorno', { params: { periodo: k } })
+                        .then(r => setRetornoData(r.data))
+                        .catch(() => setRetornoData(null))
+                    } else {
+                      setRetornoData(null)
+                    }
+                  }}
+                  className="px-2 py-0.5 rounded text-[10px] font-mono transition-all"
+                  style={{
+                    background: retornoPeriodo === k ? 'rgba(0,230,118,0.15)' : 'rgba(30,41,59,0.5)',
+                    color: retornoPeriodo === k ? '#00E676' : '#64748b',
+                    border: `1px solid ${retornoPeriodo === k ? 'rgba(0,230,118,0.3)' : '#1e293b'}`,
+                  }}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+          )}
           <p className="text-xl font-bold font-data" style={{ color: '#f1f5f9' }}>
-            {strategyType === 'RENDA' ? (rendaMes != null ? fmtR$(rendaMes) : '–') : `${totalPct.toFixed(2)}%`}
+            {strategyType === 'RENDA'
+              ? (rendaMes != null ? fmtR$(rendaMes) : '–')
+              : retornoPeriodo !== 'total' && retornoData != null
+                ? retornoData.retorno_pct != null
+                  ? `${retornoData.retorno_pct >= 0 ? '+' : ''}${retornoData.retorno_pct.toFixed(2)}%`
+                  : '–'
+                : `${totalPct.toFixed(2)}%`
+            }
           </p>
           <p className="text-xs mt-1" style={{ color: '#64748b' }}>
-            {strategyType === 'RENDA' ? (yoc > 0 ? `YoC: ${yoc.toFixed(2)}%` : 'YoC: –') : 'Desde o início'}
+            {strategyType === 'RENDA'
+              ? (yoc > 0 ? `YoC: ${yoc.toFixed(2)}%` : 'YoC: –')
+              : retornoPeriodo !== 'total' && retornoData != null
+                ? retornoData.retorno_pct != null
+                  ? `vs CDI: ${retornoData.vs_cdi != null ? `${retornoData.vs_cdi >= 0 ? '+' : ''}${retornoData.vs_cdi.toFixed(2)}pp` : '–'}`
+                  : (retornoData.msg || 'Sem snapshots para este período')
+                : 'Desde o início'
+            }
           </p>
         </motion.div>
       </div>
@@ -329,25 +474,45 @@ export default function DashboardPage() {
 
             {/* Top Movers */}
             <div className="space-y-3">
-              <p className="text-xs font-mono uppercase tracking-wider" style={{ color: '#475569' }}>Top Movers</p>
-              {topGainers.length > 0 || topLosers.length > 0 ? (
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-mono uppercase tracking-wider" style={{ color: '#475569' }}>Top Movers ({moversLabel})</p>
+              </div>
+              <div className="flex gap-1 flex-wrap">
+                {([['dia', 'Dia'], ['1m', '1M'], ['3m', '3M'], ['6m', '6M'], ['1a', '1A'], ['total', 'Total']] as const).map(([val, lbl]) => (
+                  <button
+                    key={val}
+                    onClick={() => setMoversPeriodo(val)}
+                    className="px-2 py-0.5 rounded text-xs font-mono transition-colors"
+                    style={{
+                      background: moversPeriodo === val ? 'rgba(0,230,118,0.15)' : 'rgba(15,23,42,0.6)',
+                      color: moversPeriodo === val ? '#00E676' : '#64748b',
+                      border: `1px solid ${moversPeriodo === val ? 'rgba(0,230,118,0.3)' : '#1e293b'}`,
+                    }}
+                  >
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+              {moversApiLoading ? (
+                <div className="space-y-2">{[1,2,3].map(i => <Skeleton key={i} h="h-8" />)}</div>
+              ) : topGainers.length > 0 || topLosers.length > 0 ? (
                 <div className="space-y-2">
-                  {topGainers.map((p: any) => (
-                    <div key={p.ticker} className="flex items-center justify-between rounded-lg p-2.5" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
+                  {topGainers.map((m: any) => (
+                    <div key={m.ticker} className="flex items-center justify-between rounded-lg p-2.5" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
                       <div className="flex items-center gap-2">
                         <ArrowUpRight size={12} style={{ color: '#00E676' }} />
-                        <span className="text-xs font-mono" style={{ color: '#f1f5f9' }}>{p.ticker}</span>
+                        <span className="text-xs font-mono" style={{ color: '#f1f5f9' }}>{m.ticker}</span>
                       </div>
-                      <span className="text-xs font-bold font-data" style={{ color: '#00E676' }}>+{p.pl_percentual?.toFixed(1)}%</span>
+                      <span className="text-xs font-bold font-data" style={{ color: '#00E676' }}>+{(m.var_pct ?? 0).toFixed(1)}%</span>
                     </div>
                   ))}
-                  {topLosers.map((p: any) => (
-                    <div key={p.ticker} className="flex items-center justify-between rounded-lg p-2.5" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
+                  {topLosers.map((m: any) => (
+                    <div key={m.ticker} className="flex items-center justify-between rounded-lg p-2.5" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
                       <div className="flex items-center gap-2">
                         <ArrowDownRight size={12} style={{ color: '#FF5252' }} />
-                        <span className="text-xs font-mono" style={{ color: '#f1f5f9' }}>{p.ticker}</span>
+                        <span className="text-xs font-mono" style={{ color: '#f1f5f9' }}>{m.ticker}</span>
                       </div>
-                      <span className="text-xs font-bold font-data" style={{ color: '#FF5252' }}>{p.pl_percentual?.toFixed(1)}%</span>
+                      <span className="text-xs font-bold font-data" style={{ color: '#FF5252' }}>{(m.var_pct ?? 0).toFixed(1)}%</span>
                     </div>
                   ))}
                 </div>
@@ -358,22 +523,52 @@ export default function DashboardPage() {
           </div>
         </motion.div>
 
-        {/* Allocation */}
+        {/* Allocation — Pie + Bars */}
         <motion.div
           className="apex-card p-5"
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.3 }}
         >
-          <h3 className="text-sm font-medium mb-5" style={{ color: '#94a3b8' }}>ALOCAÇÃO</h3>
-          <div className="space-y-3">
+          <h3 className="text-sm font-medium mb-4" style={{ color: '#94a3b8' }}>ALOCAÇÃO</h3>
+          {allocationData.length > 0 && (
+            <div className="flex justify-center mb-4">
+              <ResponsiveContainer width={160} height={160}>
+                <PieChart>
+                  <Pie
+                    data={allocationData.filter(a => a.current > 0)}
+                    dataKey="current"
+                    nameKey="module"
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={40}
+                    outerRadius={68}
+                    paddingAngle={2}
+                    strokeWidth={0}
+                  >
+                    {allocationData.filter(a => a.current > 0).map((entry, idx) => (
+                      <Cell key={idx} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <ReTooltip
+                    contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 11 }}
+                    formatter={(v: number, name: string) => [`${v.toFixed(1)}%`, name]}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+          <div className="space-y-2">
             {allocationData.map((item) => {
               const dev = getDeviation(item.target, item.current)
               const barMax = Math.max(...allocationData.map(a => Math.max(a.current, a.target)), 5)
               return (
                 <div key={item.module}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs" style={{ color: '#94a3b8' }}>{item.module}</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full" style={{ background: item.color }} />
+                      <span className="text-xs" style={{ color: '#94a3b8' }}>{item.module}</span>
+                    </div>
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-mono" style={{ color: '#f1f5f9' }}>{item.current}%</span>
                       <span
@@ -405,6 +600,167 @@ export default function DashboardPage() {
         <span className="text-sm font-mono" style={{ color: regimeColor }}>{regimeNome}</span>
         <span className="text-sm" style={{ color: '#64748b' }}>{regimeMotivo}</span>
       </motion.div>
+
+      {/* Evolução Patrimonial — Carteira vs CDI */}
+      {!v3Loading.evolucao && evolucaoData.length >= 2 && (
+        <motion.div
+          className="apex-card p-5"
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.36 }}
+        >
+          <div className="flex items-center gap-2 mb-4">
+            <TrendingUp size={16} style={{ color: '#00E676' }} />
+            <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>EVOLUÇÃO PATRIMONIAL</h3>
+          </div>
+          <ResponsiveContainer width="100%" height={240}>
+            <LineChart data={evolucaoData} margin={{ top: 4, right: 12, bottom: 0, left: -8 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+              <XAxis dataKey="date" tickFormatter={(d: string) => { const [, m, day] = d.split('-'); return `${day}/${m}` }} tick={{ fill: '#64748b', fontSize: 10 }} />
+              <YAxis tick={{ fill: '#64748b', fontSize: 10 }} tickFormatter={(v: number) => `${v.toFixed(1)}%`} />
+              <ReTooltip
+                contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 11 }}
+                labelStyle={{ color: '#94a3b8' }}
+                labelFormatter={(d: string) => { const [, m, day] = d.split('-'); return `${day}/${m}` }}
+                formatter={(v: number, name: string) => [`${v.toFixed(2)}%`, name]}
+              />
+              <Legend wrapperStyle={{ fontSize: 11, color: '#94a3b8' }} />
+              <Line type="monotone" dataKey="pl_pct" name="Carteira" stroke="#00E676" strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="cdi_pct" name="CDI" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="5 5" dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </motion.div>
+      )}
+
+      {/* Risk Metrics (correlação) */}
+      {!v3Loading.correlacao && correlacaoData && (
+        <motion.div
+          className="apex-card p-5"
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.37 }}
+        >
+          <div className="flex items-center gap-2 mb-4">
+            <AlertTriangle size={16} style={{ color: '#00B0FF' }} />
+            <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>RISCO & CORRELAÇÃO</h3>
+          </div>
+          {correlacaoData.alertas?.length > 0 && (
+            <div className="space-y-2 mb-3">
+              {correlacaoData.alertas.map((a: string, i: number) => (
+                <div key={i} className="flex items-start gap-2 text-xs rounded-lg p-2.5" style={{ background: 'rgba(255,215,64,0.06)', border: '1px solid rgba(255,215,64,0.12)' }}>
+                  <AlertTriangle size={12} className="mt-0.5 shrink-0" style={{ color: '#FFD740' }} />
+                  <span style={{ color: '#FFD740' }}>{a}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {correlacaoData.clusters?.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-mono uppercase tracking-wider" style={{ color: '#475569' }}>Clusters de Correlação</p>
+              {correlacaoData.clusters.map((c: any, i: number) => (
+                <div key={i} className="flex items-center gap-2 rounded-lg p-2.5" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
+                  <span className="text-xs" style={{ color: '#94a3b8' }}>
+                    {Array.isArray(c) ? c.join(', ') : (c.tickers?.join(', ') || JSON.stringify(c))}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          {!correlacaoData.alertas?.length && !correlacaoData.clusters?.length && (
+            <p className="text-xs" style={{ color: '#475569' }}>Dados insuficientes para análise de correlação</p>
+          )}
+        </motion.div>
+      )}
+
+      {/* Alocação por Tipo */}
+      {tipoAllocation.length > 0 && (
+        <motion.div
+          className="apex-card p-5"
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.39 }}
+        >
+          <h3 className="text-sm font-medium mb-4" style={{ color: '#94a3b8' }}>ALOCAÇÃO POR TIPO</h3>
+          <div className="flex items-center gap-6">
+            <ResponsiveContainer width={140} height={140}>
+              <PieChart>
+                <Pie
+                  data={tipoAllocation}
+                  dataKey="pct"
+                  nameKey="tipo"
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={36}
+                  outerRadius={60}
+                  paddingAngle={2}
+                  strokeWidth={0}
+                >
+                  {tipoAllocation.map((entry, idx) => (
+                    <Cell key={idx} fill={entry.color} />
+                  ))}
+                </Pie>
+                <ReTooltip
+                  contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 11 }}
+                  formatter={(v: number, name: string) => [`${v.toFixed(1)}%`, name]}
+                />
+              </PieChart>
+            </ResponsiveContainer>
+            <div className="flex-1 grid grid-cols-2 gap-x-6 gap-y-2">
+              {tipoAllocation.map(t => (
+                <div key={t.tipo} className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full" style={{ background: t.color }} />
+                    <span className="text-xs" style={{ color: '#94a3b8' }}>{t.tipo}</span>
+                  </div>
+                  <span className="text-xs font-mono" style={{ color: '#f1f5f9' }}>{t.pct.toFixed(1)}%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </motion.div>
+      )}
+
+      {/* Estimativa de IR */}
+      {plTotal !== 0 && (
+        <motion.div
+          className="apex-card p-5"
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.395 }}
+        >
+          <div className="flex items-center gap-2 mb-3">
+            <DollarSign size={16} style={{ color: '#FFD740' }} />
+            <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>ESTIMATIVA DE IR</h3>
+            <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'rgba(255,215,64,0.08)', color: '#FFD740' }}>Simulação</span>
+          </div>
+          <p className="text-xs mb-3" style={{ color: '#475569' }}>
+            Estimativa simplificada sobre ganho de capital realizado. Não constitui declaração fiscal.
+          </p>
+          <div className="grid grid-cols-3 gap-3">
+            {(() => {
+              // Ações/ETFs: 15% sobre lucro se vendas > R$20k/mês (isenção swing trade)
+              const plAcoes = posicoes.filter((p: any) => ['ACAO', 'ETF', 'BDR'].includes(p.tipo)).reduce((a: number, p: any) => a + (p.pl_reais || 0), 0)
+              const plFIIs = posicoes.filter((p: any) => p.tipo === 'FII').reduce((a: number, p: any) => a + (p.pl_reais || 0), 0)
+              const irAcoes = plAcoes > 0 ? plAcoes * 0.15 : 0
+              const irFIIs = plFIIs > 0 ? plFIIs * 0.20 : 0
+              const irTotal = irAcoes + irFIIs
+              return [
+                { label: 'Ações/ETFs (15%)', value: irAcoes, sub: plAcoes > 0 ? `Sobre R$ ${plAcoes.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} de lucro` : 'Sem lucro realizado' },
+                { label: 'FIIs (20%)', value: irFIIs, sub: plFIIs > 0 ? `Sobre R$ ${plFIIs.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} de lucro` : 'Sem lucro realizado' },
+                { label: 'IR Total Estimado', value: irTotal, sub: 'Sobre posições em aberto' },
+              ].map(item => (
+                <div key={item.label} className="rounded-lg p-3" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
+                  <p className="text-[10px] font-mono uppercase tracking-wider mb-1" style={{ color: '#475569' }}>{item.label}</p>
+                  <p className="text-sm font-bold font-data" style={{ color: item.value > 0 ? '#FFD740' : '#64748b' }}>
+                    R$ {item.value.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  </p>
+                  <p className="text-[10px] mt-1" style={{ color: '#475569' }}>{item.sub}</p>
+                </div>
+              ))
+            })()}
+          </div>
+        </motion.div>
+      )}
 
       {/* Alertas Consolidados */}
       {alertas.length > 0 && (
@@ -441,7 +797,7 @@ export default function DashboardPage() {
             {[1,2,3].map(i => <Skeleton key={i} className="h-12 rounded-lg" />)}
           </div>
         </motion.div>
-      ) : dividendosData && dividendosData.proximos?.length > 0 && (
+      ) : dividendosData && (
         <motion.div
           className="apex-card p-5"
           initial={{ opacity: 0, y: 16 }}
@@ -459,6 +815,7 @@ export default function DashboardPage() {
               </span>
             )}
           </div>
+          {dividendosData.proximos?.length > 0 ? (
           <div className="space-y-2">
             {dividendosData.proximos.slice(0, 8).map((d: any) => (
               <div key={d.ticker} className="flex items-center justify-between rounded-lg p-3" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
@@ -481,6 +838,9 @@ export default function DashboardPage() {
               </div>
             ))}
           </div>
+          ) : (
+            <p className="text-xs" style={{ color: '#475569' }}>Sem dividendos projetados no momento</p>
+          )}
         </motion.div>
       )}
 

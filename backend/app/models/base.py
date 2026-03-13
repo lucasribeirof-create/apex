@@ -72,6 +72,10 @@ def migrate_db():
         # Transaction system improvements — destino da venda e valor líquido
         "ALTER TABLE transacoes ADD COLUMN destino VARCHAR(10)",
         "ALTER TABLE transacoes ADD COLUMN valor_liquido FLOAT",
+        # Import B3 — corretora no portfolio, source/external_id na position
+        "ALTER TABLE portfolios ADD COLUMN corretora VARCHAR(100)",
+        "ALTER TABLE positions ADD COLUMN source VARCHAR(30) DEFAULT 'manual'",
+        "ALTER TABLE positions ADD COLUMN external_id VARCHAR(100)",
     ]
     with engine.connect() as conn:
         for sql in _migrations:

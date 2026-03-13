@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_user_id, get_portfolio_ativo
 from app.models import User, Portfolio, Position
+from app.models.portfolio_snapshot import PortfolioSnapshot
 from app.data import get_quotes, get_macro_br, get_macro_global, get_history_global
 from app.data.cache import cache as _market_cache
 from app.core.regime import calcular_regime
@@ -36,7 +37,6 @@ class _NumpySafeEncoder(json.JSONEncoder):
 def _sanitize(obj):
     """Serializa via JSON com encoder numpy-safe e retorna dict limpo."""
     return json.loads(json.dumps(obj, cls=_NumpySafeEncoder, default=str))
-    return obj
 
 
 @router.get("/")
@@ -87,6 +87,11 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
     tickers = [p.ticker for p in posicoes if p.tipo in ("ACAO", "FII", "ETF", "BDR")]
     cotacoes = await get_quotes(tickers) if tickers else {}
 
+    # Fallback yfinance (quando BRAPI não está configurada)
+    if tickers and not cotacoes:
+        from app.data.yfinance_client import get_quotes_yf
+        cotacoes = await get_quotes_yf(tickers)
+
     # Calcular patrimônio atual
     patrimonio_atual = 0.0
     posicoes_data = []
@@ -98,6 +103,8 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
         pl_pct = (pl_reais / p.valor_investido * 100) if p.valor_investido > 0 else 0
 
         patrimonio_atual += valor_atual
+        # Variação diária do ativo (BRAPI)
+        change_day_pct = cotacao.get("regularMarketChangePercent", 0) or 0
         posicoes_data.append({
             "id": p.id,
             "ticker": p.ticker,
@@ -110,9 +117,15 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
             "valor_atual": round(valor_atual, 2),
             "pl_reais": round(pl_reais, 2),
             "pl_percentual": round(pl_pct, 2),
+            "var_dia_pct": round(change_day_pct, 2),
             "stop_loss": p.stop_loss,
             "apex_score": p.apex_score,
         })
+
+    # Persiste patrimônio ao vivo para referências futuras (ontem, mês, etc.)
+    if patrimonio_atual > 0 and patrimonio_atual != portfolio.patrimonio_total:
+        portfolio.patrimonio_total = round(patrimonio_atual, 2)
+        db.commit()
 
     # Alocação atual por módulo
     alocacao_atual = _calcular_alocacao_atual(posicoes_data, patrimonio_atual)
@@ -202,13 +215,24 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
     pl_total = patrimonio_atual - valor_investido_total
     total_pct = round(pl_total / valor_investido_total * 100, 2) if valor_investido_total > 0 else 0
 
-    # Retorno no mês: se temos patrimonio_mes_inicio E valor investido não mudou muito, usa delta
-    # Caso contrário, usa P&L total como proxy (mais seguro que % inflado por depósitos)
-    var_mes_pct = total_pct  # fallback: retorno total
-    if portfolio.patrimonio_mes_inicio and portfolio.patrimonio_mes_inicio > 0:
+    # Retorno no mês: usa snapshot do 1º dia do mês, ou patrimonio_mes_inicio
+    var_mes_pct = None
+    primeiro_dia_mes = hoje.replace(day=1)
+    snap_mes = db.query(PortfolioSnapshot).filter(
+        PortfolioSnapshot.portfolio_id == portfolio.id,
+        PortfolioSnapshot.date >= primeiro_dia_mes,
+    ).order_by(PortfolioSnapshot.date.asc()).first()
+
+    if snap_mes and snap_mes.custo_total and snap_mes.custo_total > 0:
+        # Retorno baseado em P&L: (pl_atual - pl_inicio_mes) / custo_inicio_mes
+        pl_inicio_mes = snap_mes.patrimonio - snap_mes.custo_total
+        pl_atual = patrimonio_atual - valor_investido_total
+        delta_pl = pl_atual - pl_inicio_mes
+        var_mes_pct = round(delta_pl / snap_mes.custo_total * 100, 2)
+    elif portfolio.patrimonio_mes_inicio and portfolio.patrimonio_mes_inicio > 0:
         mes_pct_raw = (patrimonio_atual / portfolio.patrimonio_mes_inicio - 1) * 100
-        # Se o retorno mensal parece razoável (<50%), usa; senão houve depósito
-        if abs(mes_pct_raw) < 50:
+        # Sanidade: se parece razoável (<20% mensal), usa
+        if abs(mes_pct_raw) < 20:
             var_mes_pct = round(mes_pct_raw, 2)
 
     # vs CDI: CDI mensal estimado a partir da Selic
@@ -269,6 +293,118 @@ def _calcular_desvios(atual: dict, alvo: dict) -> dict:
             semaforo = "vermelho"
         result[modulo] = {"desvio": round(desvio, 1), "semaforo": semaforo}
     return result
+
+
+# ─── Retorno por período ──────────────────────────────────────────────────────
+
+@router.get("/retorno")
+def get_retorno_periodo(
+    periodo: str = "1m",
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Retorno do portfólio por período usando snapshots.
+    periodo: 1s (semana), 1m, 3m, 6m, 1a, inicio
+    """
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(400, "Usuário não encontrado")
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(404, "Portfólio não encontrado")
+
+    hoje = date.today()
+    periodos = {
+        "1s": timedelta(days=7),
+        "1m": timedelta(days=30),
+        "3m": timedelta(days=90),
+        "6m": timedelta(days=180),
+        "1a": timedelta(days=365),
+    }
+
+    if periodo == "inicio":
+        data_inicio = date(2020, 1, 1)
+    else:
+        delta = periodos.get(periodo, timedelta(days=30))
+        data_inicio = hoje - delta
+
+    snaps = db.query(PortfolioSnapshot).filter(
+        PortfolioSnapshot.portfolio_id == portfolio.id,
+        PortfolioSnapshot.date >= data_inicio,
+    ).order_by(PortfolioSnapshot.date.asc()).all()
+
+    if len(snaps) < 2:
+        return {"periodo": periodo, "retorno_pct": None, "cdi_pct": None, "msg": "Dados insuficientes"}
+
+    primeiro = snaps[0]
+    ultimo = snaps[-1]
+
+    # Retorno baseado em P&L (imune a depósitos)
+    pl_inicio = primeiro.patrimonio - primeiro.custo_total if primeiro.custo_total else 0
+    pl_fim = ultimo.patrimonio - ultimo.custo_total if ultimo.custo_total else 0
+    base = primeiro.custo_total or primeiro.patrimonio
+    retorno_pct = round((pl_fim - pl_inicio) / base * 100, 2) if base > 0 else 0
+
+    # CDI no período
+    cdi_pct = round((ultimo.cdi_acumulado or 0) - (primeiro.cdi_acumulado or 0), 2)
+
+    # Série para gráfico
+    serie = []
+    for s in snaps:
+        pl_s = s.patrimonio - s.custo_total if s.custo_total else 0
+        pct_s = round((pl_s - pl_inicio) / base * 100, 2) if base > 0 else 0
+        cdi_s = round((s.cdi_acumulado or 0) - (primeiro.cdi_acumulado or 0), 2)
+        serie.append({"date": s.date.isoformat(), "retorno_pct": pct_s, "cdi_pct": cdi_s})
+
+    return {
+        "periodo": periodo,
+        "retorno_pct": retorno_pct,
+        "cdi_pct": cdi_pct,
+        "vs_cdi": round(retorno_pct - cdi_pct, 2) if cdi_pct is not None else None,
+        "serie": serie,
+    }
+
+
+# ─── Top Movers por período ──────────────────────────────────────────────────
+
+@router.get("/movers")
+async def get_top_movers(
+    periodo: str = "1m",
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """Top movers por período (1m, 3m, 6m, 1a)."""
+    periodos_yf = {"1m": "1mo", "3m": "3mo", "6m": "6mo", "1a": "1y"}
+    yf_period = periodos_yf.get(periodo)
+    if not yf_period:
+        raise HTTPException(400, f"Período inválido: {periodo}")
+
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(400, "Usuário não encontrado")
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(404, "Portfólio não encontrado")
+
+    tickers = [p.ticker for p in db.query(Position).filter(
+        Position.portfolio_id == portfolio.id,
+        Position.ativa == True,
+        Position.tipo.in_(["ACAO", "FII", "ETF", "BDR"]),
+    ).all()]
+
+    if not tickers:
+        return {"periodo": periodo, "movers": []}
+
+    from app.data.yfinance_client import get_period_returns_yf
+    returns = await get_period_returns_yf(tickers, yf_period)
+
+    movers = [{"ticker": t, "var_pct": returns.get(t, 0)} for t in tickers if t in returns]
+    movers.sort(key=lambda x: x["var_pct"], reverse=True)
+
+    return {"periodo": periodo, "movers": movers}
 
 
 # ─── Dashboard V2 — Endpoints enriquecidos ────────────────────────────────────

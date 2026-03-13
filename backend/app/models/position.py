@@ -65,6 +65,10 @@ class Position(Base):
     # Classificação da posição (Phase 5: Hold strategy)
     classificacao = Column(String(10), default="TRADE")   # TRADE | HOLD
 
+    # Import tracking
+    source = Column(String(30), default="manual")     # manual | b3_import | avenue_import
+    external_id = Column(String(100), nullable=True)  # ISIN ou identificador externo
+
     # Status
     ativa = Column(Boolean, default=True)
     data_abertura = Column(DateTime, nullable=True)   # data da primeira compra / entrada

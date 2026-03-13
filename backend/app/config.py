@@ -31,7 +31,7 @@ BRAPI_BASE_URL = "https://brapi.dev/api"
 # ─── Cache em memória ──────────────────────────────────────────────────────────
 # Fase atual: dicionário Python com TTL manual (sem Redis)
 # Migração futura: substituir por Redis com CACHE_URL=redis://...
-CACHE_TTL_QUOTES = 60        # segundos — cotações em tempo real
+CACHE_TTL_QUOTES = 180       # segundos — cotações (3 min, evita re-fetch constante)
 CACHE_TTL_INDICATORS = 300   # segundos — indicadores técnicos (MM, ATR)
 CACHE_TTL_MACRO = 600        # segundos — dados macro (Selic, câmbio)
 

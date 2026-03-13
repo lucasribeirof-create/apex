@@ -138,6 +138,11 @@ html, body, #root {
 .apex-input:focus { border-color: #00E676; box-shadow: 0 0 0 2px rgba(0, 230, 118, 0.1); }
 .apex-input::placeholder { color: #64748b; }
 
+/* Theme-aware background */
+.apex-bg-primary { background: #0a0e17; }
+html.light .apex-bg-primary { background: #f8fafc; }
+html.light .apex-sidebar { background: #ffffff; border-color: #e2e8f0; }
+
 /* Progress bar / Barra de alocação */
 .allocation-bar {
   height: 6px;
@@ -159,3 +164,65 @@ html, body, #root {
 .text-positive { color: #00E676; }
 .text-negative { color: #FF5252; }
 .text-neutral { color: #FFD740; }
+
+/* ────── Responsive ────── */
+@media (max-width: 1200px) {
+  .grid-cols-7 { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
+  .grid-cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+}
+@media (max-width: 768px) {
+  .grid-cols-7,
+  .grid-cols-5,
+  .grid-cols-4,
+  .grid-cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .col-span-2 { grid-column: span 1 !important; }
+  .p-8 { padding: 16px !important; }
+}
+@media (max-width: 480px) {
+  .grid-cols-7,
+  .grid-cols-5,
+  .grid-cols-4,
+  .grid-cols-3,
+  .grid-cols-2 { grid-template-columns: 1fr !important; }
+}
+
+/* ────── Light Mode ────── */
+html.light, html.light body, html.light #root {
+  background-color: #f8fafc;
+  color: #1e293b;
+}
+html.light .apex-card {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: #e2e8f0;
+  backdrop-filter: blur(10px);
+}
+html.light .apex-card:hover {
+  border-color: rgba(0, 191, 165, 0.35);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 191, 165, 0.1);
+}
+html.light .apex-input {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: #e2e8f0;
+  color: #1e293b;
+}
+html.light .apex-input:focus {
+  border-color: #00BFA5;
+  box-shadow: 0 0 0 2px rgba(0, 191, 165, 0.15);
+}
+html.light .apex-input::placeholder { color: #94a3b8; }
+html.light .allocation-bar { background: #e2e8f0; }
+html.light ::-webkit-scrollbar-track { background: #f8fafc; }
+html.light ::-webkit-scrollbar-thumb { background: #cbd5e1; }
+html.light ::selection { background: rgba(0, 191, 165, 0.2); color: #1e293b; }
+
+/* ────── Accessibility ────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+/* High contrast for P&L values — pattern supplement for colorblind */
+.pl-badge-positive::before { content: '▲ '; font-size: 0.65em; }
+.pl-badge-negative::before { content: '▼ '; font-size: 0.65em; }

@@ -374,15 +374,26 @@ async def analisar_carteira(
         if carteira_recente and _idades:
             age_cart = f"\n⏱️ CARTEIRA RECÉM-MONTADA (posição mais antiga: {max(_idades):.0f}h atrás)"
 
+        # Patrimônio e módulos: scope ao módulo se filtrado
+        is_module_filter = bool(modulo and modulo != "todos")
+        if is_module_filter:
+            patrimonio_ctx = sum(p.get("valor_atual") or p.get("valor_investido") or 0 for p in posicoes_filtradas)
+            modulos_str = modulo.upper()
+        else:
+            patrimonio_ctx = ctx.patrimonio_total or sum(p.get("valor_atual") or p.get("valor_investido") or 0 for p in posicoes_filtradas)
+            modulos_str = ', '.join(ctx.modulos_ativos or [])
+
+        tickers_filter = {p.get("ticker", "") for p in posicoes_filtradas} if is_module_filter else None
+
         USER = f"""MONITORAMENTO DE CARTEIRA{' — módulo ' + modulo.upper() if modulo else ''}{age_cart}
 
 POSIÇÕES COM COTAÇÃO AO VIVO:
 {chr(10).join(linhas_pos)}{stops_alerta}{plano_str}{macro_str}
 
-Patrimônio total: R$ {(ctx.patrimonio_total or 0):,.0f}
-Módulos ativos: {', '.join(ctx.modulos_ativos or [])}
+Patrimônio{' do módulo' if is_module_filter else ' total'}: R$ {patrimonio_ctx:,.0f}
+Módulos: {modulos_str}
 
-{_injetar_cerebro_completo(ctx)}
+{_injetar_cerebro_completo(ctx, excluir_guardrails=is_module_filter, tickers_filter=tickers_filter)}
 
 Faça o diagnóstico de saúde desta carteira. Foque nos riscos imediatos e desvios do plano."""
 
@@ -429,8 +440,9 @@ Faça o diagnóstico de saúde desta carteira. Foque nos riscos imediatos e desv
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def _injetar_cerebro_completo(ctx, excluir_guardrails: bool = False) -> str:
-    """Gera bloco padronizado com TODOS os dados do Cérebro (Fases 1-6) para injeção em prompts."""
+def _injetar_cerebro_completo(ctx, excluir_guardrails: bool = False, tickers_filter: set | None = None) -> str:
+    """Gera bloco padronizado com TODOS os dados do Cérebro (Fases 1-6) para injeção em prompts.
+    Se tickers_filter fornecido, filtra alertas apenas para os tickers do módulo."""
     secoes: list[str] = []
 
     # 1. Kill Switch (Fase 5)
@@ -496,9 +508,11 @@ def _injetar_cerebro_completo(ctx, excluir_guardrails: bool = False) -> str:
             f"caixa {caixa_real:.0f}% (mín {g.get('caixa_min_pct', '?')}%)"
         )
 
-    # 8. Alertas críticos
+    # 8. Alertas críticos (filtrados por tickers se módulo específico)
     try:
         alertas = ctx.alertas_criticos()
+        if tickers_filter:
+            alertas = [a for a in alertas if any(t in a for t in tickers_filter)]
         if alertas:
             secoes.append("ALERTAS CRÍTICOS:\n" + "\n".join(f"  • {a}" for a in alertas[:8]))
     except Exception:

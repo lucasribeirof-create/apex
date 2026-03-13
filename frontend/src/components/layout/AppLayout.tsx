@@ -3,7 +3,7 @@ import Sidebar from './Sidebar'
 
 export default function AppLayout() {
   return (
-    <div className="flex min-h-screen" style={{ background: '#0a0e17' }}>
+    <div className="flex min-h-screen apex-bg-primary">
       <Sidebar />
       <main className="flex-1 overflow-auto">
         <Outlet />

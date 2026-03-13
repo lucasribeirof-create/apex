@@ -14,6 +14,7 @@ class Portfolio(Base):
     # Identificação do portfólio
     nome = Column(String(100), default="Carteira Real")
     tipo = Column(String(20), default="real")     # real | simulada
+    corretora = Column(String(100), nullable=True)  # BTG | XP | Santander | Avenue (import B3)
 
     # Patrimônio snapshot (atualizado quando o usuário acessa o app)
     patrimonio_total = Column(Float, default=0.0)

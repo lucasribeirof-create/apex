@@ -49,6 +49,12 @@ export default function DividendosPage() {
 
   useEffect(() => { loadData() }, [])
 
+  useEffect(() => {
+    const handler = () => loadData()
+    window.addEventListener('portfolio-changed', handler)
+    return () => window.removeEventListener('portfolio-changed', handler)
+  }, [])
+
   const toggleSector = (s: string) => setExpandedSectors(prev => ({ ...prev, [s]: !prev[s] }))
   const toggleMonth = (m: string) => setExpandedMonths(prev => ({ ...prev, [m]: !prev[m] }))
 

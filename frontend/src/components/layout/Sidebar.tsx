@@ -1,5 +1,6 @@
 import { NavLink, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Newspaper, TrendingUp, Search, MessageSquare, LogOut, RefreshCw, Settings, History, Banknote } from 'lucide-react'
+import { LayoutDashboard, Newspaper, TrendingUp, Search, MessageSquare, LogOut, RefreshCw, Settings, History, Banknote, Sun, Moon } from 'lucide-react'
+import { useState, useEffect } from 'react'
 import { useStore } from '@/store/useStore'
 import PortfolioSwitcher from '@/components/PortfolioSwitcher'
 import clsx from 'clsx'
@@ -17,6 +18,22 @@ const navItems = [
 export default function Sidebar() {
   const { userName, strategyType, reset } = useStore()
   const navigate = useNavigate()
+  const [lightMode, setLightMode] = useState(() => document.documentElement.classList.contains('light'))
+
+  const toggleTheme = () => {
+    const next = !lightMode
+    setLightMode(next)
+    document.documentElement.classList.toggle('light', next)
+    localStorage.setItem('apex-theme', next ? 'light' : 'dark')
+  }
+
+  useEffect(() => {
+    const saved = localStorage.getItem('apex-theme')
+    if (saved === 'light') {
+      document.documentElement.classList.add('light')
+      setLightMode(true)
+    }
+  }, [])
 
   const handleLogout = () => {
     reset()
@@ -116,6 +133,17 @@ export default function Sidebar() {
             </>
           )}
         </NavLink>
+        <button
+          onClick={toggleTheme}
+          className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm w-full transition-all"
+          style={{ color: '#64748b' }}
+          onMouseEnter={(e) => (e.currentTarget.style.color = '#FFD740')}
+          onMouseLeave={(e) => (e.currentTarget.style.color = '#64748b')}
+          title={lightMode ? 'Modo escuro' : 'Modo claro'}
+        >
+          {lightMode ? <Moon size={16} /> : <Sun size={16} />}
+          {lightMode ? 'Modo Escuro' : 'Modo Claro'}
+        </button>
         <button
           onClick={handleSwitchUser}
           className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm w-full transition-all"

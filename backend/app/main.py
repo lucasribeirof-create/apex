@@ -73,6 +73,10 @@ app.include_router(transacoes.router)
 app.include_router(watchlist.router)
 app.include_router(dividendos.router)
 
+from app.api.routes import import_b3, pluggy
+app.include_router(import_b3.router)
+app.include_router(pluggy.router)
+
 
 @app.get("/health")
 def health():

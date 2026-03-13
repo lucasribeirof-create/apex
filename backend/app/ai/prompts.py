@@ -144,24 +144,45 @@ def build_briefing_prompt(
     data_str = f" | {data_hoje}" if data_hoje else ""
 
     # Detectar horário de mercado para contextualizar dados
-    from datetime import datetime
+    from datetime import datetime, timedelta
     agora = datetime.now()
     hora = agora.hour
+    hoje_str = agora.strftime("%d/%m/%Y")
+    ontem = agora - timedelta(days=1)
+    # Pular fim de semana para achar último dia útil
+    while ontem.weekday() >= 5:  # sáb=5, dom=6
+        ontem -= timedelta(days=1)
+    ontem_str = ontem.strftime("%d/%m/%Y")
+
     # B3 abre 10h, fecha 17h (horário de Brasília)
-    # Futuros US operam ~23h (18h-17h ET, ~19h-18h BRT)
+    # NYSE abre 10:30 BRT, fecha 17:00 BRT (horário de verão) / 18:00 BRT
+    # Futuros US operam ~23h (18h-17h ET)
+    status_partes = []
     if hora < 10:
-        mercado_status = "ATENÇÃO: Dados de IBOV e Dólar são do FECHAMENTO ANTERIOR (B3 ainda não abriu). Use os futuros americanos (ES=F, NQ=F) para inferir direção de abertura."
+        status_partes.append(f"B3 AINDA NÃO ABRIU — IBOV e Dólar são do FECHAMENTO DE {ontem_str} (ontem).")
     elif hora >= 18:
-        mercado_status = "Dados de IBOV e Dólar são do fechamento de hoje. Mercado brasileiro encerrado."
+        status_partes.append(f"B3 JÁ FECHOU — IBOV e Dólar são do fechamento de HOJE ({hoje_str}).")
     else:
-        mercado_status = "Dados em tempo real (mercado brasileiro aberto)."
+        status_partes.append(f"B3 aberta — IBOV e Dólar são dados em tempo real de HOJE ({hoje_str}).")
+
+    if hora < 11:  # NYSE geralmente abre 10:30 BRT
+        status_partes.append(f"NYSE AINDA NÃO ABRIU — S&P 500, Dow e Nasdaq são do FECHAMENTO DE {ontem_str} (ontem). Use Futuros (ES=F, NQ=F) para inferir direção de abertura.")
+    elif hora >= 18:
+        status_partes.append(f"NYSE JÁ FECHOU — S&P 500 e Nasdaq são do fechamento de HOJE ({hoje_str}).")
+    else:
+        status_partes.append(f"NYSE aberta — S&P 500 e Nasdaq são dados em tempo real de HOJE ({hoje_str}).")
+
+    mercado_status = "\n".join(status_partes)
 
     return f"""Você é o Gestor APEX. Produza o morning call do dia de forma DENSA e OBJETIVA.
 Sem introduções, sem rodeios — dados e interpretação direto.
 
+HOJE: {data_hoje or hoje_str}
+
+STATUS DOS MERCADOS:
 {mercado_status}
 
-DADOS COLETADOS ({data_hoje or 'hoje'}):
+DADOS COLETADOS:
 {macro_str} | Regime: {regime}
 
 PORTFÓLIO (referência para alertas):
@@ -170,7 +191,18 @@ PORTFÓLIO (referência para alertas):
 FORMATO OBRIGATÓRIO — use todas as seções abaixo:
 
 **SNAPSHOT DE ABERTURA**
-[Tom do dia em 2-3 linhas densas: risk-on / risk-off / indeciso. S&P, Nasdaq, IBOV e dólar em números. Se dados são do fechamento anterior, diga explicitamente "fechamento anterior" e use futuros para sinalizar direção de abertura.]
+[REGRA CRÍTICA DE TEMPORALIDADE — cada dado nos DADOS COLETADOS vem com tag [FECH. DD/MM] ou [HOJE]. Você DEVE reproduzir essa temporalidade no texto.
+
+❌ ERRADO: "S&P 500 despenca -1.52% para 6.673" (parece que caiu HOJE)
+❌ ERRADO: "S&P recuou 1.52%(ontem dia 12)" (parêntese confuso, ainda parece hoje)
+❌ ERRADO: "IBOV afunda -2.55%" (quando foi? hoje? ontem?)
+✅ CERTO: "S&P 500 FECHOU ONTEM (12/03) em queda de -1.52% a 6.673"
+✅ CERTO: "IBOV ENCERROU ONTEM (12/03) em 179.284 (-2.55%)"
+✅ CERTO: "Futuros do S&P apontam alta de +0.3% NESTE MOMENTO"
+✅ CERTO: "IBOV OPERA AGORA em 180.100 (+0.45%)" (quando mercado está aberto)
+
+O verbo principal DEVE indicar o tempo: "fechou ontem", "encerrou ontem", "opera agora", "abre hoje em". NUNCA use presente ("despenca", "recua", "afunda") para dados do dia anterior.]
+[Tom do dia em 2-3 linhas densas: risk-on / risk-off / indeciso. Use futuros (ES=F, NQ=F) quando disponíveis para sinalizar direção de abertura.]
 
 **MACRO GLOBAL**
 [Driver global dominante hoje e o que significa. DXY, VIX, petróleo, treasuries — o que está movendo. 2-3 parágrafos densos.]{f"""
@@ -191,7 +223,7 @@ FORMATO OBRIGATÓRIO — use todas as seções abaixo:
 **VIÉS DO DIA**
 [Comprador / Vendedor / Neutro] — [razão em 1-2 linhas.]
 
-Regras: dados em números, zero floreio, opinião com convicção. Se dados são do fechamento anterior, SEMPRE indique isso ao citar IBOV/dólar. Use futuros (ES=F, NQ=F) quando disponíveis para inferir direção. Se não tiver dado, omite o bullet."""
+Regras: dados em números, zero floreio, opinião com convicção. REGRA OBRIGATÓRIA: ao citar S&P, IBOV, dólar ou qualquer cotação, SEMPRE indique a data/sessão do dado ("fechou ontem DD/MM", "opera hoje", etc). Nunca apresente um número sem contexto temporal. Use futuros (ES=F, NQ=F) quando disponíveis para inferir direção. Se não tiver dado, omite o bullet."""
 
 # ─── Helpers internos ─────────────────────────────────────────────────────────
 
@@ -234,25 +266,38 @@ def _formatar_posicoes(posicoes: list[dict]) -> str:
 
 
 def _formatar_macro(macro: dict) -> str:
+    from datetime import datetime, timedelta
+    agora = datetime.now()
+    hora = agora.hour
+    hoje_dm = agora.strftime("%d/%m")
+    ontem = agora - timedelta(days=1)
+    while ontem.weekday() >= 5:
+        ontem -= timedelta(days=1)
+    ontem_dm = ontem.strftime("%d/%m")
+
+    # B3: aberta 10h-17h  |  NYSE: aberta ~10:30-17h BRT
+    br_tag = f"[FECH. {ontem_dm}]" if hora < 10 else (f"[FECH. {hoje_dm}]" if hora >= 18 else "[HOJE]")
+    us_tag = f"[FECH. {ontem_dm}]" if hora < 11 else (f"[FECH. {hoje_dm}]" if hora >= 18 else "[HOJE]")
+
     partes = []
     if macro.get("selic") is not None:
         partes.append(f"Selic: {macro['selic']:.2f}% a.a.")
     if macro.get("ipca") is not None:
         partes.append(f"IPCA (mês): {macro['ipca']:.2f}%")
     if macro.get("dolar"):
-        partes.append(f"Dólar: R$ {macro['dolar']:.2f} ({macro.get('dolar_variacao', 0):+.2f}%)")
+        partes.append(f"Dólar {br_tag}: R$ {macro['dolar']:.2f} ({macro.get('dolar_variacao', 0):+.2f}%)")
     if macro.get("ibov"):
-        partes.append(f"IBOV: {macro['ibov']:,.0f} pts ({macro.get('ibov_variacao', 0):+.2f}%)")
+        partes.append(f"IBOV {br_tag}: {macro['ibov']:,.0f} pts ({macro.get('ibov_variacao', 0):+.2f}%)")
     if macro.get("ifix"):
-        partes.append(f"IFIX: {macro['ifix']:,.0f} ({macro.get('ifix_variacao', 0):+.2f}%)")
+        partes.append(f"IFIX {br_tag}: {macro['ifix']:,.0f} ({macro.get('ifix_variacao', 0):+.2f}%)")
     if macro.get("vix"):
         partes.append(f"VIX: {macro['vix']:.1f}")
     if macro.get("sp500"):
-        partes.append(f"S&P500: {macro['sp500']:,.0f} ({macro.get('sp500_variacao', 0):+.2f}%)")
+        partes.append(f"S&P500 {us_tag}: {macro['sp500']:,.0f} ({macro.get('sp500_variacao', 0):+.2f}%)")
     if macro.get("sp500_futures"):
-        partes.append(f"Futuros S&P500: {macro['sp500_futures']:,.0f} ({macro.get('sp500_futures_variacao', 0):+.2f}%)")
+        partes.append(f"Futuros S&P500 [TEMPO REAL]: {macro['sp500_futures']:,.0f} ({macro.get('sp500_futures_variacao', 0):+.2f}%)")
     if macro.get("nasdaq_futures"):
-        partes.append(f"Futuros Nasdaq: {macro['nasdaq_futures']:,.0f} ({macro.get('nasdaq_futures_variacao', 0):+.2f}%)")
+        partes.append(f"Futuros Nasdaq [TEMPO REAL]: {macro['nasdaq_futures']:,.0f} ({macro.get('nasdaq_futures_variacao', 0):+.2f}%)")
     # Curva de juros
     if macro.get("treasury_10y"):
         partes.append(f"Treasury 10Y: {macro['treasury_10y']:.2f}%")

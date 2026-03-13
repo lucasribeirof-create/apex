@@ -191,6 +191,12 @@ export default function HistoricoPage() {
   useEffect(() => { loadHistorico() }, [])
   useEffect(() => { setFiltroModulo('todos') }, [tab])
 
+  useEffect(() => {
+    const handler = () => loadHistorico()
+    window.addEventListener('portfolio-changed', handler)
+    return () => window.removeEventListener('portfolio-changed', handler)
+  }, [])
+
   const loadHistorico = async () => {
     setLoading(true)
     try {

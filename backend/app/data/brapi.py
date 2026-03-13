@@ -207,20 +207,36 @@ async def _get_fundamentals_yfinance(ticker: str) -> Optional[dict]:
         try:
             t = yf.Ticker(yf_ticker)
             info = t.info
+            # Dividendos históricos para /dashboard/dividendos
+            raw_divs = []
+            try:
+                divs_series = t.dividends
+                if divs_series is not None and len(divs_series) > 0:
+                    for dt, rate in divs_series.items():
+                        raw_divs.append({
+                            "paymentDate": dt.strftime("%Y-%m-%dT00:00:00.000Z"),
+                            "rate": float(rate),
+                        })
+            except Exception:
+                pass
             return {
                 "priceEarnings": info.get("trailingPE"),
                 "earningsPerShare": info.get("trailingEps"),
                 "shortName": info.get("shortName"),
                 "longName": (info.get("longName") or "")[:100],
                 "regularMarketPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
+                "_raw_dividends": raw_divs,
             }
         except Exception:
             return {}
 
     extra = await asyncio.to_thread(_fetch_extra)
+    raw_divs = extra.pop("_raw_dividends", [])
     for k, v in extra.items():
         if v is not None and k not in fund:
             fund[k] = v
+    if raw_divs:
+        fund["_raw_dividends"] = raw_divs
 
     fund = {k: v for k, v in fund.items() if v is not None}
     if fund:

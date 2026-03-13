@@ -1,7 +1,7 @@
 """Rota de posições — CRUD de posições do portfólio."""
 import asyncio
 import logging
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
@@ -9,9 +9,11 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_user_id, get_portfolio_ativo
 from app.models import User, Portfolio, Position
 from app.models.transacao import Transacao
+from app.models.portfolio_snapshot import PortfolioSnapshot
 from app.data import get_quotes, get_fundamentals
 from app.data.cache import cache as _portfolio_cache
 from app.data.tecnico import get_dados_tecnicos
+from app.data.dividend_merger import get_merged_dividends
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 logger = logging.getLogger(__name__)
@@ -86,16 +88,15 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
         db.commit()
 
     tickers = [p.ticker for p in posicoes if p.tipo in ("ACAO", "FII", "ETF", "BDR")]
-    cotacoes = await get_quotes(tickers) if tickers else {}
 
-    # Para tickers sem cotação BRAPI, busca via get_dados_tecnicos (yfinance fallback)
-    sem_cotacao = [p for p in posicoes if p.tipo in ("ACAO", "FII", "ETF", "BDR") and not cotacoes.get(p.ticker)]
-    if sem_cotacao:
-        tarefas = [get_dados_tecnicos(p.ticker, getattr(p, "mercado", None) or "B3") for p in sem_cotacao]
-        resultados_yf = await asyncio.gather(*tarefas, return_exceptions=True)
-        for p, res in zip(sem_cotacao, resultados_yf):
-            if isinstance(res, dict) and res.get("preco_atual"):
-                cotacoes[p.ticker] = {"regularMarketPrice": res["preco_atual"]}
+    # Cotações: vai direto pro yfinance batch (BRAPI não está configurada)
+    cotacoes = {}
+    if tickers:
+        from app.data.yfinance_client import get_quotes_yf
+        cotacoes = await get_quotes_yf(tickers)
+
+    # Para tickers sem cotação no batch, usa o preço salvo no banco (sem chamadas individuais)
+    # O refresh individual fica para o botão "Atualizar Preços"
 
     resultado = []
     preco_mudou = False
@@ -160,6 +161,69 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
 
     if preco_mudou:
         db.commit()
+
+    # Dividendos 12m por posição — usa APENAS cache (memória 5min + SQLite 6h)
+    # Não busca APIs aqui. A primeira carga real acontece via /dividendos ou refresh-prices.
+    cutoff_12m = datetime.utcnow() - timedelta(days=365)
+    div_tickers = [(i, r["ticker"], r["quantidade"], r.get("preco_medio", 0)) for i, r in enumerate(resultado) if r["tipo"] in ("ACAO", "FII", "ETF", "BDR")]
+    if div_tickers:
+        from app.data.cache import cache as _div_cache
+        from app.models.dividend_event import DividendEvent
+
+        for idx, tk, qty, pm in div_tickers:
+            divs = None
+            # 1) Tentar memory cache
+            cached = _div_cache.get(f"divmerge:{tk}")
+            if cached is not None:
+                divs = cached
+            else:
+                # 2) Tentar SQLite cache (sem chamar APIs)
+                events = db.query(DividendEvent).filter(
+                    DividendEvent.ticker == tk
+                ).order_by(DividendEvent.ex_date.desc().nullslast()).all()
+                if events:
+                    divs = [{
+                        "rate": e.rate,
+                        "payment_date": e.payment_date.strftime("%Y-%m-%d") if e.payment_date else None,
+                        "ex_date": e.ex_date.strftime("%Y-%m-%d") if e.ex_date else None,
+                    } for e in events]
+                    _div_cache.set(f"divmerge:{tk}", divs, ttl=300)
+
+            if divs:
+                total_12m_per_cota = 0.0
+                total_all_per_cota = 0.0
+                ultimo_valor = 0.0
+                ultimo_dt = None
+                for d in divs:
+                    rate = d.get("rate") or 0
+                    total_all_per_cota += rate
+                    dt_str = d.get("payment_date") or d.get("ex_date")
+                    if dt_str:
+                        try:
+                            dt = datetime.fromisoformat(str(dt_str).replace("Z", ""))
+                            if dt > cutoff_12m:
+                                total_12m_per_cota += rate
+                            if ultimo_dt is None or dt > ultimo_dt:
+                                ultimo_dt = dt
+                                ultimo_valor = rate
+                        except Exception:
+                            pass
+                resultado[idx]["dividendos_12m"] = round(total_12m_per_cota * qty, 2)
+                resultado[idx]["dy_12m"] = round((total_12m_per_cota / pm) * 100, 2) if pm > 0 else 0.0
+                resultado[idx]["proventos_acumulados"] = round(total_all_per_cota * qty, 2)
+                resultado[idx]["ultimo_dividendo"] = round(ultimo_valor, 4)
+            else:
+                resultado[idx]["dividendos_12m"] = 0.0
+                resultado[idx]["dy_12m"] = 0.0
+                resultado[idx]["proventos_acumulados"] = 0.0
+                resultado[idx]["ultimo_dividendo"] = 0.0
+    # RF/CAIXA/OPCAO get 0
+    for r in resultado:
+        if "dividendos_12m" not in r:
+            r["dividendos_12m"] = 0.0
+            r["dy_12m"] = 0.0
+            r["proventos_acumulados"] = 0.0
+            r["ultimo_dividendo"] = 0.0
 
     # Caixa disponível: capital declarado - soma dos valores atuais investidos
     capital_declarado = getattr(portfolio, "capital_declarado", None)
@@ -527,15 +591,21 @@ async def refresh_prices(user_id: Optional[int] = Depends(get_user_id), db: Sess
     posicoes_mercado = [p for p in posicoes if p.tipo not in _TIPOS_SEM_COTACAO]
     posicoes_sinteticas = [p for p in posicoes if p.tipo in _TIPOS_SEM_COTACAO]
 
-    # Busca cotações em paralelo apenas para ativos negociados em bolsa
-    tarefas = [
-        get_dados_tecnicos(
-            p.ticker,
-            getattr(p, "mercado", None) or "B3"
-        )
-        for p in posicoes_mercado
-    ]
-    resultados = await asyncio.gather(*tarefas, return_exceptions=True)
+    # 1) Batch BRAPI — busca todas as cotações numa única chamada HTTP
+    tickers_b3 = [p.ticker for p in posicoes_mercado
+                  if (getattr(p, "mercado", None) or "B3") not in ("NYSE", "NASDAQ", "ETF_US")]
+    cotacoes_batch = await get_quotes(tickers_b3) if tickers_b3 else {}
+
+    # 2) Fallback individual só para tickers sem cotação no batch (BDRs, US, etc.)
+    sem_cotacao = [p for p in posicoes_mercado if not cotacoes_batch.get(p.ticker)]
+    if sem_cotacao:
+        tarefas = [
+            get_dados_tecnicos(p.ticker, getattr(p, "mercado", None) or "B3")
+            for p in sem_cotacao
+        ]
+        resultados_fb = await asyncio.gather(*tarefas, return_exceptions=True)
+    else:
+        resultados_fb = []
 
     atualizadas = 0
     patrimonio = 0.0
@@ -544,13 +614,20 @@ async def refresh_prices(user_id: Optional[int] = Depends(get_user_id), db: Sess
     for pos in posicoes_sinteticas:
         patrimonio += (pos.valor_atual or pos.valor_investido or 0)
 
-    for pos, resultado in zip(posicoes_mercado, resultados):
-        # Ignora erros ou ativos sem cotação disponível
-        if isinstance(resultado, Exception) or not isinstance(resultado, dict):
-            patrimonio += (pos.valor_atual or pos.valor_investido or 0)
-            continue
+    # Index dos fallbacks
+    _fb_map = {}
+    for p, res in zip(sem_cotacao, resultados_fb):
+        if isinstance(res, dict) and res.get("preco_atual"):
+            _fb_map[p.ticker] = res["preco_atual"]
 
-        preco_live = resultado.get("preco_atual")
+    for pos in posicoes_mercado:
+        # Tentar batch BRAPI primeiro, depois fallback
+        preco_live = None
+        batch_data = cotacoes_batch.get(pos.ticker, {})
+        if batch_data.get("regularMarketPrice"):
+            preco_live = batch_data["regularMarketPrice"]
+        elif pos.ticker in _fb_map:
+            preco_live = _fb_map[pos.ticker]
         if not preco_live:
             patrimonio += (pos.valor_atual or pos.valor_investido or 0)
             continue
@@ -576,8 +653,78 @@ async def refresh_prices(user_id: Optional[int] = Depends(get_user_id), db: Sess
     if patrimonio > 0:
         portfolio.patrimonio_total = round(patrimonio, 2)
 
+    # ── Salva snapshot diário ───────────────────────────────────────────────
+    custo_total = sum((p.valor_investido or 0) for p in posicoes)
+    hoje = date.today()
+    snap = db.query(PortfolioSnapshot).filter(
+        PortfolioSnapshot.portfolio_id == portfolio.id,
+        PortfolioSnapshot.date == hoje,
+    ).first()
+
+    # Calcula CDI acumulado desde o primeiro snapshot
+    cdi_acum = 0.0
+    prev_snap = db.query(PortfolioSnapshot).filter(
+        PortfolioSnapshot.portfolio_id == portfolio.id,
+        PortfolioSnapshot.date < hoje,
+    ).order_by(PortfolioSnapshot.date.desc()).first()
+    if prev_snap:
+        try:
+            from app.data.bcb_client import get_selic
+            selic = await get_selic()
+            if selic:
+                cdi_diario = ((1 + selic / 100) ** (1 / 252)) - 1
+                cdi_acum = (1 + (prev_snap.cdi_acumulado or 0) / 100) * (1 + cdi_diario) - 1
+                cdi_acum = round(cdi_acum * 100, 4)
+        except Exception:
+            cdi_acum = prev_snap.cdi_acumulado or 0.0
+
+    if snap:
+        snap.patrimonio = round(patrimonio, 2)
+        snap.custo_total = round(custo_total, 2)
+        snap.cdi_acumulado = cdi_acum
+    else:
+        db.add(PortfolioSnapshot(
+            portfolio_id=portfolio.id,
+            date=hoje,
+            patrimonio=round(patrimonio, 2),
+            custo_total=round(custo_total, 2),
+            cdi_acumulado=cdi_acum,
+        ))
+
     db.commit()
     return {"atualizadas": atualizadas, "patrimonio_total": round(patrimonio, 2)}
+
+
+@router.get("/evolucao")
+def portfolio_evolucao(user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Retorna série temporal de snapshots para gráfico Carteira vs CDI."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        return []
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        return []
+
+    snaps = db.query(PortfolioSnapshot).filter(
+        PortfolioSnapshot.portfolio_id == portfolio.id,
+    ).order_by(PortfolioSnapshot.date.asc()).all()
+
+    if not snaps:
+        return []
+
+    base_patrimonio = snaps[0].patrimonio or 1
+    result = []
+    for s in snaps:
+        pl_pct = ((s.patrimonio / base_patrimonio) - 1) * 100 if base_patrimonio > 0 else 0
+        result.append({
+            "date": s.date.isoformat(),
+            "patrimonio": round(s.patrimonio, 2),
+            "pl_pct": round(pl_pct, 2),
+            "cdi_pct": round(s.cdi_acumulado or 0, 2),
+        })
+    return result
+
 
 class AtualizarAlocacao(BaseModel):
     nova_estrategia: str | None = None          # CORE | ALPHA | RENDA | CUSTOM

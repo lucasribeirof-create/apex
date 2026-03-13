@@ -39,8 +39,12 @@ async def cotacao(ticker: str):
 
 @router.get("/history/{ticker}")
 async def historico(ticker: str, period: str = "1y", interval: str = "1d"):
-    """Histórico de preços de um ativo."""
+    """Histórico de preços de um ativo. Tenta BRAPI, fallback para yfinance."""
     data = await get_history(ticker.upper(), period=period, interval=interval)
+    if not data:
+        # Fallback yfinance: adiciona .SA para tickers B3
+        yf_ticker = ticker.upper() if any(c in ticker for c in ["^", "."]) else ticker.upper() + ".SA"
+        data = await get_history_global(yf_ticker, period=period, interval=interval)
     if not data:
         raise HTTPException(status_code=404, detail=f"Histórico de {ticker} não disponível")
     return data
