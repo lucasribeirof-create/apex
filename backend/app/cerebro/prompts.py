@@ -79,13 +79,17 @@ def build_portfolio_prompt(
     macro: dict,
     narrativa_macro: str = "",
     macro_flags: list[str] | None = None,
+    alocacao_real: dict | None = None,
+    alocacao_alvo: dict | None = None,
+    racional: str = "",
 ) -> str:
     """
     Constrói o system prompt completo com contexto do portfólio.
     Injetar em TODA chamada que envolve análise de portfólio.
     """
-    posicoes_str = _formatar_posicoes(posicoes)
+    posicoes_str = _formatar_posicoes(posicoes, patrimonio)
     macro_str = _formatar_macro(macro)
+    alocacao_str = _formatar_alocacao(alocacao_real or {}, alocacao_alvo or {})
 
     regime_extra = ""
     if estrategia == "RENDA":
@@ -100,6 +104,12 @@ def build_portfolio_prompt(
 Portfólio sob gestão: {user_name} | Estratégia: APEX {estrategia}
 Patrimônio: R$ {patrimonio:,.2f} | Drawdown tolerado: {tolerancia_drawdown}% | Perfil: {perfil_resumo}
 Módulos ativos: {', '.join(modulos_ativos)}
+
+Alocação por módulo:
+{alocacao_str}
+{f"""
+Racional da carteira:
+{racional}""" if racional else ""}
 
 Posições abertas:
 {posicoes_str}
@@ -235,42 +245,91 @@ Uma linha. Comprador, vendedor ou neutro para risco hoje — e a razão em menos
 
 # ─── Helpers internos ─────────────────────────────────────────────────────────
 
-def _formatar_posicoes(posicoes: list[dict]) -> str:
+def _formatar_posicoes(posicoes: list[dict], patrimonio: float = 0) -> str:
     if not posicoes:
         return "Nenhuma posição aberta."
-    linhas = []
+
+    # Agrupa por módulo
+    por_modulo: dict[str, list[dict]] = {}
     for p in posicoes:
-        modulo = p.get('modulo') or '-'
-        preco_medio = p.get('preco_medio') or 0
-        preco_atual = p.get('preco_atual') or preco_medio
-        moeda = p.get('moeda') or 'BRL'
-        mercado = p.get('mercado')
+        mod = p.get('modulo') or 'outros'
+        por_modulo.setdefault(mod, []).append(p)
 
-        if preco_medio == 0 and preco_atual == 0 and modulo != 'teses':
-            continue  # pula posição sem dados de preço (exceto teses em USD)
+    blocos = []
+    for modulo, pos_list in sorted(por_modulo.items()):
+        subtotal_valor = sum(p.get('valor_atual') or p.get('valor_investido') or 0 for p in pos_list)
+        pct_portfolio = (subtotal_valor / patrimonio * 100) if patrimonio > 0 else 0
+        header = f"▸ {modulo.upper()} — R$ {subtotal_valor:,.0f} ({pct_portfolio:.1f}% da carteira)"
+        linhas = [header]
 
-        pl = p.get('pl_percentual') or 0
+        for p in pos_list:
+            preco_medio = p.get('preco_medio') or 0
+            preco_atual = p.get('preco_atual') or preco_medio
+            moeda = p.get('moeda') or 'BRL'
+            mercado = p.get('mercado') or ''
+            qty = p.get('quantidade') or 0
+            valor_atual = p.get('valor_atual') or 0
+            pl = p.get('pl_percentual') or 0
+            pct_pos = (valor_atual / patrimonio * 100) if patrimonio > 0 else 0
 
-        if modulo == 'teses':
-            pm_usd = p.get('preco_medio_usd')
-            if moeda == 'USD' and pm_usd:
-                linha = f"- {p.get('ticker') or '?'} ({p.get('tipo') or '-'}, TESE, {mercado or 'INT'}): "
-                linha += f"PM US$ {pm_usd:,.2f} | moeda: USD"
+            if preco_medio == 0 and preco_atual == 0 and modulo != 'teses':
+                continue
+
+            ticker = p.get('ticker') or '?'
+            tipo = p.get('tipo') or '-'
+
+            # Linha principal: ticker, qty, valores, peso
+            if moeda == 'USD' and p.get('preco_medio_usd'):
+                linha = f"  - {ticker} ({tipo}{', ' + mercado if mercado else ''}): {qty:.0f} un | PM US${p['preco_medio_usd']:,.2f} | R$ {valor_atual:,.0f} ({pct_pos:.1f}%)"
             else:
-                linha = f"- {p.get('ticker') or '?'} ({p.get('tipo') or '-'}, TESE, {mercado or 'B3'}): "
-                linha += f"R$ {preco_medio:,.2f} → atual R$ {preco_atual:,.2f} ({'+' if pl >= 0 else ''}{pl:.1f}%)"
+                linha = f"  - {ticker} ({tipo}): {qty:.0f} un | PM R${preco_medio:,.2f} → R${preco_atual:,.2f} | P&L {'+' if pl >= 0 else ''}{pl:.1f}% | R$ {valor_atual:,.0f} ({pct_pos:.1f}%)"
+
+            # Stop / Alvo
+            extras = []
+            if p.get('stop_loss'):
+                extras.append(f"stop R${p['stop_loss']:,.2f}")
+            if p.get('alvo_1'):
+                extras.append(f"alvo R${p['alvo_1']:,.2f}")
+            # Classificação e APEX Score
+            if p.get('classificacao'):
+                extras.append(p['classificacao'])
+            if p.get('apex_score') is not None:
+                extras.append(f"score {p['apex_score']}")
+            if extras:
+                linha += f" | {' | '.join(extras)}"
+
+            linhas.append(linha)
+
+            # Tese (para TODOS os módulos, não somente teses)
             tese = p.get('tese')
             if tese:
-                linha += f"\n  Tese: {tese}"
-        else:
-            linha = f"- {p.get('ticker') or '?'} ({p.get('tipo') or '-'}, {modulo}): "
-            linha += f"R$ {preco_medio:,.2f} → atual R$ {preco_atual:,.2f} "
-            linha += f"({'+' if pl >= 0 else ''}{pl:.1f}%)"
-            if p.get('stop_loss'):
-                linha += f" | Stop: R$ {p['stop_loss']:,.2f}"
+                linhas.append(f"    Tese: {tese}")
+            # Justificativa de entrada
+            justificativa = p.get('justificativa_entrada')
+            if justificativa:
+                linhas.append(f"    Justificativa entrada: {justificativa}")
 
-        linhas.append(linha)
-    return "\n".join(linhas) if linhas else "Nenhuma posição com dados de preço disponíveis."
+        blocos.append("\n".join(linhas))
+    return "\n\n".join(blocos) if blocos else "Nenhuma posição com dados de preço disponíveis."
+
+
+def _formatar_alocacao(real: dict, alvo: dict) -> str:
+    if not real and not alvo:
+        return "Alocação não configurada."
+    linhas = []
+    modulos = sorted(set(list(real.keys()) + list(alvo.keys())))
+    for m in modulos:
+        r = real.get(m, 0)
+        a = alvo.get(m, 0)
+        if r == 0 and a == 0:
+            continue
+        desvio = r - a
+        sinal = "+" if desvio > 0 else ""
+        if a > 0:
+            linhas.append(f"  {m}: {r:.1f}% real / {a:.1f}% alvo ({sinal}{desvio:.1f}pp)")
+        else:
+            linhas.append(f"  {m}: {r:.1f}% real (sem alvo)")
+    return "\n".join(linhas) if linhas else "Sem alocação."
 
 
 def _formatar_macro(macro: dict) -> str:

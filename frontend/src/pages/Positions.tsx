@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
-import { Plus, X, TrendingUp, TrendingDown, Circle, Trash2, ChevronDown, ChevronUp, BrainCircuit, LayoutList, FlaskConical, Download, FileText, RefreshCw } from 'lucide-react'
+import { Plus, X, TrendingUp, TrendingDown, Circle, Trash2, ChevronDown, ChevronUp, BrainCircuit, LayoutList, FlaskConical, Download, FileText, RefreshCw, SlidersHorizontal, Loader2, CheckCircle } from 'lucide-react'
 import PosicaoDetalheModal from '@/components/PosicaoDetalheModal'
 import CarteiraPanel from '@/components/CarteiraPanel'
 import RebalanceWizard from '@/components/RebalanceWizard'
@@ -35,6 +35,7 @@ interface Position {
   analise_ia?: string | null
   analise_ia_at?: string | null
   dividendos_12m?: number
+  peso_alvo?: number | null
 }
 
 interface FormData {
@@ -61,6 +62,12 @@ const MODULE_LABELS: Record<string, string> = {
   dividendos: 'Dividendos',
   teses: 'Teses',
   caixa: 'Caixa',
+}
+
+const MODULE_COLORS: Record<string, string> = {
+  etfs: '#00E676', fiis: '#00BFA5', renda_fixa: '#1DE9B6',
+  momentum: '#64FFDA', wheel: '#00B0FF', alpha: '#AA00FF',
+  dividendos: '#FFD740', teses: '#FF6D00', caixa: '#475569',
 }
 
 const TIPO_COLORS: Record<string, string> = {
@@ -271,8 +278,166 @@ function StopBadge({ preco_atual, stop_loss }: { preco_atual: number; stop_loss:
   return null
 }
 
-function ModuleGroup({ modulo, positions, onDelete, onDetalhe }: { modulo: string; positions: Position[]; onDelete: (id: number) => void; onDetalhe: (p: Position) => void }) {
+function PesoAlvoModal({ modulo, positions, onClose, onSaved }: {
+  modulo: string
+  positions: Position[]
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const color = MODULE_COLORS[modulo] || '#00E676'
+  const [pesos, setPesos] = useState<Record<number, number>>(() => {
+    const init: Record<number, number> = {}
+    positions.forEach(p => { init[p.id] = p.peso_alvo ?? 0 })
+    return init
+  })
+  const [saving, setSaving] = useState(false)
+  const [success, setSuccess] = useState(false)
+  const [error, setError] = useState('')
+
+  const total = Object.values(pesos).reduce((a, b) => a + b, 0)
+  const valid = Math.abs(total - 100) <= 0.5 || total === 0
+
+  const handleChange = (id: number, val: string) => {
+    const n = parseFloat(val)
+    setPesos(prev => ({ ...prev, [id]: isNaN(n) ? 0 : Math.max(0, Math.min(100, n)) }))
+    setError('')
+  }
+
+  const handleSave = async () => {
+    if (!valid) return
+    setSaving(true)
+    setError('')
+    try {
+      await Promise.all(
+        positions.map(p =>
+          api.patch(`/portfolio/posicoes/${p.id}`, { peso_alvo: pesos[p.id] ?? 0 })
+        )
+      )
+      setSuccess(true)
+      setTimeout(() => { onSaved(); onClose() }, 600)
+    } catch (e: any) {
+      setError(e?.response?.data?.detail ?? 'Erro ao salvar pesos.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleDistribuirIgual = () => {
+    const pesoIgual = Math.round((100 / positions.length) * 10) / 10
+    const init: Record<number, number> = {}
+    positions.forEach(p => { init[p.id] = pesoIgual })
+    setPesos(init)
+  }
+
+  return (
+    <motion.div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+    >
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <motion.div
+        className="relative w-full max-w-md mx-4 rounded-2xl shadow-2xl overflow-hidden"
+        style={{ background: '#0f172a', border: '1px solid #1e293b' }}
+        initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between p-5 pb-3">
+          <div className="flex items-center gap-2">
+            <SlidersHorizontal size={15} style={{ color }} />
+            <span className="text-sm font-bold" style={{ color: '#f1f5f9' }}>
+              Peso Alvo — {MODULE_LABELS[modulo] || modulo}
+            </span>
+          </div>
+          <button onClick={onClose} className="p-1 rounded hover:bg-white/5 transition-colors">
+            <X size={16} style={{ color: '#64748b' }} />
+          </button>
+        </div>
+
+        <p className="px-5 text-xs mb-4" style={{ color: '#64748b' }}>
+          Defina o peso-alvo de cada ativo dentro do módulo. Soma deve ser 100% (ou 0% para peso igual).
+        </p>
+
+        {/* Sliders */}
+        <div className="px-5 space-y-3 max-h-[50vh] overflow-y-auto">
+          {positions.map(p => (
+            <div key={p.id} className="flex items-center gap-3">
+              <span className="text-xs font-mono font-bold w-20 flex-shrink-0 truncate" style={{ color: '#f1f5f9' }}>{p.ticker}</span>
+              <div className="flex-1 relative">
+                <input
+                  type="range"
+                  min={0} max={100} step={0.5}
+                  value={pesos[p.id] ?? 0}
+                  onChange={e => handleChange(p.id, e.target.value)}
+                  className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
+                  style={{
+                    background: `linear-gradient(to right, ${color} 0%, ${color} ${pesos[p.id] ?? 0}%, #1e293b ${pesos[p.id] ?? 0}%, #1e293b 100%)`,
+                    accentColor: color,
+                  }}
+                />
+              </div>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                <input
+                  type="number"
+                  min={0} max={100} step={0.5}
+                  value={pesos[p.id] ?? 0}
+                  onChange={e => handleChange(p.id, e.target.value)}
+                  className="w-14 px-1.5 py-1 rounded text-xs font-mono text-right outline-none"
+                  style={{ background: '#1e293b', border: '1px solid #334155', color: '#f1f5f9' }}
+                />
+                <span className="text-[10px]" style={{ color: '#475569' }}>%</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div className="p-5 pt-4 mt-3" style={{ borderTop: '1px solid #1e293b' }}>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-mono" style={{ color: '#64748b' }}>Total:</span>
+              <span className="text-sm font-bold font-mono" style={{ color: valid ? '#00E676' : '#FF5252' }}>
+                {total.toFixed(1)}%
+              </span>
+              {!valid && <span className="text-[10px]" style={{ color: '#FF5252' }}>Deve somar 100%</span>}
+            </div>
+            <button
+              onClick={handleDistribuirIgual}
+              className="text-[10px] px-2 py-1 rounded transition-all"
+              style={{ color: '#64748b', border: '1px solid #334155' }}
+              onMouseEnter={e => { e.currentTarget.style.color = '#f1f5f9'; e.currentTarget.style.borderColor = '#475569' }}
+              onMouseLeave={e => { e.currentTarget.style.color = '#64748b'; e.currentTarget.style.borderColor = '#334155' }}
+            >
+              Distribuir igual
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              className="flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all"
+              style={{ color: '#94a3b8', border: '1px solid #334155' }}
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving || !valid}
+              className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ background: 'rgba(0,230,118,0.15)', color: '#00E676', border: '1px solid rgba(0,230,118,0.35)' }}
+            >
+              {saving ? <Loader2 size={14} className="animate-spin" /> : success ? <CheckCircle size={14} /> : null}
+              {saving ? 'Salvando...' : success ? 'Salvo!' : 'Salvar pesos'}
+            </button>
+          </div>
+          {error && <p className="text-xs mt-2" style={{ color: '#ef4444' }}>{error}</p>}
+        </div>
+      </motion.div>
+    </motion.div>
+  )
+}
+
+function ModuleGroup({ modulo, positions, onDelete, onDetalhe, onPesosSaved }: { modulo: string; positions: Position[]; onDelete: (id: number) => void; onDetalhe: (p: Position) => void; onPesosSaved: () => void }) {
   const [open, setOpen] = useState(true)
+  const [showPesoAlvo, setShowPesoAlvo] = useState(false)
   const totalVal = positions.reduce((a, p) => a + p.valor_atual, 0)
   const totalPL = positions.reduce((a, p) => a + p.pl_reais, 0)
   const totalDiv12m = positions.reduce((a, p) => a + (p.dividendos_12m || 0), 0)
@@ -305,6 +470,16 @@ function ModuleGroup({ modulo, positions, onDelete, onDetalhe }: { modulo: strin
           <span className="text-xs px-1.5 py-0.5 rounded" style={{ color: totalRetGroup >= 0 ? '#00E676' : '#FF5252', background: totalRetGroup >= 0 ? 'rgba(0,230,118,0.08)' : 'rgba(255,82,82,0.08)' }}>
             {totalRetPct >= 0 ? '+' : ''}{totalRetPct.toFixed(1)}%
           </span>
+          <button
+            onClick={e => { e.stopPropagation(); setOpen(true); setShowPesoAlvo(true) }}
+            title="Ajustar pesos-alvo do módulo"
+            className="flex items-center justify-center w-7 h-7 rounded transition-all"
+            style={{ color: '#64748b', opacity: 0.5 }}
+            onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'rgba(255,255,255,0.05)' }}
+            onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; e.currentTarget.style.background = 'transparent' }}
+          >
+            <SlidersHorizontal size={13} />
+          </button>
           {open ? <ChevronUp size={14} style={{ color: '#64748b' }} /> : <ChevronDown size={14} style={{ color: '#64748b' }} />}
         </div>
       </button>
@@ -399,6 +574,17 @@ function ModuleGroup({ modulo, positions, onDelete, onDetalhe }: { modulo: strin
               ))}
             </div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showPesoAlvo && (
+          <PesoAlvoModal
+            modulo={modulo}
+            positions={positions}
+            onClose={() => setShowPesoAlvo(false)}
+            onSaved={onPesosSaved}
+          />
         )}
       </AnimatePresence>
     </div>
@@ -780,7 +966,7 @@ export default function PositionsPage() {
 
       {!loading && Object.entries(grouped).map(([modulo, pos]) => (
         <motion.div key={modulo} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
-          <ModuleGroup modulo={modulo} positions={pos} onDelete={deletePosition} onDetalhe={(p) => setAnalisando(p)} />
+          <ModuleGroup modulo={modulo} positions={pos} onDelete={deletePosition} onDetalhe={(p) => setAnalisando(p)} onPesosSaved={loadPositions} />
         </motion.div>
       ))}
 

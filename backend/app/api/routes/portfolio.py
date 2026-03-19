@@ -101,8 +101,8 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
     resultado = []
     preco_mudou = False
     for p in posicoes:
-        # RF e CAIXA: quantidade = valor nominal, preco fixo = 1.0 (sem cotação de mercado)
-        if p.tipo in ("RF", "CAIXA"):
+        # RF, CAIXA e FUNDO: sem cotação de mercado — usa preço atual do DB
+        if p.tipo in ("RF", "CAIXA", "FUNDO"):
             preco_atual = p.preco_medio or 1.0
             # Corrige dados corrompidos por refresh_prices anterior
             if p.preco_atual != preco_atual:
@@ -112,7 +112,7 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
                 p.pl_percentual = round(p.pl_reais / p.valor_investido * 100, 2) if p.valor_investido else 0.0
                 preco_mudou = True
         cotacao = cotacoes.get(p.ticker, {})
-        preco_atual = cotacao.get("regularMarketPrice", p.preco_atual or p.preco_medio) if p.tipo not in ("RF", "CAIXA") else preco_atual
+        preco_atual = cotacao.get("regularMarketPrice", p.preco_atual or p.preco_medio) if p.tipo not in ("RF", "CAIXA", "FUNDO") else preco_atual
         valor_atual = preco_atual * p.quantidade
         pl_reais = valor_atual - p.valor_investido
         pl_pct = (pl_reais / p.valor_investido * 100) if p.valor_investido > 0 else 0
@@ -157,6 +157,7 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
             "vencimento": p.vencimento,
             "tipo_opcao": p.tipo_opcao,
             "premio_recebido": p.premio_recebido,
+            "peso_alvo": p.peso_alvo,
         })
 
     if preco_mudou:
@@ -164,13 +165,14 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
 
     # Dividendos 12m por posição — usa APENAS cache (memória 5min + SQLite 6h)
     # Não busca APIs aqui. A primeira carga real acontece via /dividendos ou refresh-prices.
+    # IMPORTANTE: só conta dividendos pagos APÓS a data de compra da posição.
     cutoff_12m = datetime.utcnow() - timedelta(days=365)
-    div_tickers = [(i, r["ticker"], r["quantidade"], r.get("preco_medio", 0)) for i, r in enumerate(resultado) if r["tipo"] in ("ACAO", "FII", "ETF", "BDR")]
+    div_tickers = [(i, r["ticker"], r["quantidade"], r.get("preco_medio", 0), r.get("data_entrada")) for i, r in enumerate(resultado) if r["tipo"] in ("ACAO", "FII", "ETF", "BDR")]
     if div_tickers:
         from app.data.cache import cache as _div_cache
         from app.models.dividend_event import DividendEvent
 
-        for idx, tk, qty, pm in div_tickers:
+        for idx, tk, qty, pm, data_entrada in div_tickers:
             divs = None
             # 1) Tentar memory cache
             cached = _div_cache.get(f"divmerge:{tk}")
@@ -194,13 +196,26 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
                 total_all_per_cota = 0.0
                 ultimo_valor = 0.0
                 ultimo_dt = None
+                # Normalizar data_entrada para comparação (sem timezone)
+                entrada_dt = None
+                if data_entrada:
+                    if isinstance(data_entrada, datetime):
+                        entrada_dt = data_entrada.replace(tzinfo=None)
+                    elif isinstance(data_entrada, str):
+                        try:
+                            entrada_dt = datetime.fromisoformat(str(data_entrada).replace("Z", ""))
+                        except Exception:
+                            pass
                 for d in divs:
                     rate = d.get("rate") or 0
-                    total_all_per_cota += rate
                     dt_str = d.get("payment_date") or d.get("ex_date")
                     if dt_str:
                         try:
                             dt = datetime.fromisoformat(str(dt_str).replace("Z", ""))
+                            # Ignorar dividendos pagos antes da compra
+                            if entrada_dt and dt < entrada_dt:
+                                continue
+                            total_all_per_cota += rate
                             if dt > cutoff_12m:
                                 total_12m_per_cota += rate
                             if ultimo_dt is None or dt > ultimo_dt:
@@ -208,6 +223,9 @@ async def listar_posicoes(user_id: Optional[int] = Depends(get_user_id), db: Ses
                                 ultimo_valor = rate
                         except Exception:
                             pass
+                    else:
+                        # Sem data — inclui no acumulado total apenas
+                        total_all_per_cota += rate
                 resultado[idx]["dividendos_12m"] = round(total_12m_per_cota * qty, 2)
                 resultado[idx]["dy_12m"] = round((total_12m_per_cota / pm) * 100, 2) if pm > 0 else 0.0
                 resultado[idx]["proventos_acumulados"] = round(total_all_per_cota * qty, 2)
@@ -482,6 +500,7 @@ class AtualizarPosicao(BaseModel):
     modulo: str | None = None         # Trocar módulo
     analise_ia: str | None = None     # Salvar análise AI
     data_abertura: str | None = None  # Editar data de abertura (ISO)
+    peso_alvo: float | None = None    # Peso alvo dentro do módulo (0-100)
 
 
 @router.patch("/posicoes/{posicao_id}")
@@ -527,6 +546,8 @@ def atualizar_posicao(posicao_id: int, body: AtualizarPosicao, user_id: Optional
     if body.analise_ia is not None:
         posicao.analise_ia = body.analise_ia.strip() or None
         posicao.analise_ia_at = datetime.now(timezone.utc)
+    if body.peso_alvo is not None:
+        posicao.peso_alvo = max(0, min(100, body.peso_alvo)) if body.peso_alvo > 0 else None
 
     # Recalcula P&L se quantidade ou preço médio mudaram
     recalc = False
@@ -586,8 +607,8 @@ async def refresh_prices(user_id: Optional[int] = Depends(get_user_id), db: Sess
     if not posicoes:
         return {"atualizadas": 0, "patrimonio_total": 0}
 
-    # Separa posições com cotação de mercado das sintéticas (RF, CAIXA)
-    _TIPOS_SEM_COTACAO = {"RF", "CAIXA"}
+    # Separa posições com cotação de mercado das sintéticas (RF, CAIXA, FUNDO)
+    _TIPOS_SEM_COTACAO = {"RF", "CAIXA", "FUNDO"}
     posicoes_mercado = [p for p in posicoes if p.tipo not in _TIPOS_SEM_COTACAO]
     posicoes_sinteticas = [p for p in posicoes if p.tipo in _TIPOS_SEM_COTACAO]
 
@@ -610,7 +631,7 @@ async def refresh_prices(user_id: Optional[int] = Depends(get_user_id), db: Sess
     atualizadas = 0
     patrimonio = 0.0
 
-    # RF e CAIXA: quantidade = valor nominal, preco = 1.0 (sem cotação externa)
+    # RF, CAIXA, FUNDO: sem cotação externa — usa valor_atual existente
     for pos in posicoes_sinteticas:
         patrimonio += (pos.valor_atual or pos.valor_investido or 0)
 
@@ -697,7 +718,9 @@ async def refresh_prices(user_id: Optional[int] = Depends(get_user_id), db: Sess
 
 @router.get("/evolucao")
 def portfolio_evolucao(user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
-    """Retorna série temporal de snapshots para gráfico Carteira vs CDI."""
+    """Retorna série temporal: Rentabilidade da Carteira vs CDI vs IBOV vs S&P500."""
+    import yfinance as yf
+
     user = (db.query(User).filter(User.id == user_id).first() if user_id
             else db.query(User).first())
     if not user:
@@ -710,20 +733,112 @@ def portfolio_evolucao(user_id: Optional[int] = Depends(get_user_id), db: Sessio
         PortfolioSnapshot.portfolio_id == portfolio.id,
     ).order_by(PortfolioSnapshot.date.asc()).all()
 
-    if not snaps:
+    if len(snaps) < 2:
         return []
 
-    base_patrimonio = snaps[0].patrimonio or 1
+    # ── Rentabilidade real da carteira (P&L / custo) ──────────────────
+    # Usa (patrimonio - custo_total) / custo_total do primeiro snap para medir
+    # retorno real, descontando aportes/retiradas.
+    first_snap = snaps[0]
+    base_pl = (first_snap.patrimonio - (first_snap.custo_total or first_snap.patrimonio))
+
+    # ── Benchmarks: IBOV e S&P500 via yfinance (cache 15min) ────────
+    date_start = first_snap.date
+    date_end = snaps[-1].date + timedelta(days=1)
+
+    from app.data.cache import cache as _evo_cache
+    _bench_key = f"evolucao:bench:{date_start}:{date_end}"
+    _bench_cached = _evo_cache.get(_bench_key)
+
+    ibov_map: dict = {}
+    sp500_map: dict = {}
+    if _bench_cached:
+        ibov_map, sp500_map = _bench_cached
+    else:
+        try:
+            bench = yf.download(
+                ["^BVSP", "^GSPC"],
+                start=date_start.isoformat(),
+                end=date_end.isoformat(),
+                auto_adjust=True,
+                progress=False,
+            )
+            if not bench.empty:
+                closes = bench["Close"] if "Close" in bench.columns else bench
+                for idx, row in closes.iterrows():
+                    d = idx.date() if hasattr(idx, 'date') else idx
+                    bvsp = row.get("^BVSP") if hasattr(row, 'get') else None
+                    gspc = row.get("^GSPC") if hasattr(row, 'get') else None
+                    if bvsp is not None and not (isinstance(bvsp, float) and bvsp != bvsp):
+                        ibov_map[d] = float(bvsp)
+                    if gspc is not None and not (isinstance(gspc, float) and gspc != gspc):
+                        sp500_map[d] = float(gspc)
+        except Exception as e:
+            logger.warning("Evolucao: falha ao buscar benchmarks: %s", e)
+        _evo_cache.set(_bench_key, (ibov_map, sp500_map), ttl=900)
+
+    ibov_base = ibov_map.get(date_start)
+    if ibov_base is None and ibov_map:
+        ibov_base = next(iter(ibov_map.values()))
+    sp500_base = sp500_map.get(date_start)
+    if sp500_base is None and sp500_map:
+        sp500_base = next(iter(sp500_map.values()))
+
+    # ── Montar série ──────────────────────────────────────────────────
     result = []
     for s in snaps:
-        pl_pct = ((s.patrimonio / base_patrimonio) - 1) * 100 if base_patrimonio > 0 else 0
+        custo = s.custo_total or s.patrimonio
+        # Retorno = ganho atual / custo no primeiro snap
+        # Para ser comparável, normalizamos: (ganho_atual - ganho_base) / custo_base
+        if first_snap.custo_total and first_snap.custo_total > 0:
+            carteira_pct = ((s.patrimonio - custo) / first_snap.custo_total) * 100 - \
+                           (base_pl / first_snap.custo_total) * 100
+        else:
+            carteira_pct = 0.0
+
+        # CDI
+        cdi_pct = s.cdi_acumulado or 0.0
+
+        # IBOV
+        ibov_pct = None
+        ibov_val = ibov_map.get(s.date)
+        if ibov_val and ibov_base and ibov_base > 0:
+            ibov_pct = round(((ibov_val / ibov_base) - 1) * 100, 2)
+
+        # S&P500
+        sp500_pct = None
+        sp500_val = sp500_map.get(s.date)
+        if sp500_val and sp500_base and sp500_base > 0:
+            sp500_pct = round(((sp500_val / sp500_base) - 1) * 100, 2)
+
         result.append({
             "date": s.date.isoformat(),
-            "patrimonio": round(s.patrimonio, 2),
-            "pl_pct": round(pl_pct, 2),
-            "cdi_pct": round(s.cdi_acumulado or 0, 2),
+            "carteira_pct": round(carteira_pct, 2),
+            "cdi_pct": round(cdi_pct, 2),
+            "ibov_pct": ibov_pct,
+            "sp500_pct": sp500_pct,
         })
+
     return result
+
+
+class AtualizarRacional(BaseModel):
+    racional: str
+
+
+@router.patch("/racional")
+def atualizar_racional(body: AtualizarRacional, user_id: Optional[int] = Depends(get_user_id), db: Session = Depends(get_db)):
+    """Atualiza o racional geral da carteira."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+    portfolio.racional = body.racional.strip()
+    db.commit()
+    return {"mensagem": "Racional atualizado.", "racional": portfolio.racional}
 
 
 class AtualizarAlocacao(BaseModel):
@@ -858,6 +973,475 @@ def configurar_rebalance(
             "caixa": portfolio.alvo_caixa,
         },
     }
+
+
+# ─── Aportes Inteligentes (DCA Adaptativo) ───────────────────────────────────
+
+@router.get("/aporte-resumo")
+def get_aporte_resumo(
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Retorna resumo leve dos módulos para a tela de aportes.
+    Sem chamar montar_contexto — apenas DB queries rápidas.
+    """
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    aporte_mensal = getattr(user, "aporte_mensal", None) or 0
+
+    # Posições ativas — query leve
+    posicoes = db.query(Position).filter(
+        Position.portfolio_id == portfolio.id,
+        Position.ativa == True,
+    ).all()
+
+    patrimonio = portfolio.patrimonio_total or 0
+
+    # Alocação real por módulo (cálculo local, sem APIs)
+    modulos_keys = ["etfs", "fiis", "renda_fixa", "momentum", "wheel", "alpha", "dividendos", "teses", "caixa"]
+    real_por_modulo: dict[str, float] = {m: 0.0 for m in modulos_keys}
+    posicoes_por_modulo: dict[str, int] = {m: 0 for m in modulos_keys}
+    valor_por_modulo: dict[str, float] = {m: 0.0 for m in modulos_keys}
+
+    for p in posicoes:
+        mod = (p.modulo or "caixa").lower()
+        if mod not in real_por_modulo:
+            mod = "caixa"
+        val = p.valor_atual or p.valor_investido or 0
+        valor_por_modulo[mod] += val
+        posicoes_por_modulo[mod] += 1
+
+    if patrimonio > 0:
+        for m in modulos_keys:
+            real_por_modulo[m] = round((valor_por_modulo[m] / patrimonio) * 100, 1)
+
+    # Alvo por módulo
+    alvo_por_modulo = {
+        "etfs": portfolio.alvo_etfs or 0,
+        "fiis": portfolio.alvo_fiis or 0,
+        "renda_fixa": portfolio.alvo_renda_fixa or 0,
+        "momentum": portfolio.alvo_momentum or 0,
+        "wheel": portfolio.alvo_wheel or 0,
+        "alpha": portfolio.alvo_alpha or 0,
+        "dividendos": portfolio.alvo_dividendos or 0,
+        "teses": portfolio.alvo_teses or 0,
+        "caixa": portfolio.alvo_caixa or 0,
+    }
+
+    # Regime do cache ou do portfolio (leve)
+    from app.data.cache import cache as _regime_cache
+    regime = _resolve_regime_str(_regime_cache, portfolio)
+
+    modulos = []
+    for m in modulos_keys:
+        alvo = alvo_por_modulo[m]
+        real = real_por_modulo[m]
+        desvio = round(real - alvo, 1)
+        modulos.append({
+            "modulo": m,
+            "alvo_pct": alvo,
+            "real_pct": real,
+            "desvio_pp": desvio,
+            "valor_atual": round(valor_por_modulo[m], 2),
+            "posicoes": posicoes_por_modulo[m],
+        })
+
+    return {
+        "aporte_mensal": aporte_mensal,
+        "patrimonio_atual": round(patrimonio, 2),
+        "regime": regime,
+        "modulos": modulos,
+        "alocacao_configurada": sum(alvo_por_modulo.values()) > 0,
+    }
+
+
+# ─── Helper: regime string seguro ─────────────────────────────────────────────
+
+def _resolve_regime_str(cache_store=None, portfolio=None) -> str:
+    """Extrai regime como string limpa (BULL|MISTO|BEAR)."""
+    regime_raw = None
+    if cache_store:
+        cached = cache_store.get("market:regime")
+        if cached:
+            if isinstance(cached, dict):
+                regime_raw = cached.get("regime", "MISTO")
+            elif hasattr(cached, "regime"):
+                regime_raw = cached.regime
+    if regime_raw is None and portfolio:
+        regime_raw = getattr(portfolio, "regime", None)
+    if regime_raw is None:
+        return "MISTO"
+    if hasattr(regime_raw, "value"):
+        return regime_raw.value
+    s = str(regime_raw)
+    # Handle 'Regime.MISTO' → 'MISTO'
+    if "." in s:
+        s = s.rsplit(".", 1)[-1]
+    return s if s in ("BULL", "MISTO", "BEAR") else "MISTO"
+
+
+MODULO_LABELS_MAP = {
+    "etfs": "ETFs", "fiis": "FIIs", "renda_fixa": "Renda Fixa",
+    "momentum": "Momentum", "wheel": "Wheel", "alpha": "Alpha",
+    "dividendos": "Dividendos", "teses": "Teses", "caixa": "Caixa",
+}
+
+MODULOS_VALIDOS = ["etfs", "fiis", "renda_fixa", "momentum", "wheel", "alpha", "dividendos", "teses", "caixa"]
+
+
+def _analisar_posicao_modulo(p: "Position", pct_modulo: float, peso_ideal: float) -> dict:
+    """Gera sugestão e prioridade para uma posição dentro do módulo.
+
+    Prioridade é PURAMENTE baseada no gap (peso_ideal - pct_real) usando
+    thresholds relativos.  Sinais de P&L / stop / upside são informativos.
+    """
+    signals: list[str] = []
+    pl_pct = p.pl_percentual or 0
+
+    # ── Prioridade por gap relativo ──────────────────────────────────
+    ratio = (pct_modulo / peso_ideal) if peso_ideal > 0 else 1.0
+    gap_pp = peso_ideal - pct_modulo  # positivo = sub-representado
+
+    if ratio < 0.60:
+        prioridade = "ALTA"
+        signals.append(f"Muito subrepresentado ({pct_modulo:.1f}% vs alvo {peso_ideal:.1f}%)")
+    elif ratio < 0.85:
+        prioridade = "MEDIA"
+        signals.append(f"Subrepresentado ({pct_modulo:.1f}% vs alvo {peso_ideal:.1f}%)")
+    elif ratio > 1.50:
+        prioridade = "BAIXA"
+        signals.append(f"Sobrerepresentado ({pct_modulo:.1f}% vs alvo {peso_ideal:.1f}%)")
+    else:
+        prioridade = "NEUTRA"
+        signals.append(f"Alinhado ({pct_modulo:.1f}% vs alvo {peso_ideal:.1f}%)")
+
+    # ── Sinais informativos (NÃO alteram prioridade) ────────────────
+    if pl_pct < -15:
+        signals.append(f"Queda expressiva ({pl_pct:+.1f}%) — oportunidade se tese mantida")
+    elif pl_pct < -5:
+        signals.append(f"Abaixo do PM ({pl_pct:+.1f}%)")
+    elif pl_pct > 20:
+        signals.append(f"Lucro expressivo ({pl_pct:+.1f}%)")
+
+    if p.stop_loss and p.preco_atual and p.preco_atual > 0:
+        dist_stop = ((p.preco_atual - p.stop_loss) / p.preco_atual) * 100
+        if 0 < dist_stop < 5:
+            signals.append(f"Próximo do stop loss ({dist_stop:.1f}%)")
+
+    if p.alvo_1 and p.preco_atual and p.preco_atual > 0:
+        upside = ((p.alvo_1 - p.preco_atual) / p.preco_atual) * 100
+        if upside > 20:
+            signals.append(f"Upside {upside:.0f}% para alvo")
+
+    if not signals:
+        signals.append("Posição estável")
+
+    return {"texto": ". ".join(signals), "prioridade": prioridade, "gap_pp": round(gap_pp, 2)}
+
+
+@router.post("/analisar-modulo")
+def analisar_modulo(
+    body: dict,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Analisa um módulo específico com DCA Inteligente:
+      Camada 1 — módulo: quanto aportar (gap vs alvo)
+      Camada 2 — posição: R$ por ativo (gap peso_alvo)
+      Camada 3 — timing: RSI(14) + MA50 ajusta montante por ativo
+    """
+    from app.cerebro.timing_dca import calcular_timing_dca
+    from app.core.regime import get_acoes_permitidas_regime, Regime
+
+    modulo = (body.get("modulo") or "").lower().strip()
+    if modulo not in MODULOS_VALIDOS:
+        raise HTTPException(status_code=400, detail=f"Módulo inválido: {modulo}")
+
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    aporte_mensal = getattr(user, "aporte_mensal", None) or 0
+    patrimonio = portfolio.patrimonio_total or 0
+    alvo_pct = getattr(portfolio, f"alvo_{modulo}", 0) or 0
+
+    # ── Regime ────────────────────────────────────────────────────────
+    regime_str = _resolve_regime_str(portfolio=portfolio)
+    regime_enum = Regime(regime_str) if regime_str in ("BULL", "MISTO", "BEAR") else Regime.MISTO
+    acoes_regime = get_acoes_permitidas_regime(regime_enum)
+    caixa_pct_regime = acoes_regime.get("caixa_pct_aporte", 0)
+
+    # Módulos bloqueados pelo regime
+    bloqueado = False
+    motivo_bloqueio = ""
+    if regime_str == "BEAR" and modulo in ("momentum", "wheel", "alpha"):
+        bloqueado = True
+        motivo_bloqueio = f"Módulo {modulo} bloqueado no regime BEAR"
+    elif regime_str == "MISTO" and modulo == "momentum":
+        if not acoes_regime.get("momentum_novas_entradas", True):
+            bloqueado = True
+            motivo_bloqueio = "Novas entradas em Momentum pausadas no regime MISTO"
+
+    # Posições do módulo
+    mod_pos = db.query(Position).filter(
+        Position.portfolio_id == portfolio.id,
+        Position.ativa == True,
+        Position.modulo == modulo,
+    ).all()
+
+    total_modulo = sum((p.valor_atual or p.valor_investido or 0) for p in mod_pos)
+    real_pct = round((total_modulo / patrimonio * 100) if patrimonio > 0 else 0, 1)
+    desvio_pp = round(real_pct - alvo_pct, 1)
+
+    # ── Camada 1: Quanto aportar no módulo ────────────────────────────
+    investivel_pct = (100 - caixa_pct_regime) / 100  # ex: BEAR → 50%
+    aporte_investivel = aporte_mensal * investivel_pct
+
+    if bloqueado:
+        valor_sugerido = 0.0
+        status = "BLOQUEADO"
+    elif desvio_pp < 0:
+        valor_falta = patrimonio * (alvo_pct - real_pct) / 100
+        valor_sugerido = round(min(max(valor_falta, 0), aporte_investivel), 2)
+        status = "ABAIXO"
+    elif desvio_pp > 2:
+        valor_sugerido = 0.0
+        status = "ACIMA"
+    else:
+        valor_sugerido = round(aporte_investivel * alvo_pct / 100, 2) if alvo_pct > 0 else 0
+        status = "ALINHADO"
+
+    # ── Pesos ideais intra-módulo ─────────────────────────────────────
+    n = max(len(mod_pos), 1)
+    posicoes_com_alvo = [p for p in mod_pos if getattr(p, 'peso_alvo', None) and p.peso_alvo > 0]
+    total_alvo_definido = sum(p.peso_alvo for p in posicoes_com_alvo)
+    posicoes_sem_alvo = [p for p in mod_pos if p not in posicoes_com_alvo]
+    restante_pct = max(0, 100.0 - total_alvo_definido)
+
+    def _peso_ideal_para(p):
+        if getattr(p, 'peso_alvo', None) and p.peso_alvo > 0:
+            return p.peso_alvo
+        if posicoes_sem_alvo:
+            return restante_pct / len(posicoes_sem_alvo)
+        return 100.0 / n
+
+    # ── Camada 2 + 3: Gap score + timing por posição ─────────────────
+    posicoes_data = []
+    gap_scores = []  # (index, gap_score) para distribuir R$
+
+    for idx, p in enumerate(mod_pos):
+        val = p.valor_atual or p.valor_investido or 0
+        pct_modulo = (val / total_modulo * 100) if total_modulo > 0 else 0
+        peso_ideal = _peso_ideal_para(p)
+        analise = _analisar_posicao_modulo(p, pct_modulo, peso_ideal)
+
+        # Gap score: quanto falta vs alvo (positivo = precisa de aporte)
+        gap = max(0, peso_ideal - pct_modulo)
+        gap_scores.append((idx, gap))
+
+        # Timing (RSI + MA50) — só para ativos de renda variável
+        timing = {"rsi14": None, "ma50": None, "abaixo_ma50": False,
+                  "multiplicador": 1.0, "sinal": "N/A — renda fixa"}
+        if p.tipo not in ("RF", "CAIXA", "DIVIDENDO") and not bloqueado:
+            timing = calcular_timing_dca(p.ticker)
+
+        posicoes_data.append({
+            "id": p.id,
+            "ticker": p.ticker,
+            "tipo": p.tipo,
+            "quantidade": round(p.quantidade or 0, 4),
+            "preco_medio": round(p.preco_medio or 0, 2),
+            "preco_atual": round(p.preco_atual or 0, 2),
+            "valor_atual": round(val, 2),
+            "pl_reais": round(p.pl_reais or 0, 2),
+            "pl_pct": round(p.pl_percentual or 0, 1),
+            "pct_do_modulo": round(pct_modulo, 1),
+            "peso_ideal_pct": round(peso_ideal, 1),
+            "peso_alvo": p.peso_alvo,
+            "sugestao": analise["texto"],
+            "prioridade": analise["prioridade"],
+            # Timing DCA (camada 3)
+            "rsi14": timing.get("rsi14"),
+            "ma50": timing.get("ma50"),
+            "abaixo_ma50": timing.get("abaixo_ma50", False),
+            "multiplicador": timing.get("multiplicador", 1.0),
+            "sinal_timing": timing.get("sinal", ""),
+            # Placeholders — preenchidos abaixo
+            "valor_sugerido": 0.0,
+            "qtd_sugerida": 0.0,
+        })
+
+    # ── Distribuir R$ do módulo entre posições ────────────────────────
+    total_gap = sum(g for _, g in gap_scores)
+    caixa_tatico = 0.0
+
+    if total_gap > 0 and valor_sugerido > 0:
+        for idx, gap in gap_scores:
+            pct_aporte = gap / total_gap
+            valor_base = valor_sugerido * pct_aporte
+            mult = posicoes_data[idx]["multiplicador"]
+            valor_ajustado = round(valor_base * mult, 2)
+
+            # Excesso (mult < 1) vai para caixa tático
+            if mult < 1.0:
+                caixa_tatico += round(valor_base - valor_ajustado, 2)
+
+            posicoes_data[idx]["valor_sugerido"] = valor_ajustado
+            preco = posicoes_data[idx]["preco_atual"]
+            if preco and preco > 0:
+                posicoes_data[idx]["qtd_sugerida"] = round(valor_ajustado / preco, 2)
+
+    # Ordenar: prioridade ALTA primeiro
+    prio_order = {"ALTA": 0, "MEDIA": 1, "BAIXA": 2, "NEUTRA": 3}
+    posicoes_data.sort(key=lambda x: (prio_order.get(x["prioridade"], 9), -x["valor_sugerido"]))
+
+    # ── Texto de análise ──────────────────────────────────────────────
+    label = MODULO_LABELS_MAP.get(modulo, modulo)
+    if bloqueado:
+        analise_txt = f"{label} — {motivo_bloqueio}. Aportes direcionados para outros módulos."
+    elif status == "ABAIXO":
+        analise_txt = (f"{label} está {abs(desvio_pp):.1f}pp abaixo do alvo "
+                       f"({real_pct:.1f}% vs {alvo_pct:.1f}%). "
+                       f"Sugerido aportar R${valor_sugerido:,.0f} (regime {regime_str}, "
+                       f"{investivel_pct*100:.0f}% investível).")
+    elif status == "ACIMA":
+        analise_txt = (f"{label} está {desvio_pp:.1f}pp acima do alvo "
+                       f"({real_pct:.1f}% vs {alvo_pct:.1f}%). "
+                       f"Não precisa de aporte para rebalancear.")
+    else:
+        analise_txt = (f"{label} alinhado com o alvo ({real_pct:.1f}% vs {alvo_pct:.1f}%). "
+                       f"Aporte conforme interesse.")
+
+    if caixa_tatico > 0:
+        analise_txt += f" Caixa tático: R${caixa_tatico:,.0f} (timing desfavorável em alguns ativos)."
+
+    return {
+        "modulo": modulo,
+        "modulo_label": label,
+        "alvo_pct": round(alvo_pct, 1),
+        "real_pct": real_pct,
+        "desvio_pp": desvio_pp,
+        "valor_atual_modulo": round(total_modulo, 2),
+        "patrimonio_total": round(patrimonio, 2),
+        "aporte_mensal": aporte_mensal,
+        "valor_sugerido": valor_sugerido,
+        "status": status,
+        "regime": regime_str,
+        "caixa_tatico": round(caixa_tatico, 2),
+        "analise": analise_txt,
+        "posicoes": posicoes_data,
+    }
+
+
+@router.post("/sugerir-aporte")
+async def sugerir_aporte(
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Calcula a distribuição inteligente do aporte mensal.
+
+    Combina:
+      - Rebalancing DCA (direciona para módulos abaixo do alvo)
+      - Regime-Adaptive (respeita BULL/MISTO/BEAR)
+      - Kill Switch / Circuit Breaker (pausa em crise)
+      - Projeção de patrimônio com e sem DCA
+    """
+    from app.cerebro.aporte_inteligente import calcular_aporte_inteligente, projetar_patrimonio_dca
+    from app.cerebro.contexto import montar as montar_contexto
+
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    portfolio = get_portfolio_ativo(user, db)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfólio não encontrado")
+
+    aporte_mensal = getattr(user, "aporte_mensal", None) or 0
+
+    # Montar contexto completo (regime, alocações, kill switch, etc.)
+    try:
+        ctx = await montar_contexto(db=db, user_id=user.id, portfolio_id=portfolio.id)
+    except Exception as e:
+        logger.warning("sugerir-aporte: falha ao montar contexto — %s", e)
+        raise HTTPException(status_code=500, detail="Erro ao montar contexto")
+
+    # Kill switch
+    ks_ativo = False
+    ks_nivel = 0
+    if ctx.kill_switch and ctx.kill_switch.ativo:
+        ks_ativo = True
+        ks_nivel = getattr(ctx.kill_switch, "nivel", 0)
+
+    # Sanitizar regime (pode vir como 'Regime.MISTO' do enum)
+    regime_str = ctx.regime
+    if regime_str and "." in str(regime_str):
+        regime_str = str(regime_str).rsplit(".", 1)[-1]
+    if regime_str not in ("BULL", "MISTO", "BEAR"):
+        regime_str = "MISTO"
+
+    resultado = calcular_aporte_inteligente(
+        aporte_mensal=aporte_mensal,
+        alocacao_real=ctx.alocacao_real,
+        alocacao_alvo=ctx.alocacao_alvo,
+        regime=regime_str,
+        kill_switch_ativo=ks_ativo,
+        kill_switch_nivel=ks_nivel,
+        cb_modifier=ctx.cb_modifier,
+        guardrails=ctx.guardrails,
+    )
+
+    # Projeção de patrimônio (5 anos)
+    projecao = projetar_patrimonio_dca(
+        patrimonio_atual=ctx.patrimonio_total,
+        aporte_mensal=aporte_mensal,
+        taxa_anual_pct=12.0,
+        meses=60,
+    )
+
+    return {
+        **resultado.to_dict(),
+        "patrimonio_atual": round(ctx.patrimonio_total, 2),
+        "aporte_mensal": aporte_mensal,
+        "projecao": projecao,
+    }
+
+
+@router.patch("/aporte-mensal")
+def atualizar_aporte_mensal(
+    body: dict,
+    user_id: Optional[int] = Depends(get_user_id),
+    db: Session = Depends(get_db),
+):
+    """Atualiza o valor do aporte mensal do usuário."""
+    user = (db.query(User).filter(User.id == user_id).first() if user_id
+            else db.query(User).first())
+    if not user:
+        raise HTTPException(status_code=400, detail="Usuário não encontrado")
+
+    valor = body.get("aporte_mensal")
+    if valor is None or not isinstance(valor, (int, float)) or valor < 0:
+        raise HTTPException(status_code=400, detail="Valor de aporte inválido")
+
+    user.aporte_mensal = float(valor)
+    db.commit()
+    return {"ok": True, "aporte_mensal": user.aporte_mensal}
 
 
 # ─── AI-suggested allocation ─────────────────────────────────────────────────
@@ -1209,6 +1793,7 @@ def get_alocacao_alvo(
         "dividendos": getattr(portfolio, "alvo_dividendos", 0.0) or 0.0,
         "teses": getattr(portfolio, "alvo_teses", 0.0) or 0.0,
         "caixa": portfolio.alvo_caixa or 0.0,
+        "racional": getattr(portfolio, "racional", "") or "",
     }
 
 

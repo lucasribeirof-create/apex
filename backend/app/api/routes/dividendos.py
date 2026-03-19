@@ -92,14 +92,33 @@ def _div_effective_date(d: dict) -> Optional[datetime]:
     return _parse_date(d.get("payment_date")) or _parse_date(d.get("ex_date"))
 
 
-def _divs_12m(divs: list[dict], hoje: datetime) -> list[dict]:
-    """Filtra dividendos dos últimos 12 meses."""
+def _divs_12m(divs: list[dict], hoje: datetime, data_entrada: datetime = None) -> list[dict]:
+    """Filtra dividendos dos últimos 12 meses, apenas após data_entrada da posição."""
     cutoff = hoje - timedelta(days=365)
+    entrada = data_entrada.replace(tzinfo=None) if data_entrada else None
     result = []
     for d in divs:
         dt = _div_effective_date(d)
-        if dt and dt > cutoff:
-            result.append({**d, "_dt": dt})
+        if not dt or dt <= cutoff:
+            continue
+        if entrada and dt < entrada:
+            continue
+        result.append({**d, "_dt": dt})
+    result.sort(key=lambda x: x["_dt"])
+    return result
+
+
+def _divs_after_entry(divs: list[dict], data_entrada: datetime = None) -> list[dict]:
+    """Filtra todos os dividendos pagos após data_entrada (para histórico)."""
+    entrada = data_entrada.replace(tzinfo=None) if data_entrada else None
+    result = []
+    for d in divs:
+        dt = _div_effective_date(d)
+        if not dt:
+            continue
+        if entrada and dt < entrada:
+            continue
+        result.append({**d, "_dt": dt})
     result.sort(key=lambda x: x["_dt"])
     return result
 
@@ -145,7 +164,7 @@ async def get_dividendos_resumo(user_id: Optional[int] = Depends(get_user_id), d
 
         for item in data:
             pos = item["pos"]
-            recentes = _divs_12m(item["divs"], hoje)
+            recentes = _divs_12m(item["divs"], hoje, pos.data_entrada)
 
             rates = [d["rate"] for d in recentes]
             if rates:
@@ -197,7 +216,7 @@ async def get_dividendos_ativos(user_id: Optional[int] = Depends(get_user_id), d
         for item in data:
             pos = item["pos"]
             sector = item["sector"]
-            recentes = _divs_12m(item["divs"], hoje)
+            recentes = _divs_12m(item["divs"], hoje, pos.data_entrada)
 
             if not recentes:
                 continue
@@ -263,10 +282,9 @@ async def get_dividendos_historico(user_id: Optional[int] = Depends(get_user_id)
 
         for item in data:
             pos = item["pos"]
-            for d in item["divs"]:
-                dt = _div_effective_date(d)
-                if not dt:
-                    continue
+            divs_validos = _divs_after_entry(item["divs"], pos.data_entrada)
+            for d in divs_validos:
+                dt = d["_dt"]
                 rate = d.get("rate", 0)
                 valor = rate * (pos.quantidade or 0)
                 chave_mes = dt.strftime("%Y-%m")
@@ -321,7 +339,7 @@ async def get_dividendos_calendario(user_id: Optional[int] = Depends(get_user_id
 
         for item in data:
             pos = item["pos"]
-            recentes = _divs_12m(item["divs"], hoje)
+            recentes = _divs_12m(item["divs"], hoje, pos.data_entrada)
 
             if not recentes:
                 continue

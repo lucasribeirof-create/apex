@@ -197,6 +197,6 @@ def get_acoes_permitidas_regime(regime: str) -> dict:
             "momentum_novas_entradas": False,
             "wheel_renovacao": False,
             "etfs_aportes": False,
-            "caixa_pct_aporte": 100,
-            "descricao": "Regime BEAR. 100% dos aportes em caixa e renda fixa. Aguardando melhora.",
+            "caixa_pct_aporte": 50,
+            "descricao": "Regime BEAR. 50% dos aportes em caixa/RF. Restante com timing DCA (RSI+MA50).",
         }

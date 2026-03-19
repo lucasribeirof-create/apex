@@ -71,8 +71,7 @@ export default function DashboardPage() {
   const [retornoPeriodo, setRetornoPeriodo] = useState<string>('total')
   const [retornoData, setRetornoData] = useState<any>(null)
   const [evolucaoData, setEvolucaoData] = useState<any[]>([])
-  const [correlacaoData, setCorrelacaoData] = useState<any>(null)
-  const [v3Loading, setV3Loading] = useState({ evolucao: true, correlacao: true })
+  const [v3Loading, setV3Loading] = useState({ evolucao: true })
   const [moversPeriodo, setMoversPeriodo] = useState<string>('dia')
   const [moversApiData, setMoversApiData] = useState<any[]>([])
   const [moversApiLoading, setMoversApiLoading] = useState(false)
@@ -81,29 +80,32 @@ export default function DashboardPage() {
     setLoading(true)
     setError(null)
     setV2Loading({ macro: true, teses: true, perf: true, divs: true })
-    try {
-      const dashRes = await api.get('/dashboard/')
-      setDash(dashRes.data)
+    setV3Loading({ evolucao: true })
 
-      // Regime — não bloqueia o dashboard se falhar
-      api.get('/market/regime').then(r => setRegime(r.data)).catch(e => console.warn('Regime:', e))
+    // Dispara TODAS as chamadas em paralelo — nenhuma bloqueia as outras
+    const dashPromise = api.get('/dashboard/')
+      .then(r => { setDash(r.data); return r.data })
+      .catch((err: any) => {
+        console.error('Dashboard load error:', err)
+        setError(err?.response?.data?.detail || 'Erro ao carregar dashboard')
+        return null
+      })
 
-      // V2 endpoints — load in background
-      api.get('/dashboard/macro').then(r => setMacroData(r.data)).catch(e => console.warn('Dashboard macro:', e)).finally(() => setV2Loading(s => ({ ...s, macro: false })))
-      api.get('/dashboard/teses').then(r => setTesesData(r.data)).catch(e => console.warn('Dashboard teses:', e)).finally(() => setV2Loading(s => ({ ...s, teses: false })))
-      api.get('/dashboard/performance').then(r => setPerfData(r.data)).catch(e => console.warn('Dashboard perf:', e)).finally(() => setV2Loading(s => ({ ...s, perf: false })))
-      api.get('/dashboard/dividendos').then(r => setDividendosData(r.data)).catch(e => console.warn('Dashboard divs:', e)).finally(() => setV2Loading(s => ({ ...s, divs: false })))
+    // Regime
+    api.get('/market/regime').then(r => setRegime(r.data)).catch(e => console.warn('Regime:', e))
 
-      // V3 endpoints — analytics
-      setV3Loading({ evolucao: true, correlacao: true })
-      api.get('/portfolio/evolucao').then(r => { if (Array.isArray(r.data) && r.data.length >= 2) setEvolucaoData(r.data) }).catch(() => {}).finally(() => setV3Loading(s => ({ ...s, evolucao: false })))
-      api.get('/dashboard/correlacao').then(r => setCorrelacaoData(r.data)).catch(() => {}).finally(() => setV3Loading(s => ({ ...s, correlacao: false })))
-    } catch (err: any) {
-      console.error('Dashboard load error:', err)
-      setError(err?.response?.data?.detail || 'Erro ao carregar dashboard')
-    } finally {
-      setLoading(false)
-    }
+    // V2 endpoints — paralelos
+    api.get('/dashboard/macro').then(r => setMacroData(r.data)).catch(e => console.warn('Dashboard macro:', e)).finally(() => setV2Loading(s => ({ ...s, macro: false })))
+    api.get('/dashboard/teses').then(r => setTesesData(r.data)).catch(e => console.warn('Dashboard teses:', e)).finally(() => setV2Loading(s => ({ ...s, teses: false })))
+    api.get('/dashboard/performance').then(r => setPerfData(r.data)).catch(e => console.warn('Dashboard perf:', e)).finally(() => setV2Loading(s => ({ ...s, perf: false })))
+    api.get('/dashboard/dividendos').then(r => setDividendosData(r.data)).catch(e => console.warn('Dashboard divs:', e)).finally(() => setV2Loading(s => ({ ...s, divs: false })))
+
+    // V3 endpoints — paralelos
+    api.get('/portfolio/evolucao').then(r => { if (Array.isArray(r.data) && r.data.length >= 2) setEvolucaoData(r.data) }).catch(() => {}).finally(() => setV3Loading(s => ({ ...s, evolucao: false })))
+
+    // O loading principal termina quando /dashboard/ retornar
+    await dashPromise
+    setLoading(false)
   }
 
   useEffect(() => { loadDashboard() }, [])
@@ -629,46 +631,6 @@ export default function DashboardPage() {
               <Line type="monotone" dataKey="cdi_pct" name="CDI" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="5 5" dot={false} />
             </LineChart>
           </ResponsiveContainer>
-        </motion.div>
-      )}
-
-      {/* Risk Metrics (correlação) */}
-      {!v3Loading.correlacao && correlacaoData && (
-        <motion.div
-          className="apex-card p-5"
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.37 }}
-        >
-          <div className="flex items-center gap-2 mb-4">
-            <AlertTriangle size={16} style={{ color: '#00B0FF' }} />
-            <h3 className="text-sm font-medium" style={{ color: '#94a3b8' }}>RISCO & CORRELAÇÃO</h3>
-          </div>
-          {correlacaoData.alertas?.length > 0 && (
-            <div className="space-y-2 mb-3">
-              {correlacaoData.alertas.map((a: string, i: number) => (
-                <div key={i} className="flex items-start gap-2 text-xs rounded-lg p-2.5" style={{ background: 'rgba(255,215,64,0.06)', border: '1px solid rgba(255,215,64,0.12)' }}>
-                  <AlertTriangle size={12} className="mt-0.5 shrink-0" style={{ color: '#FFD740' }} />
-                  <span style={{ color: '#FFD740' }}>{a}</span>
-                </div>
-              ))}
-            </div>
-          )}
-          {correlacaoData.clusters?.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-xs font-mono uppercase tracking-wider" style={{ color: '#475569' }}>Clusters de Correlação</p>
-              {correlacaoData.clusters.map((c: any, i: number) => (
-                <div key={i} className="flex items-center gap-2 rounded-lg p-2.5" style={{ background: 'rgba(15,23,42,0.6)', border: '1px solid #1e293b' }}>
-                  <span className="text-xs" style={{ color: '#94a3b8' }}>
-                    {Array.isArray(c) ? c.join(', ') : (c.tickers?.join(', ') || JSON.stringify(c))}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-          {!correlacaoData.alertas?.length && !correlacaoData.clusters?.length && (
-            <p className="text-xs" style={{ color: '#475569' }}>Dados insuficientes para análise de correlação</p>
-          )}
         </motion.div>
       )}
 

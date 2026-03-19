@@ -76,6 +76,10 @@ def migrate_db():
         "ALTER TABLE portfolios ADD COLUMN corretora VARCHAR(100)",
         "ALTER TABLE positions ADD COLUMN source VARCHAR(30) DEFAULT 'manual'",
         "ALTER TABLE positions ADD COLUMN external_id VARCHAR(100)",
+        # Racional geral da carteira (texto livre)
+        "ALTER TABLE portfolios ADD COLUMN racional TEXT",
+        # Peso alvo individual dentro do módulo (alocação intra-módulo)
+        "ALTER TABLE positions ADD COLUMN peso_alvo FLOAT",
     ]
     with engine.connect() as conn:
         for sql in _migrations:

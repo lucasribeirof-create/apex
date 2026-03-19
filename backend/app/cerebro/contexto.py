@@ -100,6 +100,9 @@ class ContextoCerebro:
     alocacao_configurada: bool = False  # True quando o usuário configurou alvos (sum(alvo) > 0)
     modulos_ativos: list[str] = field(default_factory=list)  # módulos configurados com alvo > 0
 
+    # ── Racional geral da carteira ────────────────────────────────────────
+    racional_portfolio: str = ""  # texto livre do investidor sobre filosofia/racional
+
     # ─── Métodos de conveniência ──────────────────────────────────────────
 
     def tem_posicoes(self) -> bool:
@@ -280,6 +283,8 @@ async def montar(
             "moeda":           getattr(p, "moeda", "BRL") or "BRL",
             "preco_medio_usd": getattr(p, "preco_medio_usd", None),
             "apex_score":      getattr(p, "apex_score", None),
+            "classificacao":   getattr(p, "classificacao", None),
+            "justificativa_entrada": getattr(p, "justificativa_entrada", None),
             "created_at":      p.created_at.isoformat() if p.created_at else None,
             "data_entrada":    p.data_entrada.isoformat() if getattr(p, "data_entrada", None) else None,
         }
@@ -531,6 +536,7 @@ async def montar(
         alocacao_configurada=alocacao_configurada,
         gerado_em=datetime.now(timezone.utc).isoformat(),
         modulos_ativos=_get_modulos_ativos(portfolio),
+        racional_portfolio=getattr(portfolio, "racional", "") or "",
     )
 
 

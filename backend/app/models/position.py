@@ -36,6 +36,9 @@ class Position(Base):
     pl_percentual = Column(Float, nullable=True)  # P&L em %
     cotacao_atualizada_em = Column(DateTime, nullable=True)
 
+    # Peso alvo dentro do módulo (% desejado pelo usuário, ex: DIVD11 = 40% do módulo ETFs)
+    peso_alvo = Column(Float, nullable=True)  # 0-100, None = peso igual
+
     # Gestão de risco (para momentum e alpha)
     stop_loss = Column(Float, nullable=True)
     alvo_1 = Column(Float, nullable=True)

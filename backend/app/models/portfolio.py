@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON, Text
 from app.models.base import Base
 
 
@@ -37,6 +37,9 @@ class Portfolio(Base):
     alvo_dividendos = Column(Float, default=0.0)   # módulo Dividendos (ações pagadoras)
     alvo_teses = Column(Float, default=0.0)        # módulo Teses (buy & hold por convicção)
     alvo_caixa = Column(Float, default=0.0)
+
+    # Racional geral da carteira (texto livre do investidor)
+    racional = Column(Text, nullable=True)
 
     # Regime de mercado atual
     regime = Column(String(10), default="MISTO")          # BULL | MISTO | BEAR

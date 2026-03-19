@@ -551,6 +551,9 @@ async def _build_context(db: Session, user_id: Optional[int] = None):
         macro=ctx.macro,
         narrativa_macro=ctx.narrativa_macro,
         macro_flags=macro_flags,
+        alocacao_real=ctx.alocacao_real,
+        alocacao_alvo=ctx.alocacao_alvo,
+        racional=ctx.racional_portfolio,
     )
 
     return ctx, system

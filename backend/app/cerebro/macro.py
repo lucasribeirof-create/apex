@@ -419,59 +419,106 @@ def _calcular_mms_batch() -> dict:
     return resultado
 
 
+# ── Tickers para batch download (preço + variação) ──
+_BATCH_PRICE_ONLY = [
+    "^TNX", "^IRX", "^FVX", "^TYX", "^VIX", "DX-Y.NYB",
+    "CL=F", "BZ=F", "GC=F", "HG=F", "ZS=F", "ZC=F",
+    "JPY=X", "EURUSD=X", "CNY=X", "HYG", "LQD",
+]
+_BATCH_PRICE_AND_CHANGE = [
+    "^GSPC", "^DJI", "ES=F", "NQ=F", "BTC-USD", "^HSI", "EWZ",
+]
+_ALL_BATCH_TICKERS = _BATCH_PRICE_ONLY + _BATCH_PRICE_AND_CHANGE
+
+
+def _download_all_quotes_batch() -> dict:
+    """
+    Download de 2 dias para TODOS os tickers macro numa única chamada yfinance.
+    Retorna {symbol: {"price": float, "prev": float}} .
+    """
+    result: dict[str, dict] = {}
+    try:
+        df = yf.download(
+            _ALL_BATCH_TICKERS,
+            period="2d",
+            interval="1d",
+            progress=False,
+            group_by="ticker",
+            threads=True,
+        )
+        if df.empty:
+            return result
+        for sym in _ALL_BATCH_TICKERS:
+            try:
+                if len(_ALL_BATCH_TICKERS) == 1:
+                    sub = df
+                else:
+                    sub = df[sym] if sym in df.columns.get_level_values(0) else None
+                if sub is None or sub.empty:
+                    continue
+                closes = sub["Close"].dropna()
+                if closes.empty:
+                    continue
+                vals = closes.values.flatten()
+                last_price = float(vals[-1])
+                prev_close = float(vals[-2]) if len(vals) >= 2 else last_price
+                result[sym] = {"price": last_price, "prev": prev_close}
+            except Exception:
+                continue
+    except Exception as e:
+        logger.warning("_download_all_quotes_batch falhou: %s", e)
+    return result
+
+
 async def _coletar_global() -> dict:
-    """Coleta todos os dados globais em paralelo."""
+    """Coleta todos os dados globais com 1 batch download + MMs em paralelo."""
     key = "macro:engine:global"
     cached = cache.get(key)
     if cached:
         return cached
 
-    (
-        treasury, treasury_2y, treasury_5y, treasury_30y,
-        vix, dxy, wti, brent,
-        (sp500, sp500_var), (dow, dow_var), ouro,
-        (es_fut, es_fut_var), (nq_fut, nq_fut_var),
-        # Commodities
-        cobre, soja, milho,
-        # Moedas cross
-        usdjpy, eurusd, usdcny,
-        # Credit & Sentiment
-        hyg, lqd, (btc, btc_var),
-        # China & EWZ
-        (hang_seng, hang_seng_var), (ewz, ewz_var),
-        # MMs (sequencial em 1 thread)
-        mms,
-    ) = await asyncio.gather(
-        _get_yf_price("^TNX"),                  # Treasury 10Y
-        _get_yf_price("^IRX"),                  # Treasury 3M (proxy 2Y)
-        _get_yf_price("^FVX"),                  # Treasury 5Y
-        _get_yf_price("^TYX"),                  # Treasury 30Y
-        _get_yf_price("^VIX"),
-        _get_yf_price("DX-Y.NYB"),
-        _get_yf_price("CL=F"),                  # WTI
-        _get_yf_price("BZ=F"),                  # Brent
-        _get_yf_price_and_change("^GSPC"),       # S&P 500
-        _get_yf_price_and_change("^DJI"),        # Dow Jones
-        _get_yf_price("GC=F"),                  # Ouro
-        _get_yf_price_and_change("ES=F"),        # S&P Futures
-        _get_yf_price_and_change("NQ=F"),        # Nasdaq Futures
-        # Commodities
-        _get_yf_price("HG=F"),                  # Cobre
-        _get_yf_price("ZS=F"),                  # Soja
-        _get_yf_price("ZC=F"),                  # Milho
-        # Moedas cross
-        _get_yf_price("JPY=X"),                 # USD/JPY
-        _get_yf_price("EURUSD=X"),              # EUR/USD
-        _get_yf_price("CNY=X"),                 # USD/CNY
-        # Credit spreads & Sentiment
-        _get_yf_price("HYG"),                   # High Yield ETF
-        _get_yf_price("LQD"),                   # Investment Grade ETF
-        _get_yf_price_and_change("BTC-USD"),     # Bitcoin
-        # China & Brasil exterior
-        _get_yf_price_and_change("^HSI"),        # Hang Seng
-        _get_yf_price_and_change("EWZ"),         # iShares Brazil
+    # 2 tarefas: batch de preços (1 call yfinance) + MMs (3 downloads sequenciais)
+    quotes_raw, mms = await asyncio.gather(
+        _run_sync(_download_all_quotes_batch),
         _run_sync(_calcular_mms_batch),
     )
+
+    def _price(sym: str) -> Optional[float]:
+        q = quotes_raw.get(sym)
+        return q["price"] if q else None
+
+    def _price_and_change(sym: str) -> tuple[Optional[float], Optional[float]]:
+        q = quotes_raw.get(sym)
+        if not q:
+            return None, None
+        p, prev = q["price"], q["prev"]
+        change = ((p / prev) - 1) * 100 if prev else None
+        return p, change
+
+    treasury = _price("^TNX")
+    treasury_2y = _price("^IRX")
+    treasury_5y = _price("^FVX")
+    treasury_30y = _price("^TYX")
+    vix = _price("^VIX")
+    dxy = _price("DX-Y.NYB")
+    wti = _price("CL=F")
+    brent = _price("BZ=F")
+    ouro = _price("GC=F")
+    cobre = _price("HG=F")
+    soja = _price("ZS=F")
+    milho = _price("ZC=F")
+    usdjpy = _price("JPY=X")
+    eurusd = _price("EURUSD=X")
+    usdcny = _price("CNY=X")
+    hyg = _price("HYG")
+    lqd = _price("LQD")
+    sp500, sp500_var = _price_and_change("^GSPC")
+    dow, dow_var = _price_and_change("^DJI")
+    es_fut, es_fut_var = _price_and_change("ES=F")
+    nq_fut, nq_fut_var = _price_and_change("NQ=F")
+    btc, btc_var = _price_and_change("BTC-USD")
+    hang_seng, hang_seng_var = _price_and_change("^HSI")
+    ewz, ewz_var = _price_and_change("EWZ")
 
     dxy_mm50 = mms.get("dxy_mm50")
     sp500_mm50 = mms.get("sp500_mm50")

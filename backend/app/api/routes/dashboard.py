@@ -141,8 +141,9 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
         "caixa": portfolio.alvo_caixa,
     }
 
-    # ── Regime de mercado: calcula e persiste no portfolio ─────────────────────
-    # Usa o cache compartilhado com /market/regime (TTL 1h) para não reprocessar
+    # ── Regime de mercado: usa cache ou persiste valor existente ────────────────
+    # O cálculo pesado (montar_macro + ibov history) é delegado ao /market/regime.
+    # Aqui usamos cache ou fallback do portfolio para não duplicar o trabalho.
     _REGIME_KEY = "market:regime"
     _cached_regime = _market_cache.get(_REGIME_KEY)
     from app.core.regime import RegimeInfo as _RegimeInfo
@@ -154,23 +155,8 @@ async def get_dashboard(user_id: Optional[int] = Depends(get_user_id), db: Sessi
         else:
             regime_atual = str(_cached_regime.get("regime", "MISTO"))
     else:
-        # Tenta calcular com dados macro enriquecidos
-        macro_ctx = None
-        try:
-            from app.cerebro.macro import montar_macro
-            macro_ctx = await montar_macro()
-        except Exception:
-            pass
-
-        ibov_data = await get_history_global("^BVSP", period="1y", interval="1d")
-        if ibov_data and len(ibov_data) >= 50:
-            closes = [r["close"] for r in ibov_data if r.get("close") is not None]
-            _res = calcular_regime(closes, macro_context=macro_ctx)
-            regime_atual = _res.regime.value if hasattr(_res.regime, 'value') else str(_res.regime)
-            regime_info = _res
-            _market_cache.set(_REGIME_KEY, _res, ttl=3600)
-        else:
-            regime_atual = portfolio.regime or "MISTO"
+        # Fallback: usa o regime salvo no portfolio (será atualizado pelo /market/regime chamado em paralelo)
+        regime_atual = portfolio.regime or "MISTO"
 
     if portfolio.regime != regime_atual:
         portfolio.regime = regime_atual
@@ -626,12 +612,16 @@ async def get_proximos_dividendos(user_id: Optional[int] = Depends(get_user_id),
                 continue
 
             # Pegar os últimos 12 meses de dividendos para estimar próximos
+            # Só conta dividendos pagos APÓS a data de compra da posição
             recentes = []
             cutoff_12m = hoje - timedelta(days=365)
+            entrada_dt = pos.data_entrada.replace(tzinfo=None) if pos.data_entrada else None
             for d in divs:
                 try:
                     dt = datetime.fromisoformat(d.get("paymentDate", "2000-01-01T00:00:00.000Z").replace("Z", ""))
                     if dt > cutoff_12m:
+                        if entrada_dt and dt < entrada_dt:
+                            continue
                         recentes.append({"date": dt, "rate": d.get("rate", 0)})
                 except Exception:
                     pass

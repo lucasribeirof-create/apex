@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Settings, Trash2, AlertTriangle, X, Bot, CheckCircle, XCircle, Loader2, Zap, DollarSign, Target, ChevronDown } from 'lucide-react'
+import { Settings, Trash2, AlertTriangle, X, Bot, CheckCircle, XCircle, Loader2, Zap, DollarSign, Target, ChevronDown, FileText } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import { useNavigate } from 'react-router-dom'
 import api from '@/services/api'
@@ -90,6 +90,41 @@ export default function SettingsPage() {
   const [nameError, setNameError] = useState('')
   const [nameSuccess, setNameSuccess] = useState(false)
   useEffect(() => { setNameEdit(portfolioAtivo?.nome ?? '') }, [portfolioAtivo?.nome])
+
+  // ── Racional da Carteira ───────────────────────────────────────────────────
+  const [racional, setRacional] = useState('')
+  const [racionalOriginal, setRacionalOriginal] = useState('')
+  const [racionalSaving, setRacionalSaving] = useState(false)
+  const [racionalSuccess, setRacionalSuccess] = useState(false)
+  const [racionalError, setRacionalError] = useState('')
+
+  useEffect(() => {
+    if (!portfolioAtivo?.id) return
+    api.get(`/portfolio/${portfolioAtivo.id}/alocacao-alvo`)
+      .then(r => {
+        const rac = r.data?.racional ?? ''
+        setRacional(rac)
+        setRacionalOriginal(rac)
+      })
+      .catch(() => {})
+  }, [portfolioAtivo?.id])
+
+  const handleRacionalSave = async () => {
+    if (!portfolioAtivo?.id) return
+    setRacionalSaving(true)
+    setRacionalError('')
+    setRacionalSuccess(false)
+    try {
+      await api.patch('/portfolio/racional', { racional: racional })
+      setRacionalOriginal(racional)
+      setRacionalSuccess(true)
+      setTimeout(() => setRacionalSuccess(false), 2500)
+    } catch (e: any) {
+      setRacionalError(e?.response?.data?.detail ?? 'Erro ao salvar racional.')
+    } finally {
+      setRacionalSaving(false)
+    }
+  }
 
   // ── Alocação Alvo ──────────────────────────────────────────────────────────
   const MODULOS = [
@@ -347,6 +382,38 @@ export default function SettingsPage() {
           </button>
         </div>
         {nameError && <p className="text-sm mt-2" style={{ color: '#ef4444' }}>{nameError}</p>}
+      </div>
+
+      {/* Racional da Carteira */}
+      <div className="apex-card p-5 mb-8">
+        <div className="flex items-center gap-2 mb-3">
+          <FileText size={15} style={{ color: '#00E676' }} />
+          <p className="text-xs font-mono uppercase tracking-wider" style={{ color: '#64748b' }}>Racional da Carteira</p>
+        </div>
+        <p className="text-xs mb-3" style={{ color: '#64748b' }}>
+          Descreva o racional da sua carteira — filosofia geral e por que de cada módulo. O APEX Brain usa este texto para entender suas decisões. Escreva por seções (ex: &quot;ETFs: ...&quot;, &quot;FIIs: ...&quot;).
+        </p>
+        <textarea
+          value={racional}
+          onChange={(e) => { setRacional(e.target.value); setRacionalError('') }}
+          placeholder={"Filosofia geral: ...\nETFs: por que tenho ETFs, qual o objetivo...\nFIIs: renda passiva, quais critérios...\nTeses: convicções de longo prazo, por que cada uma...\nMomentum: trades táticos, critérios de entrada...\nRenda Fixa: proteção, % do CDI que busco..."}
+          rows={6}
+          className="w-full px-3 py-2 rounded-lg text-sm bg-slate-900/80 border border-slate-600 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-green-500/50 resize-y"
+          disabled={racionalSaving}
+        />
+        <div className="flex items-center gap-3 mt-3">
+          <button
+            onClick={handleRacionalSave}
+            disabled={racionalSaving || racional === racionalOriginal}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{ background: 'rgba(0,230,118,0.15)', color: '#00E676', border: '1px solid rgba(0,230,118,0.35)' }}
+          >
+            {racionalSaving ? <Loader2 size={14} className="animate-spin" /> : racionalSuccess ? <CheckCircle size={14} /> : null}
+            {racionalSaving ? 'Salvando...' : racionalSuccess ? 'Salvo' : 'Salvar'}
+          </button>
+          <span className="text-xs font-mono" style={{ color: '#475569' }}>{racional.length}/2000</span>
+        </div>
+        {racionalError && <p className="text-sm mt-2" style={{ color: '#ef4444' }}>{racionalError}</p>}
       </div>
 
       {/* Alocação Alvo */}
